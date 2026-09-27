@@ -1,0 +1,120 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum LeadType {
+  REGISTRY_SENDER
+  REGISTRY_CARRIER
+  EOI_STATE_MASTER
+  EOI_LOCAL_BDE
+  INVESTOR
+}
+
+enum LeadStatus {
+  NEW
+  CONTACTED
+  QUALIFIED
+  INVITED
+  ONBOARDED
+  REJECTED
+  DUPLICATE
+  UNDER_REVIEW
+  KYB_PENDING
+  EXECUTIVE_REVIEW
+  APPROVED
+  AGREEMENT_SENT
+  PROVISIONED
+}
+
+enum AdminRole {
+  SUPER_ADMIN
+}
+
+model AdminUser {
+  id        String    @id @default(uuid())
+  email     String    @unique
+  role      AdminRole @default(SUPER_ADMIN)
+  name      String?
+  active    Boolean   @default(true)
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  assignedLeads Lead[]
+  notes         LeadNote[]
+  events        LeadEvent[] @relation("EventActor")
+  otpChallenges OtpChallenge[]
+}
+
+model Lead {
+  id             String     @id @default(uuid())
+  type           LeadType
+  status         LeadStatus @default(NEW)
+  email          String
+  phone          String?
+  companyName    String?
+  abn            String?
+  acn            String?
+  state          String?
+  territory      String?
+  payload        Json
+  priority       Boolean    @default(false)
+  assigneeId     String?
+  assignee       AdminUser? @relation(fields: [assigneeId], references: [id])
+  source         String?
+  ipHash         String?
+  locale         String?
+  promotedUserId String?
+  createdAt      DateTime   @default(now())
+  updatedAt      DateTime   @updatedAt
+
+  notes  LeadNote[]
+  events LeadEvent[]
+
+  @@index([type, status, createdAt])
+  @@index([abn])
+  @@index([email])
+}
+
+model LeadNote {
+  id        String   @id @default(uuid())
+  leadId    String
+  lead      Lead     @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  authorId  String
+  author    AdminUser @relation(fields: [authorId], references: [id])
+  body      String
+  createdAt DateTime @default(now())
+
+  @@index([leadId, createdAt])
+}
+
+model LeadEvent {
+  id        String    @id @default(uuid())
+  leadId    String?
+  lead      Lead?     @relation(fields: [leadId], references: [id], onDelete: SetNull)
+  actorId   String?
+  actor     AdminUser? @relation("EventActor", fields: [actorId], references: [id], onDelete: SetNull)
+  action    String
+  metadata  Json?
+  createdAt DateTime  @default(now())
+
+  @@index([leadId, createdAt])
+  @@index([action, createdAt])
+}
+
+model OtpChallenge {
+  id          String    @id @default(uuid())
+  adminUserId String
+  adminUser   AdminUser @relation(fields: [adminUserId], references: [id], onDelete: Cascade)
+  codeHash    String
+  expiresAt   DateTime
+  consumedAt  DateTime?
+  attempts    Int       @default(0)
+  createdAt   DateTime  @default(now())
+
+  @@index([adminUserId, createdAt])
+}
