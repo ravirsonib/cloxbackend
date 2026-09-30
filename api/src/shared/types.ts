@@ -56,6 +56,13 @@ export const AuditAction = {
 export type AuditAction = (typeof AuditAction)[keyof typeof AuditAction];
 
 const honeypotField = z.string().max(200).optional();
+/** Client-generated key reused on timeout retries. Prefer Idempotency-Key header. */
+export const idempotencyKeyField = z
+  .string()
+  .trim()
+  .min(8)
+  .max(128)
+  .optional();
 const localeField = z.enum(['en', 'hi', 'pa', 'ru']).default('en');
 const abnField = z
   .string()
@@ -109,6 +116,7 @@ export const registrySenderSchema = z.object({
   locale: localeField,
   source: z.string().trim().max(200).optional(),
   honeypot: honeypotField,
+  idempotencyKey: idempotencyKeyField,
 });
 
 export const registryCarrierSchema = z.object({
@@ -125,6 +133,7 @@ export const registryCarrierSchema = z.object({
   locale: localeField,
   source: z.string().trim().max(200).optional(),
   honeypot: honeypotField,
+  idempotencyKey: idempotencyKeyField,
 });
 
 export const registryLeadSchema = z.discriminatedUnion('userType', [
@@ -151,6 +160,7 @@ export const eoiLeadSchema = z.object({
   locale: localeField,
   source: z.string().trim().max(200).optional(),
   honeypot: honeypotField,
+  idempotencyKey: idempotencyKeyField,
 });
 
 export type EoiLeadInput = z.infer<typeof eoiLeadSchema>;
@@ -204,6 +214,7 @@ export const investorLeadSchema = z.object({
   locale: localeField,
   source: z.string().trim().max(200).optional(),
   honeypot: honeypotField,
+  idempotencyKey: idempotencyKeyField,
 });
 
 export type InvestorLeadInput = z.infer<typeof investorLeadSchema>;

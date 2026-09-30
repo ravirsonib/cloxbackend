@@ -62,9 +62,9 @@ Global prefix: `/v1`.
 | Method | Path | Auth | Purpose |
 | --- | --- | --- | --- |
 | `GET` | `/v1/health` | Public | Liveness and database readiness |
-| `POST` | `/v1/leads/registry` | Public | Sender or carrier registry lead |
-| `POST` | `/v1/leads/eoi` | Public | Admin partner expression of interest |
-| `POST` | `/v1/leads/investor` | Public | Investor pre-qualification |
+| `POST` | `/v1/leads/registry` | Public | Sender or carrier registry lead. Optional `Idempotency-Key` header (or body `idempotencyKey`) prevents duplicate rows on client retries. |
+| `POST` | `/v1/leads/eoi` | Public | Admin partner expression of interest. Same idempotency support. |
+| `POST` | `/v1/leads/investor` | Public | Investor pre-qualification. Same idempotency support. |
 | `POST` | `/v1/auth/otp/request` | Public | Email a Super Admin OTP |
 | `POST` | `/v1/auth/otp/verify` | Public | Exchange OTP for JWT access and refresh tokens |
 | `POST` | `/v1/auth/refresh` | Public | Refresh the access token |

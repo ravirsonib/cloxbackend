@@ -8,7 +8,12 @@ import { NotificationsService } from '../notifications/notifications.service';
 describe('LeadsService', () => {
   const prisma = {
     isConnected: jest.fn(),
-    lead: { create: jest.fn(), findMany: jest.fn() },
+    lead: {
+      create: jest.fn(),
+      findMany: jest.fn(),
+      findUnique: jest.fn(),
+      update: jest.fn(),
+    },
   } as unknown as PrismaService;
 
   const audit = {
@@ -38,6 +43,10 @@ describe('LeadsService', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     (prisma.lead.findMany as jest.Mock).mockResolvedValue([]);
+    (prisma.lead.findUnique as jest.Mock).mockResolvedValue(null);
+    (notifications.notifyLeadSubmitted as jest.Mock).mockResolvedValue({
+      skipped: true,
+    });
   });
 
   it('returns a fake success when honeypot is filled', async () => {
@@ -69,6 +78,7 @@ describe('LeadsService', () => {
       status: LeadStatus.NEW,
       email: senderPayload.email,
       companyName: senderPayload.companyLegalName,
+      confirmationEmailedAt: null,
       createdAt,
     });
 
@@ -88,6 +98,7 @@ describe('LeadsService', () => {
       status: LeadStatus.UNDER_REVIEW,
       email: 'invest@example.com',
       companyName: 'Capital Partners Pty Ltd',
+      confirmationEmailedAt: null,
       createdAt,
     });
 
@@ -127,6 +138,7 @@ describe('LeadsService', () => {
       status: LeadStatus.NEW,
       email: senderPayload.email,
       companyName: senderPayload.companyLegalName,
+      confirmationEmailedAt: null,
       createdAt,
     });
 
@@ -137,6 +149,93 @@ describe('LeadsService', () => {
     expect(prisma.lead.create).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({ priority: true }),
+      }),
+    );
+  });
+
+  it('returns existing lead for the same idempotency key without creating again', async () => {
+    (prisma.isConnected as jest.Mock).mockReturnValue(true);
+    const createdAt = new Date('2026-07-27T12:00:00.000Z');
+    const existing = {
+      id: '66666666-6666-4666-8666-666666666666',
+      type: LeadType.REGISTRY_SENDER,
+      status: LeadStatus.NEW,
+      email: senderPayload.email,
+      companyName: senderPayload.companyLegalName,
+      idempotencyKey: 'retry-key-001',
+      confirmationEmailedAt: new Date('2026-07-27T12:00:01.000Z'),
+      createdAt,
+    };
+    (prisma.lead.findUnique as jest.Mock).mockResolvedValue(existing);
+
+    const result = await service.createRegistryLead(
+      { ...senderPayload, idempotencyKey: 'retry-key-001' },
+      { ip: '127.0.0.1', idempotencyKey: 'retry-key-001' },
+    );
+
+    expect(result.id).toBe(existing.id);
+    expect(prisma.lead.create).not.toHaveBeenCalled();
+    expect(audit.record).not.toHaveBeenCalled();
+    expect(notifications.notifyLeadSubmitted).not.toHaveBeenCalled();
+  });
+
+  it('redelivers confirmation email on idempotent replay when not yet emailed', async () => {
+    (prisma.isConnected as jest.Mock).mockReturnValue(true);
+    const createdAt = new Date('2026-07-27T12:00:00.000Z');
+    const existing = {
+      id: '77777777-7777-4777-8777-777777777777',
+      type: LeadType.REGISTRY_SENDER,
+      status: LeadStatus.NEW,
+      email: senderPayload.email,
+      companyName: senderPayload.companyLegalName,
+      idempotencyKey: 'retry-key-002',
+      confirmationEmailedAt: null,
+      createdAt,
+    };
+    (prisma.lead.findUnique as jest.Mock).mockResolvedValue(existing);
+
+    await service.createRegistryLead(senderPayload, {
+      ip: '127.0.0.1',
+      idempotencyKey: 'retry-key-002',
+    });
+
+    expect(prisma.lead.create).not.toHaveBeenCalled();
+    expect(notifications.notifyLeadSubmitted).toHaveBeenCalledWith(
+      expect.objectContaining({ leadId: existing.id, email: senderPayload.email }),
+    );
+  });
+
+  it('marks confirmationEmailedAt after a successful send', async () => {
+    (prisma.isConnected as jest.Mock).mockReturnValue(true);
+    const createdAt = new Date('2026-07-27T12:00:00.000Z');
+    const lead = {
+      id: '88888888-8888-4888-8888-888888888888',
+      type: LeadType.REGISTRY_SENDER,
+      status: LeadStatus.NEW,
+      email: senderPayload.email,
+      companyName: senderPayload.companyLegalName,
+      confirmationEmailedAt: null,
+      createdAt,
+    };
+    (prisma.lead.create as jest.Mock).mockResolvedValue(lead);
+    (notifications.notifyLeadSubmitted as jest.Mock).mockResolvedValue({
+      skipped: false,
+    });
+    (prisma.lead.update as jest.Mock).mockResolvedValue({
+      ...lead,
+      confirmationEmailedAt: new Date(),
+    });
+
+    await service.createRegistryLead(senderPayload, { ip: '127.0.0.1' });
+
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(prisma.lead.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: lead.id },
+        data: expect.objectContaining({
+          confirmationEmailedAt: expect.any(Date),
+        }),
       }),
     );
   });

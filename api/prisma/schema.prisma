@@ -51,26 +51,28 @@ model AdminUser {
 }
 
 model Lead {
-  id             String     @id @default(uuid())
-  type           LeadType
-  status         LeadStatus @default(NEW)
-  email          String
-  phone          String?
-  companyName    String?
-  abn            String?
-  acn            String?
-  state          String?
-  territory      String?
-  payload        Json
-  priority       Boolean    @default(false)
-  assigneeId     String?
-  assignee       AdminUser? @relation(fields: [assigneeId], references: [id])
-  source         String?
-  ipHash         String?
-  locale         String?
-  promotedUserId String?
-  createdAt      DateTime   @default(now())
-  updatedAt      DateTime   @updatedAt
+  id                    String     @id @default(uuid())
+  type                  LeadType
+  status                LeadStatus @default(NEW)
+  email                 String
+  phone                 String?
+  companyName           String?
+  abn                   String?
+  acn                   String?
+  state                 String?
+  territory             String?
+  payload               Json
+  priority              Boolean    @default(false)
+  assigneeId            String?
+  assignee              AdminUser? @relation(fields: [assigneeId], references: [id])
+  source                String?
+  ipHash                String?
+  locale                String?
+  promotedUserId        String?
+  idempotencyKey        String?    @unique
+  confirmationEmailedAt DateTime?
+  createdAt             DateTime   @default(now())
+  updatedAt             DateTime   @updatedAt
 
   notes  LeadNote[]
   events LeadEvent[]

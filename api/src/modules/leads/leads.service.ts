@@ -1,4 +1,5 @@
 import { Injectable, Logger, ServiceUnavailableException } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import {
   AuditAction,
   LeadStatus,
@@ -8,11 +9,20 @@ import {
   type InvestorLeadInput,
   type RegistryLeadInput,
 } from '../../shared/types';
-import { LeadStatus as PrismaLeadStatus, LeadType as PrismaLeadType } from '@prisma/client';
+import {
+  LeadStatus as PrismaLeadStatus,
+  LeadType as PrismaLeadType,
+  type Lead,
+} from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { hashIp } from '../../common/utils/crypto';
 import { AuditService } from '../audit/audit.service';
 import { NotificationsService } from '../notifications/notifications.service';
+
+type LeadCreateMeta = {
+  ip?: string;
+  idempotencyKey?: string;
+};
 
 @Injectable()
 export class LeadsService {
@@ -78,9 +88,129 @@ export class LeadsService {
     };
   }
 
+  private toCreateResponse(lead: Lead): CreateLeadResponse {
+    return {
+      id: lead.id,
+      type: lead.type as CreateLeadResponse['type'],
+      status: lead.status as CreateLeadResponse['status'],
+      createdAt: lead.createdAt.toISOString(),
+    };
+  }
+
+  private isIdempotencyConflict(error: unknown): boolean {
+    if (!(error instanceof Prisma.PrismaClientKnownRequestError) || error.code !== 'P2002') {
+      return false;
+    }
+    const target = error.meta?.target;
+    const fields = Array.isArray(target)
+      ? target.map(String)
+      : typeof target === 'string'
+        ? [target]
+        : [];
+    return fields.some((field) => field.includes('idempotencyKey'));
+  }
+
+  private async findByIdempotencyKey(key?: string): Promise<Lead | null> {
+    if (!key) return null;
+    return this.prisma.lead.findUnique({ where: { idempotencyKey: key } });
+  }
+
+  /**
+   * Fire-and-forget confirmation email. Marks confirmationEmailedAt only after
+   * a successful send so timeout retries can redeliver if the first send never finished.
+   */
+  private queueConfirmationEmail(lead: Lead): void {
+    if (lead.confirmationEmailedAt) return;
+
+    void this.notifications
+      .notifyLeadSubmitted({
+        type: lead.type,
+        leadId: lead.id,
+        email: lead.email,
+        companyName: lead.companyName,
+      })
+      .then(async (result) => {
+        if (result.skipped) {
+          this.logger.warn(
+            `Confirmation email skipped (SMTP not configured) for lead ${lead.id}`,
+          );
+          return;
+        }
+        await this.prisma.lead.update({
+          where: { id: lead.id },
+          data: { confirmationEmailedAt: new Date() },
+        });
+      })
+      .catch((error: unknown) => {
+        this.logger.error(
+          `Failed to send confirmation email for lead ${lead.id}`,
+          error instanceof Error ? error.stack : String(error),
+        );
+      });
+  }
+
+  private async createLeadIdempotent(params: {
+    idempotencyKey?: string;
+    duplicateIds: string[];
+    channel: string;
+    data: Prisma.LeadUncheckedCreateInput;
+  }): Promise<{ lead: Lead; created: boolean }> {
+    const existing = await this.findByIdempotencyKey(params.idempotencyKey);
+    if (existing) {
+      return { lead: existing, created: false };
+    }
+
+    try {
+      const lead = await this.prisma.lead.create({
+        data: {
+          ...params.data,
+          idempotencyKey: params.idempotencyKey,
+          priority: params.duplicateIds.length > 0,
+        },
+      });
+      return { lead, created: true };
+    } catch (error) {
+      if (this.isIdempotencyConflict(error) && params.idempotencyKey) {
+        const raced = await this.findByIdempotencyKey(params.idempotencyKey);
+        if (raced) return { lead: raced, created: false };
+      }
+      throw error;
+    }
+  }
+
+  private async afterLeadPersisted(params: {
+    lead: Lead;
+    created: boolean;
+    channel: string;
+    duplicateIds: string[];
+  }): Promise<CreateLeadResponse> {
+    if (params.created) {
+      await this.audit.record({
+        action: AuditAction.LEAD_CREATED,
+        leadId: params.lead.id,
+        metadata: {
+          type: params.lead.type,
+          email: params.lead.email,
+          channel: params.channel,
+          possibleDuplicateAbn: params.duplicateIds.length > 0,
+          duplicateLeadIds: params.duplicateIds,
+          idempotencyKey: params.lead.idempotencyKey ?? undefined,
+        },
+      });
+    }
+
+    // New create, or replay when email never completed — ensure delivery.
+    this.queueConfirmationEmail(params.lead);
+
+    return this.withDuplicateWarning(
+      this.toCreateResponse(params.lead),
+      params.created ? params.duplicateIds : [],
+    );
+  }
+
   async createRegistryLead(
     input: RegistryLeadInput,
-    meta: { ip?: string },
+    meta: LeadCreateMeta,
   ): Promise<CreateLeadResponse> {
     if (this.isHoneypotTriggered(input.honeypot)) {
       this.logger.warn('Honeypot triggered on registry submission');
@@ -91,6 +221,7 @@ export class LeadsService {
 
     const abn = this.normalizeAbn(input.abn)!;
     const duplicateIds = await this.findDuplicateAbns(abn);
+    const idempotencyKey = meta.idempotencyKey ?? input.idempotencyKey;
 
     const type =
       input.userType === 'sender'
@@ -101,9 +232,12 @@ export class LeadsService {
       input.userType === 'sender' ? input.companyLegalName : input.fleetEntityName;
     const state = input.userType === 'carrier' ? input.depotState : undefined;
 
-    const { honeypot: _honeypot, ...payload } = input;
+    const { honeypot: _honeypot, idempotencyKey: _key, ...payload } = input;
 
-    const lead = await this.prisma.lead.create({
+    const { lead, created } = await this.createLeadIdempotent({
+      idempotencyKey,
+      duplicateIds,
+      channel: 'registry',
       data: {
         type,
         status: PrismaLeadStatus.NEW,
@@ -116,50 +250,20 @@ export class LeadsService {
         locale: input.locale,
         source: input.source,
         ipHash: hashIp(meta.ip),
-        priority: duplicateIds.length > 0,
       },
     });
 
-    await this.audit.record({
-      action: AuditAction.LEAD_CREATED,
-      leadId: lead.id,
-      metadata: {
-        type: lead.type,
-        email: lead.email,
-        channel: 'registry',
-        possibleDuplicateAbn: duplicateIds.length > 0,
-        duplicateLeadIds: duplicateIds,
-      },
-    });
-
-    void this.notifications
-      .notifyLeadSubmitted({
-        type: lead.type,
-        leadId: lead.id,
-        email: lead.email,
-        companyName: lead.companyName,
-      })
-      .catch((error: unknown) => {
-        this.logger.error(
-          `Failed to send confirmation email for registry lead ${lead.id}`,
-          error instanceof Error ? error.stack : String(error),
-        );
-      });
-
-    return this.withDuplicateWarning(
-      {
-        id: lead.id,
-        type: lead.type as CreateLeadResponse['type'],
-        status: lead.status as CreateLeadResponse['status'],
-        createdAt: lead.createdAt.toISOString(),
-      },
+    return this.afterLeadPersisted({
+      lead,
+      created,
+      channel: 'registry',
       duplicateIds,
-    );
+    });
   }
 
   async createEoiLead(
     input: EoiLeadInput,
-    meta: { ip?: string },
+    meta: LeadCreateMeta,
   ): Promise<CreateLeadResponse> {
     if (this.isHoneypotTriggered(input.honeypot)) {
       this.logger.warn('Honeypot triggered on EOI submission');
@@ -174,15 +278,19 @@ export class LeadsService {
 
     const abn = this.normalizeAbn(input.abn)!;
     const duplicateIds = await this.findDuplicateAbns(abn);
+    const idempotencyKey = meta.idempotencyKey ?? input.idempotencyKey;
 
     const type =
       input.role === 'state_master'
         ? PrismaLeadType.EOI_STATE_MASTER
         : PrismaLeadType.EOI_LOCAL_BDE;
 
-    const { honeypot: _honeypot, ...payload } = input;
+    const { honeypot: _honeypot, idempotencyKey: _key, ...payload } = input;
 
-    const lead = await this.prisma.lead.create({
+    const { lead, created } = await this.createLeadIdempotent({
+      idempotencyKey,
+      duplicateIds,
+      channel: 'eoi',
       data: {
         type,
         status: PrismaLeadStatus.UNDER_REVIEW,
@@ -197,50 +305,20 @@ export class LeadsService {
         locale: input.locale,
         source: input.source,
         ipHash: hashIp(meta.ip),
-        priority: duplicateIds.length > 0,
       },
     });
 
-    await this.audit.record({
-      action: AuditAction.LEAD_CREATED,
-      leadId: lead.id,
-      metadata: {
-        type: lead.type,
-        email: lead.email,
-        channel: 'eoi',
-        possibleDuplicateAbn: duplicateIds.length > 0,
-        duplicateLeadIds: duplicateIds,
-      },
-    });
-
-    void this.notifications
-      .notifyLeadSubmitted({
-        type: lead.type,
-        leadId: lead.id,
-        email: lead.email,
-        companyName: lead.companyName,
-      })
-      .catch((error: unknown) => {
-        this.logger.error(
-          `Failed to send confirmation email for EOI lead ${lead.id}`,
-          error instanceof Error ? error.stack : String(error),
-        );
-      });
-
-    return this.withDuplicateWarning(
-      {
-        id: lead.id,
-        type: lead.type as CreateLeadResponse['type'],
-        status: lead.status as CreateLeadResponse['status'],
-        createdAt: lead.createdAt.toISOString(),
-      },
+    return this.afterLeadPersisted({
+      lead,
+      created,
+      channel: 'eoi',
       duplicateIds,
-    );
+    });
   }
 
   async createInvestorLead(
     input: InvestorLeadInput,
-    meta: { ip?: string },
+    meta: LeadCreateMeta,
   ): Promise<CreateLeadResponse> {
     if (this.isHoneypotTriggered(input.honeypot)) {
       this.logger.warn('Honeypot triggered on investor submission');
@@ -255,10 +333,14 @@ export class LeadsService {
 
     const abn = this.normalizeAbn(input.abn);
     const duplicateIds = abn ? await this.findDuplicateAbns(abn) : [];
+    const idempotencyKey = meta.idempotencyKey ?? input.idempotencyKey;
 
-    const { honeypot: _honeypot, ...payload } = input;
+    const { honeypot: _honeypot, idempotencyKey: _key, ...payload } = input;
 
-    const lead = await this.prisma.lead.create({
+    const { lead, created } = await this.createLeadIdempotent({
+      idempotencyKey,
+      duplicateIds,
+      channel: 'investor',
       data: {
         type: PrismaLeadType.INVESTOR,
         status: PrismaLeadStatus.UNDER_REVIEW,
@@ -272,44 +354,14 @@ export class LeadsService {
         locale: input.locale,
         source: input.source,
         ipHash: hashIp(meta.ip),
-        priority: duplicateIds.length > 0,
       },
     });
 
-    await this.audit.record({
-      action: AuditAction.LEAD_CREATED,
-      leadId: lead.id,
-      metadata: {
-        type: lead.type,
-        email: lead.email,
-        channel: 'investor',
-        possibleDuplicateAbn: duplicateIds.length > 0,
-        duplicateLeadIds: duplicateIds,
-      },
-    });
-
-    void this.notifications
-      .notifyLeadSubmitted({
-        type: lead.type,
-        leadId: lead.id,
-        email: lead.email,
-        companyName: lead.companyName,
-      })
-      .catch((error: unknown) => {
-        this.logger.error(
-          `Failed to send confirmation email for investor lead ${lead.id}`,
-          error instanceof Error ? error.stack : String(error),
-        );
-      });
-
-    return this.withDuplicateWarning(
-      {
-        id: lead.id,
-        type: lead.type as CreateLeadResponse['type'],
-        status: lead.status as CreateLeadResponse['status'],
-        createdAt: lead.createdAt.toISOString(),
-      },
+    return this.afterLeadPersisted({
+      lead,
+      created,
+      channel: 'investor',
       duplicateIds,
-    );
+    });
   }
 }
