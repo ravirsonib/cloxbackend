@@ -32,7 +32,7 @@ describe('LeadsService', () => {
     abn: '51824753556',
     shippingOrigin: 'Melbourne',
     operationalModels: ['Interstate Linehaul Lanes'],
-    biddingType: 'Per-KM Dynamic Spot Market Bidding',
+    biddingType: ['Per-KM Dynamic Spot Market Bidding'],
     monthlyVolume: '$10k - $50k',
     infraAcknowledged: ['easyAML', 'Stripe', 'Monoova'],
     email: 'ops@acme.example',

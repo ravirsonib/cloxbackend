@@ -63,20 +63,78 @@ export const idempotencyKeyField = z
   .min(8)
   .max(128)
   .optional();
-const localeField = z.enum(['en', 'hi', 'pa', 'ru']).default('en');
+const localeField = z.enum(['en', 'hi', 'pa']).default('en');
 const abnField = z
   .string()
   .trim()
-  .regex(/^\d{2}\s?\d{3}\s?\d{3}\s?\d{3}$|^\d{9,11}$/, 'Invalid ABN format');
+  .regex(
+    /^(?:\d{2}\s?\d{3}\s?\d{3}\s?\d{3}|\d{11})$/,
+    'Enter a valid Australian ABN (11 digits, e.g. 48 626 269 387)',
+  );
 const emailField = z
   .string()
   .trim()
-  .email()
+  .min(1, 'Enter your email address')
+  .email('Enter a valid email address')
   .transform((value) => value.toLowerCase());
-const acceptedTrue = z.preprocess(
-  (value) => value === true || value === 'true' || value === 'on' || value === 1 || value === '1',
-  z.literal(true),
-);
+const PHONE_MESSAGE =
+  'Enter a valid Australian phone number (e.g. 04xx xxx xxx or +61…)';
+
+/** AU-friendly phone: +61… / 0… with spaces/dashes; rejects letters and junk. */
+const phoneField = z
+  .string()
+  .trim()
+  .min(1, 'Enter your phone number')
+  .min(8, PHONE_MESSAGE)
+  .max(30, PHONE_MESSAGE)
+  .refine((value) => /^[+\d\s().\-]+$/.test(value), PHONE_MESSAGE)
+  .refine((value) => {
+    const digits = value.replace(/\D/g, '');
+    if (/^61\d{8,10}$/.test(digits)) return true;
+    if (/^0\d{8,10}$/.test(digits)) return true;
+    return false;
+  }, PHONE_MESSAGE);
+
+function acceptedTrue(message = 'Required') {
+  return z.preprocess(
+    (value) => value === true || value === 'true' || value === 'on' || value === 1 || value === '1',
+    z.literal(true, { message }),
+  );
+}
+
+function requiredText(message: string, min = 2, max = 200) {
+  return z
+    .string()
+    .trim()
+    .min(1, message)
+    .min(min, message)
+    .max(max, `Keep this under ${max} characters`);
+}
+
+/** Org/legal names: letters, digits, spaces, and common business punctuation only. */
+function organizationNameField(message: string, min = 2, max = 200) {
+  return requiredText(message, min, max).regex(
+    /^[\p{L}\p{N}][\p{L}\p{N}\s.'&\-()/]*$/u,
+    'Use letters, numbers, and common punctuation only (e.g. Pty Ltd, & Co.)',
+  );
+}
+
+/** Person names: letters plus spaces / apostrophes / hyphens / periods. */
+function personNameField(message: string, min = 2, max = 120) {
+  return requiredText(message, min, max).regex(
+    /^[\p{L}][\p{L}\s.'\-]*$/u,
+    'Use letters and common name punctuation only',
+  );
+}
+
+function requiredLongText(message: string, min = 10, max = 4000) {
+  return z
+    .string()
+    .trim()
+    .min(1, message)
+    .min(min, `Please enter at least ${min} characters`)
+    .max(max, `Keep this under ${max} characters`);
+}
 
 export const leadTypeSchema = z.enum([
   LeadType.REGISTRY_SENDER,
@@ -104,15 +162,19 @@ export const leadStatusSchema = z.enum([
 
 export const registrySenderSchema = z.object({
   userType: z.literal('sender'),
-  companyLegalName: z.string().trim().min(2).max(200),
+  companyLegalName: organizationNameField('Enter your company legal name', 2, 200),
   abn: abnField,
-  shippingOrigin: z.string().trim().min(2).max(120),
-  operationalModels: z.array(z.string().min(1)).min(1),
-  biddingType: z.string().trim().min(1),
-  monthlyVolume: z.string().trim().min(1),
+  shippingOrigin: requiredText('Select a shipping origin city', 2, 120),
+  operationalModels: z
+    .array(z.string().min(1))
+    .min(1, 'Select at least one operational model'),
+  biddingType: z
+    .array(z.string().min(1))
+    .min(1, 'Select at least one bidding structure'),
+  monthlyVolume: z.string().trim().min(1, 'Select your monthly freight volume'),
   infraAcknowledged: z.array(z.string()).default([]),
   email: emailField,
-  phone: z.string().trim().min(8).max(30),
+  phone: phoneField,
   locale: localeField,
   source: z.string().trim().max(200).optional(),
   honeypot: honeypotField,
@@ -121,15 +183,19 @@ export const registrySenderSchema = z.object({
 
 export const registryCarrierSchema = z.object({
   userType: z.literal('carrier'),
-  fleetEntityName: z.string().trim().min(2).max(200),
+  fleetEntityName: organizationNameField('Enter your fleet / company name', 2, 200),
   abn: abnField,
-  depotState: z.string().trim().min(2).max(80),
-  fleetComposition: z.array(z.string().min(1)).min(1),
+  depotState: requiredText('Select a depot state', 2, 80),
+  fleetComposition: z
+    .array(z.string().min(1))
+    .min(1, 'Select at least one fleet type'),
   capabilities: z.array(z.string()).default([]),
-  complianceAuthorized: acceptedTrue,
+  complianceAuthorized: acceptedTrue(
+    'Confirm compliance authorization to continue',
+  ),
   infraAcknowledged: z.array(z.string()).default([]),
   email: emailField,
-  phone: z.string().trim().min(8).max(30),
+  phone: phoneField,
   locale: localeField,
   source: z.string().trim().max(200).optional(),
   honeypot: honeypotField,
@@ -144,19 +210,32 @@ export const registryLeadSchema = z.discriminatedUnion('userType', [
 export type RegistryLeadInput = z.infer<typeof registryLeadSchema>;
 
 export const eoiLeadSchema = z.object({
-  role: z.enum(['state_master', 'local_bde']),
-  targetState: z.string().trim().min(2).max(80),
-  targetTerritory: z.string().trim().min(2).max(120),
-  fullLegalName: z.string().trim().min(2).max(120),
-  companyName: z.string().trim().min(2).max(200),
+  // API still accepts state_master for direct/API clients; launch UI only sends local_bde.
+  role: z.enum(['state_master', 'local_bde'], {
+    message: 'Partner role is required',
+  }),
+  targetState: requiredText('Enter your target state or region', 2, 80),
+  targetTerritory: requiredText('Enter your target suburbs or city', 2, 120),
+  fullLegalName: personNameField('Enter your full legal name', 2, 120),
+  companyName: organizationNameField('Enter your company name', 2, 200),
   abn: abnField,
-  acn: z.string().trim().max(20).optional(),
+  acn: z.string().trim().max(20, 'Keep ACN under 20 characters').optional(),
   email: emailField,
-  phone: z.string().trim().min(8).max(30),
-  corporateAddress: z.string().trim().min(5).max(300),
-  networkExperience: z.string().trim().min(10).max(4000),
-  executionStrategy: z.string().trim().min(10).max(4000),
-  declarationAccepted: acceptedTrue,
+  phone: phoneField,
+  corporateAddress: requiredText('Enter your corporate address', 5, 300),
+  networkExperience: requiredLongText(
+    'Describe your network experience',
+    10,
+    4000,
+  ),
+  executionStrategy: requiredLongText(
+    'Describe your execution strategy',
+    10,
+    4000,
+  ),
+  declarationAccepted: acceptedTrue(
+    'Accept the partnership declaration to continue',
+  ),
   locale: localeField,
   source: z.string().trim().max(200).optional(),
   honeypot: honeypotField,
@@ -165,35 +244,39 @@ export const eoiLeadSchema = z.object({
 
 export type EoiLeadInput = z.infer<typeof eoiLeadSchema>;
 
-export const investorClassificationSchema = z.enum([
-  'sophisticated_investor',
-  'professional_investor',
-  'strategic_industry_partner',
-]);
+export const investorClassificationSchema = z.enum(
+  ['sophisticated_investor', 'professional_investor', 'strategic_industry_partner'],
+  { message: 'Select a valid investor classification' },
+);
 
-export const capitalAllocationSchema = z.enum([
-  '25000_99999',
-  '100000_249999',
-  '250000_499999',
-  '500000_plus',
-]);
+export const capitalAllocationSchema = z.enum(
+  ['25000_99999', '100000_249999', '250000_499999', '500000_plus'],
+  { message: 'Select a capital allocation band' },
+);
 
-export const ecosystemFocusSchema = z.enum([
-  'pure_financial_growth',
-  'strategic_carrier_fleet',
-  'enterprise_sender_pipeline',
-  'regional_admin_network',
-]);
+export const ecosystemFocusSchema = z.enum(
+  [
+    'pure_financial_growth',
+    'strategic_carrier_fleet',
+    'enterprise_sender_pipeline',
+    'regional_admin_network',
+  ],
+  { message: 'Select an ecosystem focus area' },
+);
 
 export const investorLeadSchema = z.object({
-  fullNameOrEntity: z.string().trim().min(2).max(200),
+  fullNameOrEntity: organizationNameField(
+    'Enter your full name or entity name',
+    2,
+    200,
+  ),
   contactPersonName: z.preprocess(
     (value) =>
       typeof value === 'string' && value.trim().length === 0 ? undefined : value,
-    z.string().trim().max(120).optional(),
+    personNameField('Enter a valid contact name', 2, 120).optional(),
   ),
   email: emailField,
-  phone: z.string().trim().min(8).max(30),
+  phone: phoneField,
   abn: z.preprocess(
     (value) =>
       typeof value === 'string' && value.trim().length === 0 ? undefined : value,
@@ -202,15 +285,19 @@ export const investorLeadSchema = z.object({
   acn: z.preprocess(
     (value) =>
       typeof value === 'string' && value.trim().length === 0 ? undefined : value,
-    z.string().trim().max(20).optional(),
+    z.string().trim().max(20, 'Keep ACN under 20 characters').optional(),
   ),
-  residence: z.string().trim().min(2).max(120),
-  investorClassifications: z.array(investorClassificationSchema).min(1),
+  residence: requiredText('Enter your country / residence', 2, 120),
+  investorClassifications: z
+    .array(investorClassificationSchema)
+    .min(1, 'Select at least one investor classification'),
   capitalAllocation: capitalAllocationSchema,
   ecosystemFocus: ecosystemFocusSchema,
-  strategicNotes: z.string().trim().min(10).max(4000),
-  authorizedName: z.string().trim().min(2).max(120),
-  declarationAccepted: acceptedTrue,
+  strategicNotes: requiredLongText('Add your strategic notes', 10, 4000),
+  authorizedName: personNameField('Enter the authorized signatory name', 2, 120),
+  declarationAccepted: acceptedTrue(
+    'Accept the investor declaration to continue',
+  ),
   locale: localeField,
   source: z.string().trim().max(200).optional(),
   honeypot: honeypotField,
