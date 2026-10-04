@@ -230,7 +230,8 @@ export class LeadsService {
 
     const companyName =
       input.userType === 'sender' ? input.companyLegalName : input.fleetEntityName;
-    const state = input.userType === 'carrier' ? input.depotState : undefined;
+    const state =
+      input.userType === 'carrier' ? input.depotState : input.shippingOrigin;
 
     const { honeypot: _honeypot, idempotencyKey: _key, ...payload } = input;
 

@@ -85,6 +85,13 @@ describe('LeadsService', () => {
     const result = await service.createRegistryLead(senderPayload, { ip: '127.0.0.1' });
 
     expect(result.id).toBe('11111111-1111-4111-8111-111111111111');
+    expect(prisma.lead.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          state: senderPayload.shippingOrigin,
+        }),
+      }),
+    );
     expect(audit.record).toHaveBeenCalled();
     expect(notifications.notifyLeadSubmitted).toHaveBeenCalled();
   });
