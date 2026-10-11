@@ -13,6 +13,7 @@ describe('AdminService', () => {
       findMany: jest.fn(),
       findUnique: jest.fn(),
       update: jest.fn(),
+      delete: jest.fn(),
     },
     leadEvent: {
       findMany: jest.fn(),
@@ -71,6 +72,41 @@ describe('AdminService', () => {
         '22222222-2222-4222-8222-222222222222',
       ),
     ).rejects.toBeInstanceOf(NotFoundException);
+  });
+
+  it('throws NotFound when deleting missing lead', async () => {
+    (prisma.isConnected as jest.Mock).mockReturnValue(true);
+    (prisma.lead.findUnique as jest.Mock).mockResolvedValue(null);
+
+    await expect(
+      service.deleteLead(
+        '11111111-1111-4111-8111-111111111111',
+        '22222222-2222-4222-8222-222222222222',
+      ),
+    ).rejects.toBeInstanceOf(NotFoundException);
+  });
+
+  it('deletes a lead and records audit', async () => {
+    (prisma.isConnected as jest.Mock).mockReturnValue(true);
+    (prisma.lead.findUnique as jest.Mock).mockResolvedValue({
+      id: '11111111-1111-4111-8111-111111111111',
+      type: LeadType.REGISTRY_SENDER,
+      status: LeadStatus.NEW,
+      email: 'sender@example.com',
+      companyName: 'Sender Co',
+    });
+    (prisma.lead.delete as jest.Mock).mockResolvedValue({});
+
+    const result = await service.deleteLead(
+      '11111111-1111-4111-8111-111111111111',
+      '22222222-2222-4222-8222-222222222222',
+    );
+
+    expect(result).toEqual({ ok: true });
+    expect(audit.record).toHaveBeenCalled();
+    expect(prisma.lead.delete).toHaveBeenCalledWith({
+      where: { id: '11111111-1111-4111-8111-111111111111' },
+    });
   });
 
   it('exports CSV with header row', async () => {

@@ -68,12 +68,38 @@ export class NotificationsService {
     return candidates.find((path) => existsSync(path)) ?? null;
   }
 
+  private iconPath(
+    name: 'truck' | 'building' | 'envelope' | 'document' | 'shield' | 'bell',
+  ): string | null {
+    const filename = `icon-${name}.png`;
+    const candidates = [
+      join(__dirname, '..', '..', 'assets', 'email', 'icons', filename),
+      join(process.cwd(), 'assets', 'email', 'icons', filename),
+      join(process.cwd(), 'src', 'assets', 'email', 'icons', filename),
+    ];
+    return candidates.find((path) => existsSync(path)) ?? null;
+  }
+
+  private iconCid(
+    name: 'truck' | 'building' | 'envelope' | 'document' | 'shield' | 'bell',
+  ): string {
+    return `clox-icon-${name}`;
+  }
+
+  private iconImg(
+    name: 'truck' | 'building' | 'envelope' | 'document' | 'shield' | 'bell',
+    size: number,
+  ): string {
+    // display:block removes baseline gap under images in email clients.
+    return `<img src="cid:${this.iconCid(name)}" width="${size}" height="${size}" alt="" style="display:block;margin:0 auto;border:0;outline:none;width:${size}px;height:${size}px;" />`;
+  }
+
   private leadLabel(type: LeadEmailKind): string {
     switch (type) {
       case 'REGISTRY_SENDER':
-        return 'Sender / Shipper Registry';
+        return 'Sender / Shipper';
       case 'REGISTRY_CARRIER':
-        return 'Carrier / Transport Registry';
+        return 'Carrier / Transport Operator';
       case 'EOI_STATE_MASTER':
         return 'Partner EOI (State Master)';
       case 'EOI_LOCAL_BDE':
@@ -88,50 +114,166 @@ export class NotificationsService {
   private welcomeCopy(type: LeadEmailKind): {
     headline: string;
     intro: string;
-    nextStep: string;
+    nextSteps: { title: string; body: string }[];
   } {
     switch (type) {
       case 'REGISTRY_SENDER':
         return {
-          headline: 'Welcome to the CLOX pre-launch community',
+          headline: 'Welcome to CLOX!',
           intro:
-            'Thank you for registering as a corporate sender. You’re on the early-access list for Australia’s digital full-load freight marketplace.',
-          nextStep:
-            'Our team will review your details. When live bidding opens, early registrants are prioritised for onboarding.',
+            'Thank you for registering as a corporate sender. Your details have been received and our team will review them.',
+          nextSteps: [
+            {
+              title: 'Team Review',
+              body: 'Our team will review your details and get back to you with the sign up link soon.',
+            },
+            {
+              title: 'Be Ready',
+              body: 'Keep your company details, shipping volume, and preferred corridors ready for onboarding.',
+            },
+            {
+              title: 'Stay Updated',
+              body: "We'll keep you informed about important updates and the upcoming launch.",
+            },
+          ],
         };
       case 'REGISTRY_CARRIER':
         return {
-          headline: 'Welcome to the CLOX pre-launch community',
+          headline: 'Welcome to CLOX!',
           intro:
-            'Thank you for registering as a carrier / transport operator. You’re on the early-access list for vetted fleet partners on CLOX.',
-          nextStep:
-            'Our team will review your details. Have your ABN, Public Liability evidence, and vehicle compliance ready for when onboarding begins.',
+            'Thank you for registering as a carrier / transport operator. Your details have been received and our team will review them.',
+          nextSteps: [
+            {
+              title: 'Team Review',
+              body: 'Our team will review your details and get back to you with the sign up link soon.',
+            },
+            {
+              title: 'Be Ready',
+              body: 'Keep your ABN, Public Liability insurance evidence, and vehicle compliance documents ready for onboarding.',
+            },
+            {
+              title: 'Stay Updated',
+              body: "We'll keep you informed about important updates and the upcoming launch.",
+            },
+          ],
         };
       case 'EOI_STATE_MASTER':
       case 'EOI_LOCAL_BDE':
         return {
-          headline: 'Welcome — we received your Partner EOI',
+          headline: 'Welcome to CLOX!',
           intro:
-            'Thank you for your interest in becoming a CLOX Territory / Independent Territory Partner. Your expression of interest is now with our team.',
-          nextStep:
-            'Selection involves KYB and executive review. Commercial terms are discussed under NDA after application — submitting an EOI is not admission.',
+            'Thank you for your interest in becoming a CLOX Territory / Independent Territory Partner. Your expression of interest has been received and our team will review it.',
+          nextSteps: [
+            {
+              title: 'Team Review',
+              body: 'Selection involves KYB and executive review. Our team will follow up with next steps.',
+            },
+            {
+              title: 'Be Ready',
+              body: 'Commercial terms are discussed under NDA after application — submitting an EOI is not admission.',
+            },
+            {
+              title: 'Stay Updated',
+              body: "We'll keep you informed about important updates and the upcoming launch.",
+            },
+          ],
         };
       case 'INVESTOR':
         return {
-          headline: 'Welcome — investor enquiry received',
+          headline: 'Welcome to CLOX!',
           intro:
             'Thank you for your interest in the CLOX early-access equity round. Your pre-qualification details have been received securely.',
-          nextStep:
-            'Our team will review your accreditation information and follow up if needed.',
+          nextSteps: [
+            {
+              title: 'Team Review',
+              body: 'Our team will review your accreditation information and follow up if needed.',
+            },
+            {
+              title: 'Be Ready',
+              body: 'Have your investor classification and capital allocation details ready for any follow-up discussion.',
+            },
+            {
+              title: 'Stay Updated',
+              body: "We'll keep you informed about important updates and the upcoming launch.",
+            },
+          ],
         };
       default:
         return {
-          headline: 'Welcome — we received your CLOX submission',
+          headline: 'Welcome to CLOX!',
           intro:
-            'Thank you for your interest in CLOX. Your pre-launch submission has been received.',
-          nextStep: 'Our team will review your details and follow up if needed.',
+            'Thank you for your interest in CLOX. Your pre-launch submission has been received and our team will review it.',
+          nextSteps: [
+            {
+              title: 'Team Review',
+              body: 'Our team will review your details and follow up if needed.',
+            },
+            {
+              title: 'Be Ready',
+              body: 'Keep your supporting documents ready for onboarding.',
+            },
+            {
+              title: 'Stay Updated',
+              body: "We'll keep you informed about important updates and the upcoming launch.",
+            },
+          ],
         };
     }
+  }
+
+  private detailRow(
+    icon: 'truck' | 'building' | 'envelope',
+    label: string,
+    value: string,
+  ) {
+    return `
+      <tr>
+        <td style="padding:0 0 12px 0;">
+          <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">
+            <tr>
+              <td width="28" valign="middle" style="width:28px;padding:0 10px 0 0;vertical-align:middle;">
+                ${this.iconImg(icon, 22)}
+              </td>
+              <td valign="middle" style="font-size:14px;line-height:1.45;color:#0f172a;vertical-align:middle;">
+                <strong style="color:#0a1f3c;">${label}:</strong> ${value}
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>`;
+  }
+
+  private nextStepRow(
+    icon: 'document' | 'shield' | 'bell',
+    title: string,
+    body: string,
+    isLast: boolean,
+  ) {
+    // Design: circle top aligns with title top (not middle of whole text block).
+    // Middle-aligning the row made longer body copy (e.g. Be Ready) push the
+    // circle downward relative to its title — that looked "unaligned".
+    return `
+      <tr>
+        <td style="padding:0 0 ${isLast ? '0' : '22px'} 0;">
+          <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">
+            <tr>
+              <td width="56" valign="top" align="left" style="width:56px;padding:0 14px 0 0;vertical-align:top;">
+                <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="40" height="40" style="width:40px;height:40px;">
+                  <tr>
+                    <td width="40" height="40" align="center" valign="middle" bgcolor="#fff1e8" style="width:40px;height:40px;background-color:#fff1e8;border-radius:20px;text-align:center;vertical-align:middle;line-height:40px;">
+                      ${this.iconImg(icon, 20)}
+                    </td>
+                  </tr>
+                </table>
+              </td>
+              <td valign="top" style="padding:0;vertical-align:top;">
+                <p style="margin:0 0 4px;font-size:15px;line-height:20px;font-weight:700;color:#0a1f3c;">${title}</p>
+                <p style="margin:0;font-size:14px;line-height:1.55;color:#475569;">${body}</p>
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>`;
   }
 
   private buildLeadEmail(params: {
@@ -144,9 +286,23 @@ export class NotificationsService {
     const label = this.leadLabel(params.type);
     const welcome = this.welcomeCopy(params.type);
     const company = params.companyName?.trim() || '—';
+    const siteUrl = 'https://www.clox.com.au';
     const logoHtml = params.includeLogo
-      ? `<img src="cid:clox-logo" width="160" height="45" alt="CLOX" style="display:block;border:0;outline:none;height:auto;max-width:160px;" />`
-      : `<div style="font-size:28px;font-weight:800;letter-spacing:0.04em;color:#ffffff;">CLOX</div>`;
+      ? `<img src="cid:clox-logo" width="160" height="45" alt="CLOX Freight Forwarding" style="display:block;border:0;outline:none;height:auto;max-width:160px;" />`
+      : `<div style="font-size:28px;font-weight:800;letter-spacing:0.04em;color:#ffffff;line-height:1;">CLOX</div>
+         <div style="margin-top:4px;font-size:12px;font-weight:600;letter-spacing:0.08em;color:#ffffff;text-transform:uppercase;">Freight Forwarding</div>`;
+
+    const nextStepIcons = ['document', 'shield', 'bell'] as const;
+    const nextStepsHtml = welcome.nextSteps
+      .map((step, index) =>
+        this.nextStepRow(
+          nextStepIcons[index] ?? 'document',
+          step.title,
+          step.body,
+          index === welcome.nextSteps.length - 1,
+        ),
+      )
+      .join('');
 
     const subject = `Welcome to CLOX — ${label} received`;
 
@@ -155,21 +311,23 @@ export class NotificationsService {
       '',
       welcome.intro,
       '',
-      `Submission type: ${label}`,
-      `Reference: ${params.leadId}`,
+      'Registration details',
+      `Type: ${label}`,
+      `Company / Name: ${company}`,
       `Email: ${params.email}`,
-      `Company / name: ${company}`,
       '',
-      welcome.nextStep,
+      'What happens next?',
+      ...welcome.nextSteps.map((step) => `${step.title}: ${step.body}`),
       '',
-      `Questions? Contact us at ${SUPPORT_EMAIL}`,
+      `Explore CLOX: ${siteUrl}`,
+      '',
+      `If you have any questions, please email ${SUPPORT_EMAIL}.`,
       '',
       '—',
       'CLOX Freight Forwarding',
       COMPANY_LINE,
       ABN_LINE,
-      SUPPORT_EMAIL,
-      'www.clox.com.au',
+      `Enquiries: ${SUPPORT_EMAIL} | www.clox.com.au`,
     ].join('\n');
 
     const html = `<!DOCTYPE html>
@@ -179,75 +337,80 @@ export class NotificationsService {
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>${subject}</title>
 </head>
-<body style="margin:0;padding:0;background:#f1f5f9;font-family:Arial,Helvetica,sans-serif;color:#0f172a;">
-  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f1f5f9;padding:24px 12px;">
+<body style="margin:0;padding:0;background:#eef2f6;font-family:Arial,Helvetica,sans-serif;color:#0f172a;">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#eef2f6;padding:24px 12px;">
     <tr>
       <td align="center">
         <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:600px;background:#ffffff;border-radius:16px;overflow:hidden;border:1px solid #e2e8f0;">
           <tr>
-            <td style="background:#0a1f3c;padding:28px 32px;">
-              ${logoHtml}
-              <p style="margin:14px 0 0;font-size:13px;color:#94a3b8;letter-spacing:0.04em;text-transform:uppercase;">
-                Australia’s digital full-load freight marketplace
+            <td style="background:#0a1f3c;padding:28px 32px;text-align:center;">
+              <div style="text-align:left;display:inline-block;">
+                ${logoHtml}
+              </div>
+              <p style="margin:18px 0 0;font-size:11px;font-weight:700;color:#ffffff;letter-spacing:0.12em;text-transform:uppercase;">
+                Australia's digital full-load freight marketplace
               </p>
             </td>
           </tr>
           <tr>
-            <td style="padding:32px;">
-              <p style="margin:0 0 8px;font-size:13px;font-weight:700;color:#f97316;text-transform:uppercase;letter-spacing:0.06em;">
+            <td style="padding:36px 32px 28px;">
+              <p style="margin:0 0 10px;font-size:12px;font-weight:700;color:#f15a24;text-transform:uppercase;letter-spacing:0.08em;">
                 Pre-launch confirmation
               </p>
-              <h1 style="margin:0 0 16px;font-size:24px;line-height:1.25;color:#0a1f3c;">
+              <h1 style="margin:0 0 14px;font-size:28px;line-height:1.2;color:#0a1f3c;">
                 ${welcome.headline}
               </h1>
-              <p style="margin:0 0 18px;font-size:15px;line-height:1.6;color:#334155;">
+              <p style="margin:0 0 24px;font-size:15px;line-height:1.65;color:#475569;">
                 ${welcome.intro}
               </p>
-              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:12px;margin:0 0 22px;">
+
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f4f7f9;border-radius:14px;margin:0 0 28px;">
                 <tr>
-                  <td style="padding:18px 20px;">
-                    <p style="margin:0 0 10px;font-size:12px;font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:0.05em;">Submission summary</p>
-                    <p style="margin:0 0 8px;font-size:14px;color:#0f172a;"><strong>Type:</strong> ${label}</p>
-                    <p style="margin:0 0 8px;font-size:14px;color:#0f172a;"><strong>Reference:</strong> ${params.leadId}</p>
-                    <p style="margin:0 0 8px;font-size:14px;color:#0f172a;"><strong>Email:</strong> ${params.email}</p>
-                    <p style="margin:0;font-size:14px;color:#0f172a;"><strong>Company / name:</strong> ${company}</p>
+                  <td style="padding:22px 22px 8px;">
+                    <p style="margin:0 0 16px;font-size:12px;font-weight:700;color:#0a1f3c;text-transform:uppercase;letter-spacing:0.08em;">Registration details</p>
+                    <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+                      ${this.detailRow('truck', 'Type', label)}
+                      ${this.detailRow('building', 'Company / Name', company)}
+                      ${this.detailRow('envelope', 'Email', params.email)}
+                    </table>
                   </td>
                 </tr>
               </table>
-              <p style="margin:0 0 22px;font-size:15px;line-height:1.6;color:#334155;">
-                ${welcome.nextStep}
-              </p>
-              <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 8px;">
+
+              <h2 style="margin:0 0 18px;font-size:20px;line-height:1.3;color:#0a1f3c;">What Happens Next?</h2>
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 28px;">
+                ${nextStepsHtml}
+              </table>
+
+              <table role="presentation" cellpadding="0" cellspacing="0" width="100%" style="margin:0 0 16px;">
                 <tr>
-                  <td style="background:#f97316;border-radius:999px;">
-                    <a href="mailto:${SUPPORT_EMAIL}" style="display:inline-block;padding:12px 22px;font-size:14px;font-weight:700;color:#ffffff;text-decoration:none;">
-                      Contact ${SUPPORT_EMAIL}
+                  <td align="center">
+                    <a href="${siteUrl}" style="display:inline-block;background:#f15a24;border-radius:10px;padding:14px 28px;font-size:15px;font-weight:700;color:#ffffff;text-decoration:none;">
+                      Explore CLOX →
                     </a>
                   </td>
                 </tr>
               </table>
-              <p style="margin:14px 0 0;font-size:13px;line-height:1.5;color:#64748b;">
-                For any questions about your submission, email
-                <a href="mailto:${SUPPORT_EMAIL}" style="color:#0a1f3c;font-weight:700;">${SUPPORT_EMAIL}</a>
-                and include your reference number.
+              <p style="margin:0;text-align:center;font-size:13px;line-height:1.55;color:#64748b;">
+                If you have any questions, please email
+                <a href="mailto:${SUPPORT_EMAIL}" style="color:#0a1f3c;font-weight:700;text-decoration:underline;">${SUPPORT_EMAIL}</a>.
               </p>
             </td>
           </tr>
           <tr>
-            <td style="background:#0a1f3c;padding:24px 32px;border-top:4px solid #f97316;">
-              <p style="margin:0 0 6px;font-size:16px;font-weight:800;color:#ffffff;">CLOX</p>
-              <p style="margin:0 0 10px;font-size:12px;line-height:1.55;color:#cbd5e1;">
-                ${COMPANY_LINE}<br/>
+            <td style="background:#0a1f3c;padding:28px 32px;border-top:3px solid #f15a24;text-align:center;">
+              <p style="margin:0 0 8px;font-size:16px;font-weight:800;color:#ffffff;">CLOX Freight Forwarding</p>
+              <p style="margin:0 0 6px;font-size:12px;line-height:1.55;color:#cbd5e1;">
+                ${COMPANY_LINE}
+              </p>
+              <p style="margin:0 0 14px;font-size:12px;line-height:1.55;color:#cbd5e1;">
                 ${ABN_LINE}
               </p>
-              <p style="margin:0 0 10px;font-size:12px;line-height:1.55;color:#94a3b8;">
+              <p style="margin:0;font-size:12px;line-height:1.55;color:#94a3b8;">
                 Enquiries:
-                <a href="mailto:${SUPPORT_EMAIL}" style="color:#fdba74;text-decoration:none;">${SUPPORT_EMAIL}</a>
-                &nbsp;·&nbsp;
-                <a href="https://www.clox.com.au" style="color:#fdba74;text-decoration:none;">www.clox.com.au</a>
-              </p>
-              <p style="margin:0;font-size:11px;line-height:1.5;color:#64748b;">
-                This email confirms a pre-launch expression of interest only. It is not a binding service contract and does not grant live marketplace access.
+                <a href="mailto:${SUPPORT_EMAIL}" style="color:#fdba74;text-decoration:underline;">${SUPPORT_EMAIL}</a>
+                &nbsp;|&nbsp;
+                <a href="${siteUrl}" style="color:#fdba74;text-decoration:underline;">www.clox.com.au</a>
               </p>
             </td>
           </tr>
@@ -267,6 +430,7 @@ export class NotificationsService {
     text: string;
     html?: string;
     cc?: string;
+    bcc?: string;
     attachments?: {
       filename: string;
       path: string;
@@ -285,6 +449,7 @@ export class NotificationsService {
       from: this.fromAddress(),
       to: params.to,
       cc: params.cc,
+      bcc: params.bcc,
       subject: params.subject,
       text: params.text,
       html: params.html,
@@ -313,14 +478,36 @@ export class NotificationsService {
   }) {
     const investNotify = this.config.get('INVEST_NOTIFY_EMAIL', { infer: true });
     const submitter = params.email.trim().toLowerCase();
+    const support = SUPPORT_EMAIL.toLowerCase();
     const cc =
       params.type === 'INVESTOR' &&
       investNotify &&
       investNotify.toLowerCase() !== submitter
         ? investNotify
         : undefined;
+    const bcc = submitter !== support ? SUPPORT_EMAIL : undefined;
 
     const logo = this.logoPath();
+    const iconNames = [
+      'truck',
+      'building',
+      'envelope',
+      'document',
+      'shield',
+      'bell',
+    ] as const;
+    const iconAttachments = iconNames.flatMap((name) => {
+      const path = this.iconPath(name);
+      if (!path) return [];
+      return [
+        {
+          filename: `icon-${name}.png`,
+          path,
+          cid: this.iconCid(name),
+        },
+      ];
+    });
+
     const content = this.buildLeadEmail({
       type: params.type,
       leadId: params.leadId,
@@ -329,13 +516,8 @@ export class NotificationsService {
       includeLogo: Boolean(logo),
     });
 
-    return this.sendMail({
-      to: params.email,
-      cc,
-      subject: content.subject,
-      text: content.text,
-      html: content.html,
-      attachments: logo
+    const attachments = [
+      ...(logo
         ? [
             {
               filename: 'logo-clox.png',
@@ -343,7 +525,18 @@ export class NotificationsService {
               cid: 'clox-logo',
             },
           ]
-        : undefined,
+        : []),
+      ...iconAttachments,
+    ];
+
+    return this.sendMail({
+      to: params.email,
+      cc,
+      bcc,
+      subject: content.subject,
+      text: content.text,
+      html: content.html,
+      attachments: attachments.length > 0 ? attachments : undefined,
     });
   }
 }

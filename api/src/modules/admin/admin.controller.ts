@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   Header,
   Param,
@@ -73,6 +74,15 @@ export class AdminController {
     @CurrentAdmin() admin: AuthenticatedAdmin,
   ) {
     return this.adminService.updateLead(id, body, admin.id);
+  }
+
+  @Delete('leads/:id')
+  @ApiOperation({ summary: 'Permanently delete a lead' })
+  deleteLead(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentAdmin() admin: AuthenticatedAdmin,
+  ) {
+    return this.adminService.deleteLead(id, admin.id);
   }
 
   @Post('leads/:id/notes')

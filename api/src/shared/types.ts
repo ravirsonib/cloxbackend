@@ -47,6 +47,7 @@ export const AuditAction = {
   LEAD_STATUS_CHANGED: 'lead.status_changed',
   LEAD_UPDATED: 'lead.updated',
   LEAD_NOTE_ADDED: 'lead.note_added',
+  LEAD_DELETED: 'lead.deleted',
   AUTH_OTP_REQUESTED: 'auth.otp_requested',
   AUTH_OTP_VERIFIED: 'auth.otp_verified',
   AUTH_OTP_FAILED: 'auth.otp_failed',

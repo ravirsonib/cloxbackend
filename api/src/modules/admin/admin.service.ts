@@ -254,6 +254,32 @@ export class AdminService {
     return lead;
   }
 
+  async deleteLead(id: string, actorId: string) {
+    this.ensureDatabase();
+
+    const existing = await this.prisma.lead.findUnique({ where: { id } });
+    if (!existing) {
+      throw new NotFoundException('Lead not found');
+    }
+
+    await this.audit.record({
+      action: AuditAction.LEAD_DELETED,
+      leadId: id,
+      actorId,
+      metadata: {
+        deletedLeadId: id,
+        type: existing.type,
+        email: existing.email,
+        companyName: existing.companyName,
+        status: existing.status,
+      },
+    });
+
+    await this.prisma.lead.delete({ where: { id } });
+
+    return { ok: true as const };
+  }
+
   async addNote(id: string, input: CreateLeadNoteInput, actorId: string) {
     this.ensureDatabase();
 
