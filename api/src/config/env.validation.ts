@@ -29,6 +29,15 @@ export const envSchema = z.object({
   MAIL_FROM: z.string().optional(),
   NOTIFY_EMAIL: z.string().email().optional(),
   INVEST_NOTIFY_EMAIL: z.string().email().optional(),
+  /**
+   * Public HTTPS base for email images (no trailing slash).
+   * Gmail web does not render cid: embeds — images must be hosted URLs.
+   * Assets live on the launch site at /email/...
+   */
+  EMAIL_ASSET_BASE_URL: z
+    .string()
+    .url()
+    .default('https://clox.com.au/email'),
   ENABLE_OPENAPI: booleanFromString.default(false),
   /** TEMP testing: include OTP in API response and show on admin login. Turn off for real use. */
   EXPOSE_OTP_IN_RESPONSE: booleanFromString.default(true),

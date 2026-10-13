@@ -1,5 +1,3 @@
-import { existsSync } from 'fs';
-import { join } from 'path';
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import nodemailer from 'nodemailer';
@@ -55,44 +53,44 @@ export class NotificationsService {
   }
 
   /**
-   * Email header logo must be opaque RGB on navy (#0a1f3c).
-   * Transparent “light” logos fail in dark-mode / clients that restyle
-   * backgrounds — white ink disappears and only the orange marks remain.
+   * Gmail web (and many mobile clients) do not render cid: embeds — they show
+   * as downloadable attachments with broken &lt;img&gt; placeholders.
+   * Images must be absolute HTTPS URLs on a public host.
    */
-  private logoPath(): string | null {
-    const filename = 'logo-clox-email-header.png';
-    const candidates = [
-      join(__dirname, '..', '..', 'assets', 'email', filename),
-      join(process.cwd(), 'assets', 'email', filename),
-      join(process.cwd(), 'src', 'assets', 'email', filename),
-    ];
-    return candidates.find((path) => existsSync(path)) ?? null;
+  private emailAssetBaseUrl(): string {
+    return this.config
+      .get('EMAIL_ASSET_BASE_URL', { infer: true })
+      .replace(/\/+$/, '');
   }
 
-  private iconPath(
-    name: 'truck' | 'building' | 'envelope' | 'document' | 'shield' | 'bell',
-  ): string | null {
-    const filename = `icon-${name}.png`;
-    const candidates = [
-      join(__dirname, '..', '..', 'assets', 'email', 'icons', filename),
-      join(process.cwd(), 'assets', 'email', 'icons', filename),
-      join(process.cwd(), 'src', 'assets', 'email', 'icons', filename),
-    ];
-    return candidates.find((path) => existsSync(path)) ?? null;
+  private assetUrl(...parts: string[]): string {
+    const path = parts.map((p) => p.replace(/^\/+|\/+$/g, '')).join('/');
+    return `${this.emailAssetBaseUrl()}/${path}`;
   }
 
-  private iconCid(
-    name: 'truck' | 'building' | 'envelope' | 'document' | 'shield' | 'bell',
+  private logoUrl(): string {
+    return this.assetUrl('logo-clox-email-header.png');
+  }
+
+  private iconUrl(
+    name: 'truck' | 'building' | 'envelope',
   ): string {
-    return `clox-icon-${name}`;
+    return this.assetUrl('icons', `icon-${name}.png`);
+  }
+
+  private stepCircleUrl(name: 'document' | 'shield' | 'bell'): string {
+    return this.assetUrl('icons', `icon-${name}-circle.png`);
   }
 
   private iconImg(
-    name: 'truck' | 'building' | 'envelope' | 'document' | 'shield' | 'bell',
+    name: 'truck' | 'building' | 'envelope',
     size: number,
   ): string {
-    // display:block removes baseline gap under images in email clients.
-    return `<img src="cid:${this.iconCid(name)}" width="${size}" height="${size}" alt="" style="display:block;margin:0 auto;border:0;outline:none;width:${size}px;height:${size}px;" />`;
+    return `<img src="${this.iconUrl(name)}" width="${size}" height="${size}" alt="" style="display:block;border:0;outline:none;width:${size}px;height:${size}px;" />`;
+  }
+
+  private stepCircleImg(name: 'document' | 'shield' | 'bell'): string {
+    return `<img src="${this.stepCircleUrl(name)}" width="40" height="40" alt="" style="display:block;border:0;outline:none;width:40px;height:40px;" />`;
   }
 
   private leadLabel(type: LeadEmailKind): string {
@@ -250,22 +248,15 @@ export class NotificationsService {
     body: string,
     isLast: boolean,
   ) {
-    // Design: circle top aligns with title top (not middle of whole text block).
-    // Middle-aligning the row made longer body copy (e.g. Be Ready) push the
-    // circle downward relative to its title — that looked "unaligned".
+    // Circle art is pre-baked into the PNG (icon centered on peach). Do not
+    // rely on email-client table/CSS centering — that is what left-shifted icons.
     return `
       <tr>
         <td style="padding:0 0 ${isLast ? '0' : '22px'} 0;">
           <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">
             <tr>
               <td width="56" valign="top" align="left" style="width:56px;padding:0 14px 0 0;vertical-align:top;">
-                <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="40" height="40" style="width:40px;height:40px;">
-                  <tr>
-                    <td width="40" height="40" align="center" valign="middle" bgcolor="#fff1e8" style="width:40px;height:40px;background-color:#fff1e8;border-radius:20px;text-align:center;vertical-align:middle;line-height:40px;">
-                      ${this.iconImg(icon, 20)}
-                    </td>
-                  </tr>
-                </table>
+                ${this.stepCircleImg(icon)}
               </td>
               <td valign="top" style="padding:0;vertical-align:top;">
                 <p style="margin:0 0 4px;font-size:15px;line-height:20px;font-weight:700;color:#0a1f3c;">${title}</p>
@@ -282,16 +273,12 @@ export class NotificationsService {
     leadId: string;
     email: string;
     companyName?: string | null;
-    includeLogo: boolean;
   }) {
     const label = this.leadLabel(params.type);
     const welcome = this.welcomeCopy(params.type);
     const company = params.companyName?.trim() || '—';
     const siteUrl = 'https://www.clox.com.au';
-    const logoHtml = params.includeLogo
-      ? `<img src="cid:clox-logo" width="180" height="62" alt="CLOX Freight Forwarding" style="display:block;border:0;outline:none;width:180px;height:auto;max-width:180px;background-color:#0a1f3c;" />`
-      : `<div style="font-size:28px;font-weight:800;letter-spacing:0.04em;color:#ffffff;line-height:1;">CLOX</div>
-         <div style="margin-top:4px;font-size:12px;font-weight:600;letter-spacing:0.08em;color:#ffffff;text-transform:uppercase;">Freight Forwarding</div>`;
+    const logoHtml = `<img src="${this.logoUrl()}" width="180" height="62" alt="CLOX Freight Forwarding" style="display:block;margin:0 auto;border:0;outline:none;width:180px;height:auto;max-width:180px;" />`;
 
     const nextStepIcons = ['document', 'shield', 'bell'] as const;
     const nextStepsHtml = welcome.nextSteps
@@ -332,11 +319,32 @@ export class NotificationsService {
     ].join('\n');
 
     const html = `<!DOCTYPE html>
-<html lang="en">
+<html lang="en" xmlns="http://www.w3.org/1999/xhtml">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="color-scheme" content="light only" />
+  <meta name="supported-color-schemes" content="light" />
   <title>${subject}</title>
+  <style type="text/css">
+    :root { color-scheme: light only; supported-color-schemes: light; }
+    body, table, td, p, a { color-scheme: light only; }
+    /* Prevent Apple Mail / iOS / some Android clients from inverting colors */
+    @media (prefers-color-scheme: dark) {
+      body, table, td, div, p, span, h1, h2, a {
+        color-scheme: light only !important;
+      }
+    }
+  </style>
+  <!--[if mso]>
+  <noscript>
+    <xml>
+      <o:OfficeDocumentSettings>
+        <o:PixelsPerInch>96</o:PixelsPerInch>
+      </o:OfficeDocumentSettings>
+    </xml>
+  </noscript>
+  <![endif]-->
 </head>
 <body style="margin:0;padding:0;background:#eef2f6;font-family:Arial,Helvetica,sans-serif;color:#0f172a;">
   <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#eef2f6;padding:24px 12px;">
@@ -345,16 +353,20 @@ export class NotificationsService {
         <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:600px;background:#ffffff;border-radius:16px;overflow:hidden;border:1px solid #e2e8f0;">
           <tr>
             <td bgcolor="#0a1f3c" style="background-color:#0a1f3c;background:#0a1f3c;padding:28px 32px;text-align:center;">
-              <div style="text-align:center;">
-                ${logoHtml}
-              </div>
+              <table role="presentation" cellpadding="0" cellspacing="0" border="0" align="center" style="margin:0 auto;">
+                <tr>
+                  <td align="center" bgcolor="#0a1f3c" style="background-color:#0a1f3c;">
+                    ${logoHtml}
+                  </td>
+                </tr>
+              </table>
               <p style="margin:18px 0 0;font-size:11px;font-weight:700;color:#ffffff;letter-spacing:0.12em;text-transform:uppercase;">
                 Australia's digital full-load freight marketplace
               </p>
             </td>
           </tr>
           <tr>
-            <td style="padding:36px 32px 28px;">
+            <td bgcolor="#ffffff" style="background-color:#ffffff;padding:36px 32px 28px;">
               <p style="margin:0 0 10px;font-size:12px;font-weight:700;color:#f15a24;text-transform:uppercase;letter-spacing:0.08em;">
                 Pre-launch confirmation
               </p>
@@ -365,9 +377,9 @@ export class NotificationsService {
                 ${welcome.intro}
               </p>
 
-              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f4f7f9;border-radius:14px;margin:0 0 28px;">
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" bgcolor="#f4f7f9" style="background-color:#f4f7f9;background:#f4f7f9;border-radius:14px;margin:0 0 28px;">
                 <tr>
-                  <td style="padding:22px 22px 8px;">
+                  <td bgcolor="#f4f7f9" style="background-color:#f4f7f9;padding:22px 22px 8px;">
                     <p style="margin:0 0 16px;font-size:12px;font-weight:700;color:#0a1f3c;text-transform:uppercase;letter-spacing:0.08em;">Registration details</p>
                     <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
                       ${this.detailRow('truck', 'Type', label)}
@@ -399,7 +411,7 @@ export class NotificationsService {
             </td>
           </tr>
           <tr>
-            <td style="background:#0a1f3c;padding:28px 32px;border-top:3px solid #f15a24;text-align:center;">
+            <td bgcolor="#0a1f3c" style="background-color:#0a1f3c;background:#0a1f3c;padding:28px 32px;border-top:3px solid #f15a24;text-align:center;">
               <p style="margin:0 0 8px;font-size:16px;font-weight:800;color:#ffffff;">CLOX Freight Forwarding</p>
               <p style="margin:0 0 6px;font-size:12px;line-height:1.55;color:#cbd5e1;">
                 ${COMPANY_LINE}
@@ -436,6 +448,8 @@ export class NotificationsService {
       filename: string;
       path: string;
       cid: string;
+      contentType?: string;
+      contentDisposition?: 'inline' | 'attachment';
     }[];
   }) {
     const transporter = this.getTransporter();
@@ -488,48 +502,19 @@ export class NotificationsService {
         : undefined;
     const bcc = submitter !== support ? SUPPORT_EMAIL : undefined;
 
-    const logo = this.logoPath();
-    const iconNames = [
-      'truck',
-      'building',
-      'envelope',
-      'document',
-      'shield',
-      'bell',
-    ] as const;
-    const iconAttachments = iconNames.flatMap((name) => {
-      const path = this.iconPath(name);
-      if (!path) return [];
-      return [
-        {
-          filename: `icon-${name}.png`,
-          path,
-          cid: this.iconCid(name),
-        },
-      ];
-    });
-
     const content = this.buildLeadEmail({
       type: params.type,
       leadId: params.leadId,
       email: params.email,
       companyName: params.companyName,
-      includeLogo: Boolean(logo),
     });
 
-    const attachments = [
-      ...(logo
-        ? [
-            {
-              filename: 'logo-clox-email-header.png',
-              path: logo,
-              cid: 'clox-logo',
-            },
-          ]
-        : []),
-      ...iconAttachments,
-    ];
+    this.logger.log(
+      `Lead email image base: ${this.emailAssetBaseUrl()}`,
+    );
 
+    // No image attachments — Gmail treats cid: parts as downloadable files
+    // and does not render them in the HTML body.
     return this.sendMail({
       to: params.email,
       cc,
@@ -537,7 +522,6 @@ export class NotificationsService {
       subject: content.subject,
       text: content.text,
       html: content.html,
-      attachments: attachments.length > 0 ? attachments : undefined,
     });
   }
 }

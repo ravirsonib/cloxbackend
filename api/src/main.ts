@@ -1,6 +1,9 @@
+import { existsSync } from 'fs';
+import { join } from 'path';
 import { ValidationPipe } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { NestFactory } from '@nestjs/core';
+import type { NestExpressApplication } from '@nestjs/platform-express';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { Logger } from 'nestjs-pino';
 import { AppModule } from './app.module';
@@ -8,9 +11,29 @@ import { ProblemDetailsFilter } from './common/filters/problem-details.filter';
 import type { AppEnv } from './config/env.validation';
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule, { bufferLogs: true });
+  const app = await NestFactory.create<NestExpressApplication>(AppModule, {
+    bufferLogs: true,
+  });
   const config = app.get(ConfigService<AppEnv, true>);
   const logger = app.get(Logger);
+
+  // Public email images (outside /v1). Gmail cannot render cid: embeds.
+  const emailAssetDirs = [
+    join(__dirname, 'assets', 'email'),
+    join(process.cwd(), 'assets', 'email'),
+    join(process.cwd(), 'src', 'assets', 'email'),
+  ];
+  const emailAssetDir = emailAssetDirs.find((dir) => existsSync(dir));
+  if (emailAssetDir) {
+    app.useStaticAssets(emailAssetDir, {
+      prefix: '/email/',
+      setHeaders: (res) => {
+        res.setHeader('Cache-Control', 'public, max-age=86400');
+        res.setHeader('Access-Control-Allow-Origin', '*');
+      },
+    });
+    logger.log(`Email assets served from ${emailAssetDir} at /email/`);
+  }
 
   app.useLogger(logger);
   app.setGlobalPrefix(config.get('API_PREFIX', { infer: true }));
