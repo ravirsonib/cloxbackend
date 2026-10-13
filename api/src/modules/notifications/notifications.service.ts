@@ -54,16 +54,17 @@ export class NotificationsService {
     );
   }
 
+  /**
+   * Email header logo must be opaque RGB on navy (#0a1f3c).
+   * Transparent “light” logos fail in dark-mode / clients that restyle
+   * backgrounds — white ink disappears and only the orange marks remain.
+   */
   private logoPath(): string | null {
+    const filename = 'logo-clox-email-header.png';
     const candidates = [
-      // nest start / prod (compiled next to dist/assets or src/assets)
-      join(__dirname, '..', '..', 'assets', 'email', 'logo-clox-light.png'),
-      join(__dirname, '..', '..', 'assets', 'email', 'logo-clox.png'),
-      // repo root when running from api/api
-      join(process.cwd(), 'assets', 'email', 'logo-clox-light.png'),
-      join(process.cwd(), 'assets', 'email', 'logo-clox.png'),
-      join(process.cwd(), 'src', 'assets', 'email', 'logo-clox-light.png'),
-      join(process.cwd(), 'src', 'assets', 'email', 'logo-clox.png'),
+      join(__dirname, '..', '..', 'assets', 'email', filename),
+      join(process.cwd(), 'assets', 'email', filename),
+      join(process.cwd(), 'src', 'assets', 'email', filename),
     ];
     return candidates.find((path) => existsSync(path)) ?? null;
   }
@@ -288,7 +289,7 @@ export class NotificationsService {
     const company = params.companyName?.trim() || '—';
     const siteUrl = 'https://www.clox.com.au';
     const logoHtml = params.includeLogo
-      ? `<img src="cid:clox-logo" width="160" height="45" alt="CLOX Freight Forwarding" style="display:block;border:0;outline:none;height:auto;max-width:160px;" />`
+      ? `<img src="cid:clox-logo" width="180" height="62" alt="CLOX Freight Forwarding" style="display:block;border:0;outline:none;width:180px;height:auto;max-width:180px;background-color:#0a1f3c;" />`
       : `<div style="font-size:28px;font-weight:800;letter-spacing:0.04em;color:#ffffff;line-height:1;">CLOX</div>
          <div style="margin-top:4px;font-size:12px;font-weight:600;letter-spacing:0.08em;color:#ffffff;text-transform:uppercase;">Freight Forwarding</div>`;
 
@@ -343,8 +344,8 @@ export class NotificationsService {
       <td align="center">
         <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:600px;background:#ffffff;border-radius:16px;overflow:hidden;border:1px solid #e2e8f0;">
           <tr>
-            <td style="background:#0a1f3c;padding:28px 32px;text-align:center;">
-              <div style="text-align:left;display:inline-block;">
+            <td bgcolor="#0a1f3c" style="background-color:#0a1f3c;background:#0a1f3c;padding:28px 32px;text-align:center;">
+              <div style="text-align:center;">
                 ${logoHtml}
               </div>
               <p style="margin:18px 0 0;font-size:11px;font-weight:700;color:#ffffff;letter-spacing:0.12em;text-transform:uppercase;">
@@ -520,7 +521,7 @@ export class NotificationsService {
       ...(logo
         ? [
             {
-              filename: 'logo-clox.png',
+              filename: 'logo-clox-email-header.png',
               path: logo,
               cid: 'clox-logo',
             },
