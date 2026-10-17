@@ -1,7 +1,9 @@
 import { useQuery } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
+import { IdentitySummary } from '@/components/identity-summary';
 import { DashboardPage } from '@/pages/dashboard-page';
+import { LoadingBlock } from '@/components/status-blocks';
 import { Notice, RoleBadge, dataCardClassName } from '@/components/ui';
 import { getErrorDetail, getIdentityMe } from '@/lib/api';
 import { cn } from '@/lib/cn';
@@ -39,7 +41,6 @@ function RoleHomePage() {
   const { t } = useTranslation('common');
   const role = useAuthStore((s) => s.role);
   const email = useAuthStore((s) => s.email);
-  const kind = useAuthStore((s) => s.kind);
 
   const me = useQuery({
     queryKey: ['identity', 'me'],
@@ -61,9 +62,14 @@ function RoleHomePage() {
         <RoleBadge role={role} />
       </div>
       <p className="mt-2 text-sm text-clox-mute">
-        {t('home.signedInAs')} <span className="font-medium text-clox-ink">{email}</span> ({kind}
-        /{role})
+        {t('home.signedInAs')} <span className="font-medium text-clox-ink">{email}</span>
       </p>
+
+      {me.isLoading ? (
+        <div className="mt-6">
+          <LoadingBlock label={t('loading')} />
+        </div>
+      ) : null}
 
       {me.isError ? (
         <Notice tone="error" className="mt-4">
@@ -71,13 +77,12 @@ function RoleHomePage() {
         </Notice>
       ) : null}
 
-      {me.data ? (
-        <pre className="clox-card mt-4 overflow-x-auto p-4 text-xs text-clox-mute">
-          {JSON.stringify(me.data, null, 2)}
-        </pre>
-      ) : null}
+      {me.data ? <IdentitySummary me={me.data} className="clox-card mt-6 p-5" /> : null}
 
-      <div className="mt-8 grid gap-3 sm:grid-cols-2">
+      <h2 className="mt-8 font-display text-lg font-semibold text-clox-ink">
+        {t('home.shortcuts')}
+      </h2>
+      <div className="mt-3 grid gap-3 sm:grid-cols-2">
         {isOps ? (
           <HomeLink
             to="/compliance"

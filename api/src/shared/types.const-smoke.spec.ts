@@ -64,6 +64,7 @@ describe('shared/types const + helper smoke', () => {
         lengthCm: 10,
         widthCm: 10,
         heightCm: 10,
+        distanceKm: 12,
         loadTypes: ['GENERAL'],
         siteDisclaimerAccepted: true,
         receiverName: 'R',

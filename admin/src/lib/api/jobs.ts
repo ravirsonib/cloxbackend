@@ -5,6 +5,14 @@ export type JobSummary = {
   status: string;
   pricingModel: string;
   title: string | null;
+  receiverName?: string | null;
+  receiverEmail?: string | null;
+  deadWeightKg?: number | null;
+  lengthCm?: number | null;
+  widthCm?: number | null;
+  heightCm?: number | null;
+  loadTypes?: string[];
+  hourlyPattern?: string | null;
   minVehicleClass: string | null;
   recommendedVehicleClass: string | null;
   chargeableWeightKg: number | null;
@@ -117,6 +125,10 @@ export function createJob(payload: Record<string, unknown>) {
   return http.post<JobSummary>('/jobs', payload).then((r) => r.data);
 }
 
+export function updateJob(id: string, payload: Record<string, unknown>) {
+  return http.patch<JobSummary>(`/jobs/${id}`, payload).then((r) => r.data);
+}
+
 export function publishJob(id: string) {
   return http.post<JobSummary>(`/jobs/${id}/publish`, {}).then((r) => r.data);
 }
@@ -147,6 +159,22 @@ export function recommendVehicle(payload: {
       payload,
     )
     .then((r) => r.data);
+}
+
+export type JobRouteEstimate = {
+  distanceKm: number;
+  durationMinutes: number;
+  drivingMinutes: number;
+  fatigueBreakMinutes: number;
+  billableHours: number | null;
+  mock: boolean;
+};
+
+export function previewJobRoute(payload: {
+  pricingModel: 'PER_KM' | 'HOURLY';
+  stops: Array<Record<string, unknown>>;
+}) {
+  return http.post<JobRouteEstimate>('/jobs/route-estimate', payload).then((r) => r.data);
 }
 
 export function getMarketBoard() {

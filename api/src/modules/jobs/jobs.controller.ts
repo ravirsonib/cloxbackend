@@ -3,6 +3,7 @@ import {
   Controller,
   Get,
   Param,
+  Patch,
   Post,
   UseGuards,
 } from '@nestjs/common';
@@ -10,7 +11,9 @@ import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import {
   AppRole,
   jobCreateSchema,
+  jobRouteEstimateSchema,
   type JobCreateInput,
+  type JobRouteEstimateInput,
 } from '../../shared/types';
 import { CurrentPrincipal } from '../../common/decorators/current-admin.decorator';
 import { Roles } from '../../common/decorators/roles.decorator';
@@ -56,6 +59,19 @@ export class JobsController {
     return { chargeableWeightKg: chargeable, recommendedVehicleClass: recommended };
   }
 
+  @Post('route-estimate')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(AppRole.SENDER)
+  @ApiOperation({
+    summary: 'Suggest distance/duration from pickup + drop (editable by sender on save)',
+  })
+  routeEstimate(
+    @Body(new ZodValidationPipe(jobRouteEstimateSchema)) body: JobRouteEstimateInput,
+  ) {
+    return this.jobsService.previewRoute(body);
+  }
+
   @Get()
   @ApiBearerAuth()
   @UseGuards(JwtAuthGuard, RolesGuard)
@@ -84,6 +100,19 @@ export class JobsController {
     @Body(new ZodValidationPipe(jobCreateSchema)) body: JobCreateInput,
   ) {
     return this.jobsService.createJob(principal, body);
+  }
+
+  @Patch(':id')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(AppRole.SENDER)
+  @ApiOperation({ summary: 'Update DRAFT job (canBook required)' })
+  update(
+    @CurrentPrincipal() principal: AuthenticatedPrincipal,
+    @Param('id') id: string,
+    @Body(new ZodValidationPipe(jobCreateSchema)) body: JobCreateInput,
+  ) {
+    return this.jobsService.updateJob(principal, id, body);
   }
 
   @Post(':id/publish')

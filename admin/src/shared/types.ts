@@ -113,6 +113,7 @@ export const AuditAction = {
   DRIVER_ACTIVATED: 'driver.activated',
   DRIVER_SUSPENDED: 'driver.suspended',
   JOB_CREATED: 'job.created',
+  JOB_UPDATED: 'job.updated',
   JOB_PUBLISHED: 'job.published',
   PROPOSAL_SUBMITTED: 'proposal.submitted',
   PROPOSAL_ACCEPTED: 'proposal.accepted',

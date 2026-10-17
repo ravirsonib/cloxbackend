@@ -12,7 +12,11 @@ import {
   ProposalStatus,
 } from '@prisma/client';
 import type { AuthenticatedPrincipal } from '../../common/guards/jwt-auth.guard';
-import { AuditAction, type JobCreateInput } from '../../shared/types';
+import {
+  AuditAction,
+  type JobCreateInput,
+  type JobRouteEstimateInput,
+} from '../../shared/types';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { PaymentsService } from '../payments/payments.service';
@@ -24,7 +28,7 @@ import {
   isVehicleClassAdequate,
   recommendVehicleClass,
 } from './job-pricing.util';
-import { estimateRoute, orderStopsTspObjects } from './routing.mock';
+import { estimateRoute, orderStopsTspObjects, routeFromDistanceKm } from './routing.mock';
 
 const DEFAULT_MIN_BASE_CENTS = {
   PER_KM: 5_000,
@@ -291,6 +295,30 @@ export class JobsService {
     };
   }
 
+  /**
+   * Suggest distance/duration from pickup + drop (mock Valhalla until real client is wired).
+   * Does not persist; sender may edit the suggested km on create/update.
+   */
+  previewRoute(input: JobRouteEstimateInput) {
+    const sortedStops = input.stops.slice().sort((a, b) => a.sequence - b.sequence);
+    const orderedStops =
+      input.pricingModel === 'HOURLY' && sortedStops.length > 2
+        ? orderStopsTspObjects(sortedStops)
+        : sortedStops;
+    const route = estimateRoute({
+      stops: orderedStops.map((s) => ({ lat: s.lat, lng: s.lng })),
+      pricingModel: input.pricingModel,
+    });
+    return {
+      distanceKm: route.distanceKm,
+      durationMinutes: route.totalDurationMinutes,
+      drivingMinutes: route.drivingMinutes,
+      fatigueBreakMinutes: route.fatigueBreakMinutes,
+      billableHours: route.billableHours,
+      mock: route.mock,
+    };
+  }
+
   async createJob(principal: AuthenticatedPrincipal, input: JobCreateInput) {
     this.ensureDatabase();
     const eligibility = await this.senderService.getBookingEligibility(principal);
@@ -349,11 +377,8 @@ export class JobsService {
       input.pricingModel === 'HOURLY' && sortedStops.length > 2
         ? orderStopsTspObjects(sortedStops)
         : sortedStops;
-    const ordered = persistedStops.map((s) => ({ lat: s.lat, lng: s.lng }));
-    const route = estimateRoute({
-      stops: ordered,
-      pricingModel: input.pricingModel,
-    });
+    // Sender-entered km is source of truth; suggestion is UI-only via previewRoute.
+    const route = routeFromDistanceKm(input.distanceKm, input.pricingModel);
 
     const minBase = await this.getMinBaseCents(input.pricingModel);
     let estimateInc = minBase;
@@ -422,6 +447,149 @@ export class JobsService {
 
     await this.audit.recordPlatform({
       action: AuditAction.JOB_CREATED,
+      actorUserId: user.id,
+      entityType: 'Job',
+      entityId: job.id,
+      metadata: { pricingModel: input.pricingModel, minClass, chargeable },
+    });
+
+    return this.mapJob(job);
+  }
+
+  async updateJob(principal: AuthenticatedPrincipal, jobId: string, input: JobCreateInput) {
+    this.ensureDatabase();
+    const eligibility = await this.senderService.getBookingEligibility(principal);
+    if (!eligibility.canBook) {
+      throw new ForbiddenException({
+        message: 'Sender cannot update jobs until Ops approve + invoice + payment ready',
+        code: 'SENDER_NOT_BOOKING_READY',
+        goNoGo: eligibility.goNoGo,
+      });
+    }
+
+    const user = await this.prisma.user.findUnique({
+      where: { id: principal.id },
+      include: { company: { include: { homeRegion: true } } },
+    });
+    if (!user?.company) throw new NotFoundException('Sender company not found');
+
+    const existing = await this.prisma.job.findFirst({
+      where: { id: jobId, senderCompanyId: user.company.id },
+    });
+    if (!existing) throw new NotFoundException('Job not found');
+    if (existing.status !== JobStatus.DRAFT) {
+      throw new BadRequestException('Only DRAFT jobs can be edited');
+    }
+
+    if (!input.siteDisclaimerAccepted) {
+      throw new BadRequestException('Site access disclaimer must be accepted');
+    }
+    if (!input.receiverEmail || !input.receiverName) {
+      throw new BadRequestException('Receiver name + email required');
+    }
+
+    for (const stop of input.stops) {
+      if (stop.stopType === 'DROPOFF' && input.stops.filter((s) => s.stopType === 'DROPOFF').length > 1) {
+        if (!stop.receiverEmail || !stop.receiverName) {
+          throw new BadRequestException('Each drop requires receiver name + email for multi-drop');
+        }
+      }
+    }
+
+    const chargeable = chargeableWeightKg({
+      deadWeightKg: input.deadWeightKg,
+      lengthCm: input.lengthCm,
+      widthCm: input.widthCm,
+      heightCm: input.heightCm,
+    });
+    const recommended = recommendVehicleClass(chargeable);
+    const minClass = input.minVehicleClass ?? recommended;
+    if (!isVehicleClassAdequate(minClass, recommended)) {
+      throw new BadRequestException({
+        message: `Vehicle class ${minClass} is undersized for chargeable ${chargeable.toFixed(1)} kg (min ${recommended})`,
+        code: 'VEHICLE_CLASS_UNDERSIZE',
+        recommended,
+        chargeableWeightKg: chargeable,
+      });
+    }
+
+    const requiresDg = input.loadTypes.includes('DG');
+    const requiresReefer = input.loadTypes.includes('REEFER');
+    const requiresOversize = input.loadTypes.includes('OVERSIZE');
+
+    const sortedStops = input.stops.slice().sort((a, b) => a.sequence - b.sequence);
+    const persistedStops =
+      input.pricingModel === 'HOURLY' && sortedStops.length > 2
+        ? orderStopsTspObjects(sortedStops)
+        : sortedStops;
+    const route = routeFromDistanceKm(input.distanceKm, input.pricingModel);
+
+    const minBase = await this.getMinBaseCents(input.pricingModel);
+    let estimateInc = minBase;
+    if (input.pricingModel === 'PER_KM') {
+      estimateInc = Math.max(minBase, Math.round(route.distanceKm * 250));
+    } else {
+      estimateInc = Math.max(minBase, Math.round((route.billableHours ?? 4) * 8_000));
+    }
+    const estimate = gstSplitFromIncCents(estimateInc);
+    const origin = await this.resolveJobOrigin(persistedStops, user.company.homeRegionId);
+
+    const job = await this.prisma.job.update({
+      where: { id: existing.id },
+      data: {
+        pricingModel:
+          input.pricingModel === 'HOURLY' ? JobPricingModel.HOURLY : JobPricingModel.PER_KM,
+        title: input.title ?? existing.title ?? `${input.pricingModel} job`,
+        originRegionId: origin.originRegionId,
+        originTerritoryId: origin.originTerritoryId,
+        receiverName: input.receiverName,
+        receiverEmail: input.receiverEmail,
+        receiverPhone: input.receiverPhone,
+        pickupAt: new Date(input.pickupAt),
+        deadWeightKg: input.deadWeightKg,
+        lengthCm: input.lengthCm,
+        widthCm: input.widthCm,
+        heightCm: input.heightCm,
+        chargeableWeightKg: Math.round(chargeable * 10) / 10,
+        loadTypes: input.loadTypes,
+        requiresDg,
+        requiresReefer,
+        requiresOversize,
+        minVehicleClass: minClass,
+        recommendedVehicleClass: recommended,
+        siteManeuverability: input.siteManeuverability,
+        siteFacility: input.siteFacility,
+        siteDisclaimerAcceptedAt: new Date(),
+        hourlyPattern: input.hourlyPattern ?? null,
+        routeDistanceKm: route.distanceKm,
+        routeDurationMinutes: route.totalDurationMinutes,
+        routeFatigueBreakMinutes: route.fatigueBreakMinutes,
+        billableHours: route.billableHours,
+        estimateExGstCents: estimate.amountExGstCents,
+        estimateGstCents: estimate.amountGstCents,
+        estimateIncGstCents: estimate.amountIncGstCents,
+        stops: {
+          deleteMany: {},
+          create: persistedStops.map((s, index) => ({
+            sequence: index,
+            stopType: s.stopType,
+            label: s.label,
+            addressLine: s.addressLine,
+            suburb: s.suburb,
+            state: s.state,
+            postcode: s.postcode,
+            lat: s.lat,
+            lng: s.lng,
+            receiverName: s.receiverName,
+            receiverEmail: s.receiverEmail,
+          })),
+        },
+      },
+      include: { stops: { orderBy: { sequence: 'asc' } } },
+    });
+
+    await this.audit.recordPlatform({
+      action: AuditAction.JOB_UPDATED,
       actorUserId: user.id,
       entityType: 'Job',
       entityId: job.id,

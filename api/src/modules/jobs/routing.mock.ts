@@ -38,15 +38,15 @@ export type RouteEstimate = {
 };
 
 /**
- * Estimate route for ordered stops. Inserts unpaid 15 min rest when driving > 5.25 h.
- * Hourly jobs: billable hours = max(4, totalDuration/60).
+ * Derive duration / fatigue / billable from an effective distance (sender km or suggested).
+ * Hourly jobs: billable hours = max(4, ceil(totalHours*4)/4).
  */
-export function estimateRoute(params: {
-  stops: LatLng[];
-  pricingModel: 'PER_KM' | 'HOURLY';
-}): RouteEstimate {
-  const { stops, pricingModel } = params;
-  if (stops.length < 2) {
+export function routeFromDistanceKm(
+  distanceKm: number,
+  pricingModel: 'PER_KM' | 'HOURLY',
+): RouteEstimate {
+  const km = Math.round(Math.max(0, distanceKm) * 10) / 10;
+  if (km <= 0) {
     return {
       distanceKm: 0,
       drivingMinutes: 0,
@@ -57,30 +57,43 @@ export function estimateRoute(params: {
     };
   }
 
-  let distanceKm = 0;
-  for (let i = 0; i < stops.length - 1; i += 1) {
-    distanceKm += haversineKm(stops[i], stops[i + 1]) * ROAD_FACTOR;
-  }
-  distanceKm = Math.round(distanceKm * 10) / 10;
-
-  const drivingMinutes = Math.round((distanceKm / AVG_SPEED_KMH) * 60);
+  const drivingMinutes = Math.round((km / AVG_SPEED_KMH) * 60);
   const drivingHours = drivingMinutes / 60;
   const fatigueBreakMinutes = drivingHours > FATIGUE_THRESHOLD_HOURS ? FATIGUE_BREAK_MINUTES : 0;
   const totalDurationMinutes = drivingMinutes + fatigueBreakMinutes;
-
   const billableHours =
     pricingModel === 'HOURLY'
       ? Math.max(HOURLY_FLOOR_HOURS, Math.ceil((totalDurationMinutes / 60) * 4) / 4)
       : null;
 
   return {
-    distanceKm,
+    distanceKm: km,
     drivingMinutes,
     fatigueBreakMinutes,
     totalDurationMinutes,
     billableHours,
     mock: true,
   };
+}
+
+/**
+ * Suggest route for ordered stops (mock Valhalla). Inserts unpaid 15 min rest when driving > 5.25 h.
+ */
+export function estimateRoute(params: {
+  stops: LatLng[];
+  pricingModel: 'PER_KM' | 'HOURLY';
+}): RouteEstimate {
+  const { stops, pricingModel } = params;
+  if (stops.length < 2) {
+    return routeFromDistanceKm(0, pricingModel);
+  }
+
+  let distanceKm = 0;
+  for (let i = 0; i < stops.length - 1; i += 1) {
+    distanceKm += haversineKm(stops[i], stops[i + 1]) * ROAD_FACTOR;
+  }
+  distanceKm = Math.round(distanceKm * 10) / 10;
+  return routeFromDistanceKm(distanceKm, pricingModel);
 }
 
 /** Naive nearest-neighbour TSP for ≤4 stops (keeps first as start).

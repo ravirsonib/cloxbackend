@@ -32,8 +32,7 @@ export function QaUploadPage() {
   });
 
   const companyId = useMemo(() => {
-    const company = me.data?.company as { id?: string } | null | undefined;
-    if (company?.id) return company.id;
+    if (me.data?.company?.id) return me.data.company.id;
     if (role === AppRole.SENDER) return SENDER_COMPANY;
     return CARRIER_COMPANY;
   }, [me.data, role]);

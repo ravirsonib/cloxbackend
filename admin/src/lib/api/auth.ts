@@ -1,6 +1,9 @@
 import type { AuthTokens, OtpRequestInput, OtpVerifyInput } from '@/shared/types';
 import { createHttpClient, toApiError } from '@/lib/http/client';
 import { http } from '@/lib/http';
+import type { IdentityMe } from '@/lib/api/identity.types';
+
+export type { IdentityMe } from '@/lib/api/identity.types';
 
 export { applyAuthTokensToStore } from '@/lib/auth-session';
 
@@ -64,5 +67,5 @@ export function revokeSession(id: string) {
 }
 
 export function getIdentityMe() {
-  return http.get<Record<string, unknown>>('/identity/me').then((r) => r.data);
+  return http.get<IdentityMe>('/identity/me').then((r) => r.data);
 }

@@ -157,6 +157,7 @@ describe('JobsService crumb branch leftovers', () => {
         lengthCm: 100,
         widthCm: 100,
         heightCm: 100,
+        distanceKm: 12,
         loadTypes: ['GENERAL'],
         siteDisclaimerAccepted: true,
         receiverName: 'R',
@@ -242,6 +243,7 @@ describe('JobsService crumb branch leftovers', () => {
         lengthCm: 100,
         widthCm: 100,
         heightCm: 100,
+        distanceKm: 12,
         loadTypes: ['GENERAL'],
         siteDisclaimerAccepted: true,
         receiverName: 'R',
@@ -289,6 +291,7 @@ describe('JobsService crumb branch leftovers', () => {
         lengthCm: 100,
         widthCm: 100,
         heightCm: 100,
+        distanceKm: 12,
         loadTypes: ['GENERAL'],
         siteDisclaimerAccepted: true,
         receiverName: 'R',
@@ -338,6 +341,7 @@ describe('JobsService crumb branch leftovers', () => {
       lengthCm: 50,
       widthCm: 50,
       heightCm: 50,
+      distanceKm: 12,
       loadTypes: ['GENERAL'],
       siteDisclaimerAccepted: true,
       receiverName: 'R',
@@ -381,7 +385,7 @@ describe('JobsService crumb branch leftovers', () => {
   });
 
   it('createJob HOURLY floors when billableHours null', async () => {
-    const spy = jest.spyOn(routingMock, 'estimateRoute').mockReturnValue({
+    const spy = jest.spyOn(routingMock, 'routeFromDistanceKm').mockReturnValue({
       distanceKm: 10,
       drivingMinutes: 20,
       fatigueBreakMinutes: 0,
@@ -431,6 +435,7 @@ describe('JobsService crumb branch leftovers', () => {
       lengthCm: 50,
       widthCm: 50,
       heightCm: 50,
+      distanceKm: 12,
       loadTypes: ['GENERAL'],
       siteDisclaimerAccepted: true,
       receiverName: 'R',

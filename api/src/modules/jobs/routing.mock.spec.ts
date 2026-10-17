@@ -1,4 +1,9 @@
-import { orderStopsTspObjects, estimateRoute, haversineKm } from './routing.mock';
+import {
+  orderStopsTspObjects,
+  estimateRoute,
+  routeFromDistanceKm,
+  haversineKm,
+} from './routing.mock';
 
 describe('routing.mock', () => {
   describe('orderStopsTspObjects', () => {
@@ -35,6 +40,20 @@ describe('routing.mock', () => {
       expect(ordered).toContain(a);
       expect(ordered).toContain(b);
       expect(ordered).toContain(c);
+    });
+  });
+
+  describe('routeFromDistanceKm', () => {
+    it('persists sender km and null billable for PER_KM', () => {
+      const r = routeFromDistanceKm(42.5, 'PER_KM');
+      expect(r.distanceKm).toBe(42.5);
+      expect(r.billableHours).toBeNull();
+      expect(r.drivingMinutes).toBe(Math.round((42.5 / 60) * 60));
+    });
+
+    it('applies hourly 4h floor for short distance', () => {
+      const r = routeFromDistanceKm(10, 'HOURLY');
+      expect(r.billableHours).toBe(4);
     });
   });
 

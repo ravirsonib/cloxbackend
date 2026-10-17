@@ -23,6 +23,7 @@ function createInput(): JobCreateInput {
     lengthCm: 100,
     widthCm: 100,
     heightCm: 100,
+    distanceKm: 12,
     loadTypes: ['GENERAL'],
     siteManeuverability: 'EASY',
     siteFacility: 'DOCK',
@@ -149,12 +150,87 @@ describe('JobsService createJob + list/get paths', () => {
     };
     const service = makeService(prisma, true);
     const result = await service.createJob(senderPrincipal, createInput());
-    expect(prisma.job.create).toHaveBeenCalled();
+    expect(prisma.job.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          routeDistanceKm: 12,
+        }),
+      }),
+    );
     expect(result).toMatchObject({
       id: 'job-1',
       status: JobStatus.DRAFT,
     });
     expect(audit.recordPlatform).toHaveBeenCalled();
+  });
+
+  it('createJob uses sender distanceKm even when stops suggest differently', async () => {
+    const created = {
+      id: 'job-override',
+      title: null,
+      status: JobStatus.DRAFT,
+      pricingModel: 'PER_KM',
+      senderCompanyId: 'co-s',
+      deadWeightKg: 100,
+      chargeableWeightKg: 250,
+      minVehicleClass: 'UTE',
+      requiresDg: false,
+      requiresReefer: false,
+      requiresOversize: false,
+      loadTypes: ['GENERAL'],
+      siteManeuverability: 'EASY',
+      siteFacility: 'DOCK',
+      siteDisclaimerAcceptedAt: new Date(),
+      hourlyPattern: null,
+      routeDistanceKm: 99,
+      routeDurationMinutes: 99,
+      routeFatigueBreakMinutes: 0,
+      billableHours: null,
+      estimateExGstCents: 24_750,
+      estimateGstCents: 2_475,
+      estimateIncGstCents: 24_750,
+      publishedAt: null,
+      createdAt: new Date(),
+      pickupAt: new Date('2026-10-10T10:00:00Z'),
+      stops: [],
+      proposals: [],
+    };
+    const prisma = {
+      isConnected: () => true,
+      user: {
+        findUnique: jest.fn().mockResolvedValue({
+          id: 'user-sender',
+          companyId: 'co-s',
+          company: {
+            id: 'co-s',
+            type: CompanyType.SENDER,
+            homeRegionId: 'reg-vic',
+            homeRegion: { code: 'VIC' },
+          },
+        }),
+      },
+      region: {
+        findUnique: jest.fn().mockResolvedValue({ id: 'reg-vic', code: 'VIC' }),
+      },
+      localTerritory: {
+        findMany: jest.fn().mockResolvedValue([{ id: 'terr-mel', code: 'MEL' }]),
+      },
+      policyVersion: {
+        findFirst: jest.fn().mockResolvedValue(null),
+      },
+      job: {
+        create: jest.fn().mockResolvedValue(created),
+      },
+    };
+    const service = makeService(prisma, true);
+    await service.createJob(senderPrincipal, { ...createInput(), distanceKm: 99 });
+    expect(prisma.job.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          routeDistanceKm: 99,
+        }),
+      }),
+    );
   });
 
   it('listSenderJobs maps jobs for sender', async () => {

@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
+import { IdentitySummary } from '@/components/identity-summary';
 import { getErrorDetail, getIdentityMe, listSessions, revokeSession } from '@/lib/api';
 import { LoadingBlock } from '@/components/status-blocks';
 import { Button, DataCard, Notice, RoleBadge, useToast } from '@/components/ui';
@@ -50,11 +51,7 @@ export function AccountPage() {
         </Notice>
       ) : null}
 
-      {me.data ? (
-        <pre className="clox-card mt-6 overflow-x-auto p-4 text-xs text-clox-mute">
-          {JSON.stringify(me.data, null, 2)}
-        </pre>
-      ) : null}
+      {me.data ? <IdentitySummary me={me.data} className="clox-card mt-6 p-5" /> : null}
 
       <h2 className="mt-10 font-display text-lg font-semibold text-clox-ink">
         {t('account.activeSessions')}

@@ -3,6 +3,7 @@ import { useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { LoadingBlock } from '@/components/status-blocks';
+import { KeyValueList } from '@/components/identity-summary';
 import { Button, Notice, Select, TextArea, Timeline, useToast } from '@/components/ui';
 import { addLeadNote, getErrorDetail, getLead, updateLead } from '@/lib/api';
 import { formatAuditAction } from '@/lib/audit-format';
@@ -129,9 +130,9 @@ export function LeadDetailPage() {
               <h2 className="font-display text-lg font-semibold text-clox-ink">
                 {t('admin.payload')}
               </h2>
-              <pre className="mt-3 max-h-96 overflow-x-auto overflow-y-auto rounded-xl bg-clox-surface-alt p-3 text-xs whitespace-pre-wrap break-words text-clox-mute sm:whitespace-pre">
-                {JSON.stringify(lead.payload ?? {}, null, 2)}
-              </pre>
+              <div className="mt-3 max-h-96 overflow-y-auto">
+                <KeyValueList data={lead.payload ?? {}} emptyLabel={t('admin.noPayload')} />
+              </div>
             </section>
 
             <section className="clox-card p-5">

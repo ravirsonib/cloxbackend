@@ -114,6 +114,7 @@ export const AuditAction = {
   DRIVER_ACTIVATED: 'driver.activated',
   DRIVER_SUSPENDED: 'driver.suspended',
   JOB_CREATED: 'job.created',
+  JOB_UPDATED: 'job.updated',
   JOB_PUBLISHED: 'job.published',
   PROPOSAL_SUBMITTED: 'proposal.submitted',
   PROPOSAL_ACCEPTED: 'proposal.accepted',
@@ -783,6 +784,36 @@ const jobStopSchema = z.object({
   receiverEmail: z.string().trim().email().optional(),
 });
 
+function refineJobStops(
+  val: { pricingModel: 'PER_KM' | 'HOURLY'; stops: Array<{ stopType: string }> },
+  ctx: z.RefinementCtx,
+  options?: { requireHourlyPattern?: boolean; hourlyPattern?: 'A' | 'B' },
+) {
+  if (val.pricingModel === 'PER_KM' && val.stops.length !== 2) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'Per-km jobs require exactly 1 pickup + 1 drop',
+      path: ['stops'],
+    });
+  }
+  if (options?.requireHourlyPattern && val.pricingModel === 'HOURLY' && !options.hourlyPattern) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'Hourly jobs require Pattern A or B',
+      path: ['hourlyPattern'],
+    });
+  }
+  const pickups = val.stops.filter((s) => s.stopType === 'PICKUP').length;
+  const drops = val.stops.filter((s) => s.stopType === 'DROPOFF').length;
+  if (pickups < 1 || drops < 1) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'At least one PICKUP and one DROPOFF required',
+      path: ['stops'],
+    });
+  }
+}
+
 export const jobCreateSchema = z
   .object({
     title: z.string().trim().min(2).max(160).optional(),
@@ -796,6 +827,8 @@ export const jobCreateSchema = z
     lengthCm: z.number().positive().max(2000),
     widthCm: z.number().positive().max(500),
     heightCm: z.number().positive().max(500),
+    /** Sender-entered route distance; must be a real positive km (never null/0). */
+    distanceKm: z.number().positive().max(20_000),
     loadTypes: z
       .array(z.enum(['GENERAL', 'DG', 'REEFER', 'OVERSIZE']))
       .min(1)
@@ -809,32 +842,25 @@ export const jobCreateSchema = z
     stops: z.array(jobStopSchema).min(2).max(4),
   })
   .superRefine((val, ctx) => {
-    if (val.pricingModel === 'PER_KM' && val.stops.length !== 2) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: 'Per-km jobs require exactly 1 pickup + 1 drop',
-        path: ['stops'],
-      });
-    }
-    if (val.pricingModel === 'HOURLY' && !val.hourlyPattern) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: 'Hourly jobs require Pattern A or B',
-        path: ['hourlyPattern'],
-      });
-    }
-    const pickups = val.stops.filter((s) => s.stopType === 'PICKUP').length;
-    const drops = val.stops.filter((s) => s.stopType === 'DROPOFF').length;
-    if (pickups < 1 || drops < 1) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: 'At least one PICKUP and one DROPOFF required',
-        path: ['stops'],
-      });
-    }
+    refineJobStops(val, ctx, {
+      requireHourlyPattern: true,
+      hourlyPattern: val.hourlyPattern,
+    });
   });
 
 export type JobCreateInput = z.infer<typeof jobCreateSchema>;
+
+/** Preview suggested distance/duration from pickup + drop (mock Valhalla today). */
+export const jobRouteEstimateSchema = z
+  .object({
+    pricingModel: z.enum(['PER_KM', 'HOURLY']),
+    stops: z.array(jobStopSchema).min(2).max(4),
+  })
+  .superRefine((val, ctx) => {
+    refineJobStops(val, ctx);
+  });
+
+export type JobRouteEstimateInput = z.infer<typeof jobRouteEstimateSchema>;
 
 export const proposalSubmitSchema = z.object({
   jobId: z.string().uuid(),

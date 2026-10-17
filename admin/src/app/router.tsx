@@ -15,7 +15,7 @@ import { CarrierRegisterPage } from '@/pages/carrier-register-page';
 import { CarrierOnboardingPage } from '@/pages/carrier-onboarding-page';
 import { DriverInvitePage } from '@/pages/driver-invite-page';
 import { DriverOnboardingPage } from '@/pages/driver-onboarding-page';
-import { JobCreatePage, JobDetailPage, JobsListPage } from '@/pages/jobs-pages';
+import { JobCreatePage, JobDetailPage, JobEditPage, JobsListPage } from '@/pages/jobs-pages';
 import { MarketBoardPage } from '@/pages/market-board-page';
 import { CarrierAssignmentsPage } from '@/pages/carrier-assignments-page';
 import { DriverTripsPage, DriverTripDetailPage } from '@/pages/driver-trips-page';
@@ -120,6 +120,7 @@ export function AppRouter() {
         <Route path="/driver/onboarding" element={<DriverOnboardingPage />} />
         <Route path="/jobs" element={<JobsListPage />} />
         <Route path="/jobs/new" element={<JobCreatePage />} />
+        <Route path="/jobs/:id/edit" element={<JobEditPage />} />
         <Route path="/jobs/:id" element={<JobDetailPage />} />
         <Route path="/market" element={<MarketBoardPage />} />
         <Route path="/assignments" element={<CarrierAssignmentsPage />} />

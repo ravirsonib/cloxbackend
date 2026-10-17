@@ -23,6 +23,7 @@ function baseCreateInput(stopState: string): JobCreateInput {
     lengthCm: 100,
     widthCm: 100,
     heightCm: 100,
+    distanceKm: 12,
     loadTypes: ['GENERAL'],
     siteManeuverability: 'EASY',
     siteFacility: 'DOCK',

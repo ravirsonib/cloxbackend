@@ -1,6 +1,6 @@
 import { zodResolver } from '@hookform/resolvers/zod';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useForm } from 'react-hook-form';
 import { useTranslation } from 'react-i18next';
 import { Link, Navigate, useNavigate, useParams } from 'react-router-dom';
@@ -11,8 +11,10 @@ import {
   getErrorDetail,
   getSenderJob,
   listSenderJobs,
+  previewJobRoute,
   publishJob,
   recommendVehicle,
+  updateJob,
 } from '@/lib/api';
 import {
   Button,
@@ -25,6 +27,7 @@ import {
   ViewModeToggle,
   dataCardClassName,
   useDataViewMode,
+  useToast,
 } from '@/components/ui';
 import { LoadingBlock } from '@/components/status-blocks';
 import { AppRole } from '@/shared/types';
@@ -147,6 +150,7 @@ export function JobsListPage() {
 type JobCreateForm = {
   pricingModel: 'PER_KM' | 'HOURLY';
   hourlyPattern: 'A' | 'B';
+  distanceKm: number;
   deadWeightKg: number;
   lengthCm: number;
   widthCm: number;
@@ -157,14 +161,119 @@ type JobCreateForm = {
   siteDisclaimerAccepted: boolean;
 };
 
+function buildDemoStops(values: Pick<JobCreateForm, 'pricingModel' | 'receiverName' | 'receiverEmail'>) {
+  if (values.pricingModel === 'PER_KM') {
+    return [
+      {
+        sequence: 0,
+        stopType: 'PICKUP' as const,
+        addressLine: '1 Collins St',
+        suburb: 'Melbourne',
+        state: 'VIC',
+        postcode: '3000',
+        lat: -37.8136,
+        lng: 144.9631,
+      },
+      {
+        sequence: 1,
+        stopType: 'DROPOFF' as const,
+        addressLine: '100 Airport Dr',
+        suburb: 'Tullamarine',
+        state: 'VIC',
+        postcode: '3045',
+        lat: -37.669,
+        lng: 144.841,
+        receiverName: values.receiverName,
+        receiverEmail: values.receiverEmail,
+      },
+    ];
+  }
+  return [
+    {
+      sequence: 0,
+      stopType: 'PICKUP' as const,
+      addressLine: '1 Collins St',
+      suburb: 'Melbourne',
+      state: 'VIC',
+      postcode: '3000',
+      lat: -37.8136,
+      lng: 144.9631,
+    },
+    {
+      sequence: 1,
+      stopType: 'DROPOFF' as const,
+      addressLine: '50 Swan St',
+      suburb: 'Richmond',
+      state: 'VIC',
+      postcode: '3121',
+      lat: -37.823,
+      lng: 144.997,
+      receiverName: values.receiverName,
+      receiverEmail: values.receiverEmail,
+    },
+    {
+      sequence: 2,
+      stopType: 'DROPOFF' as const,
+      addressLine: '200 Chapel St',
+      suburb: 'Prahran',
+      state: 'VIC',
+      postcode: '3181',
+      lat: -37.849,
+      lng: 144.993,
+      receiverName: 'Recv B',
+      receiverEmail: 'receiver.b@yopmail.com',
+    },
+  ];
+}
+
+function buildJobPayload(values: JobCreateForm) {
+  const loadTypes = ['GENERAL', ...(values.loadDg ? (['DG'] as const) : [])];
+  return {
+    title: `${values.pricingModel} QA job`,
+    pricingModel: values.pricingModel,
+    hourlyPattern: values.pricingModel === 'HOURLY' ? values.hourlyPattern : undefined,
+    pickupAt: new Date(Date.now() + 86_400_000).toISOString(),
+    receiverName: values.receiverName,
+    receiverEmail: values.receiverEmail,
+    deadWeightKg: values.deadWeightKg,
+    lengthCm: values.lengthCm,
+    widthCm: values.widthCm,
+    heightCm: values.heightCm,
+    distanceKm: values.distanceKm,
+    loadTypes,
+    siteManeuverability: 'MODERATE',
+    siteFacility: 'GROUND',
+    siteDisclaimerAccepted: true as const,
+    stops: buildDemoStops(values),
+  };
+}
+
 export function JobCreatePage() {
+  return <JobDraftForm mode="create" />;
+}
+
+export function JobEditPage() {
+  const { id = '' } = useParams();
+  return <JobDraftForm mode="edit" jobId={id} />;
+}
+
+function JobDraftForm({
+  mode,
+  jobId = '',
+}: {
+  mode: 'create' | 'edit';
+  jobId?: string;
+}) {
   const { t } = useTranslation('common');
   const role = useAuthStore((s) => s.role);
   const navigate = useNavigate();
+  const toast = useToast();
+  const isEdit = mode === 'edit';
 
   const schema = z.object({
     pricingModel: z.enum(['PER_KM', 'HOURLY']),
     hourlyPattern: z.enum(['A', 'B']),
+    distanceKm: z.number().positive(t('validation.distancePositive')),
     deadWeightKg: z.number().positive(t('validation.weightPositive')),
     lengthCm: z.number().positive(t('validation.dimensionPositive')),
     widthCm: z.number().positive(t('validation.dimensionPositive')),
@@ -186,6 +295,7 @@ export function JobCreatePage() {
     defaultValues: {
       pricingModel: 'PER_KM',
       hourlyPattern: 'A',
+      distanceKm: undefined as unknown as number,
       deadWeightKg: 800,
       lengthCm: 120,
       widthCm: 80,
@@ -197,11 +307,84 @@ export function JobCreatePage() {
     },
   });
 
+  const existing = useQuery({
+    queryKey: ['jobs', jobId],
+    queryFn: () => getSenderJob(jobId),
+    enabled: isEdit && role === AppRole.SENDER && Boolean(jobId),
+  });
+
+  const lastSuggestedKm = useRef<number | null>(null);
+  const [suggestedKm, setSuggestedKm] = useState<number | null>(null);
+  const hydratedEdit = useRef(false);
+
+  useEffect(() => {
+    if (!existing.data) return;
+    if (existing.data.status !== 'DRAFT') {
+      toast.warn(t('jobs.editDraftOnly'));
+      navigate(`/jobs/${jobId}`, { replace: true });
+      return;
+    }
+    const savedKm = Number(existing.data.route.distanceKm);
+    form.reset({
+      pricingModel: existing.data.pricingModel === 'HOURLY' ? 'HOURLY' : 'PER_KM',
+      hourlyPattern: existing.data.hourlyPattern === 'B' ? 'B' : 'A',
+      distanceKm: Number.isFinite(savedKm) && savedKm > 0 ? savedKm : (undefined as unknown as number),
+      deadWeightKg: Number(existing.data.deadWeightKg) || 800,
+      lengthCm: Number(existing.data.lengthCm) || 120,
+      widthCm: Number(existing.data.widthCm) || 80,
+      heightCm: Number(existing.data.heightCm) || 80,
+      loadDg: Boolean(existing.data.requiresDg),
+      receiverName: existing.data.receiverName || '',
+      receiverEmail: existing.data.receiverEmail || '',
+      siteDisclaimerAccepted: true,
+    });
+    if (Number.isFinite(savedKm) && savedKm > 0) {
+      lastSuggestedKm.current = savedKm;
+      setSuggestedKm(savedKm);
+    }
+    hydratedEdit.current = true;
+    // Prefill once when draft job loads.
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- intentional one-shot hydrate
+  }, [existing.data]);
+
   const pricingModel = form.watch('pricingModel');
+  const receiverName = form.watch('receiverName');
+  const receiverEmail = form.watch('receiverEmail');
   const deadWeightKg = form.watch('deadWeightKg');
   const lengthCm = form.watch('lengthCm');
   const widthCm = form.watch('widthCm');
   const heightCm = form.watch('heightCm');
+
+  useEffect(() => {
+    if (role !== AppRole.SENDER) return;
+    if (isEdit && !hydratedEdit.current) return;
+    let cancelled = false;
+    const stops = buildDemoStops({
+      pricingModel,
+      receiverName: receiverName || 'Recv Site',
+      receiverEmail: receiverEmail || 'receiver.qa@yopmail.com',
+    });
+    void previewJobRoute({ pricingModel, stops })
+      .then((route) => {
+        if (cancelled) return;
+        setSuggestedKm(route.distanceKm);
+        const current = form.getValues('distanceKm');
+        const last = lastSuggestedKm.current;
+        const isEmpty = !Number.isFinite(current) || current <= 0;
+        const matchesLastSuggestion = last != null && current === last;
+        if (isEmpty || matchesLastSuggestion) {
+          form.setValue('distanceKm', route.distanceKm, { shouldValidate: true });
+        }
+        lastSuggestedKm.current = route.distanceKm;
+      })
+      .catch(() => {
+        /* keep manual entry if suggest fails */
+      });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- suggest from pricing + demo stops
+  }, [pricingModel, isEdit, role]);
 
   const recommend = useQuery({
     queryKey: ['jobs', 'recommend', deadWeightKg, lengthCm, widthCm, heightCm],
@@ -219,101 +402,39 @@ export function JobCreatePage() {
       Number(heightCm) > 0,
   });
 
-  const create = useMutation({
+  const save = useMutation({
     mutationFn: (values: JobCreateForm) => {
-      const loadTypes = ['GENERAL', ...(values.loadDg ? (['DG'] as const) : [])];
-      const stops =
-        values.pricingModel === 'PER_KM'
-          ? [
-              {
-                sequence: 0,
-                stopType: 'PICKUP' as const,
-                addressLine: '1 Collins St',
-                suburb: 'Melbourne',
-                state: 'VIC',
-                postcode: '3000',
-                lat: -37.8136,
-                lng: 144.9631,
-              },
-              {
-                sequence: 1,
-                stopType: 'DROPOFF' as const,
-                addressLine: '100 Airport Dr',
-                suburb: 'Tullamarine',
-                state: 'VIC',
-                postcode: '3045',
-                lat: -37.669,
-                lng: 144.841,
-                receiverName: values.receiverName,
-                receiverEmail: values.receiverEmail,
-              },
-            ]
-          : [
-              {
-                sequence: 0,
-                stopType: 'PICKUP' as const,
-                addressLine: '1 Collins St',
-                suburb: 'Melbourne',
-                state: 'VIC',
-                postcode: '3000',
-                lat: -37.8136,
-                lng: 144.9631,
-              },
-              {
-                sequence: 1,
-                stopType: 'DROPOFF' as const,
-                addressLine: '50 Swan St',
-                suburb: 'Richmond',
-                state: 'VIC',
-                postcode: '3121',
-                lat: -37.823,
-                lng: 144.997,
-                receiverName: values.receiverName,
-                receiverEmail: values.receiverEmail,
-              },
-              {
-                sequence: 2,
-                stopType: 'DROPOFF' as const,
-                addressLine: '200 Chapel St',
-                suburb: 'Prahran',
-                state: 'VIC',
-                postcode: '3181',
-                lat: -37.849,
-                lng: 144.993,
-                receiverName: 'Recv B',
-                receiverEmail: 'receiver.b@yopmail.com',
-              },
-            ];
-      return createJob({
-        title: `${values.pricingModel} QA job`,
-        pricingModel: values.pricingModel,
-        hourlyPattern: values.pricingModel === 'HOURLY' ? values.hourlyPattern : undefined,
-        pickupAt: new Date(Date.now() + 86_400_000).toISOString(),
-        receiverName: values.receiverName,
-        receiverEmail: values.receiverEmail,
-        deadWeightKg: values.deadWeightKg,
-        lengthCm: values.lengthCm,
-        widthCm: values.widthCm,
-        heightCm: values.heightCm,
-        loadTypes,
-        siteManeuverability: 'MODERATE',
-        siteFacility: 'GROUND',
-        siteDisclaimerAccepted: true as const,
-        stops,
-      });
+      const payload = buildJobPayload(values);
+      return isEdit ? updateJob(jobId, payload) : createJob(payload);
     },
-    onSuccess: (job) => navigate(`/jobs/${job.id}`, { replace: true }),
+    onSuccess: (job) => {
+      toast.success(isEdit ? t('jobs.draftUpdated') : t('saved'));
+      navigate(`/jobs/${job.id}`, { replace: true });
+    },
   });
 
   if (role !== AppRole.SENDER) return <Navigate to="/" replace />;
+  if (isEdit && existing.isLoading) return <LoadingBlock label={t('jobs.loadingDetail')} />;
+  if (isEdit && (existing.isError || !existing.data)) {
+    return <Notice tone="error">{getErrorDetail(existing.error)}</Notice>;
+  }
 
   return (
     <div className="max-w-xl">
-      <h1 className="font-display text-2xl font-bold text-clox-ink">{t('jobs.createTitle')}</h1>
-      <p className="mt-2 text-sm text-clox-mute">{t('jobs.createHint')}</p>
+      {isEdit ? (
+        <Link to={`/jobs/${jobId}`} className="text-sm text-clox-orange hover:underline">
+          ← {t('jobs.backToJob')}
+        </Link>
+      ) : null}
+      <h1 className={`font-display text-2xl font-bold text-clox-ink ${isEdit ? 'mt-2' : ''}`}>
+        {isEdit ? t('jobs.editTitle') : t('jobs.createTitle')}
+      </h1>
+      <p className="mt-2 text-sm text-clox-mute">
+        {isEdit ? t('jobs.editHint') : t('jobs.createHint')}
+      </p>
       <form
         className="mt-6"
-        onSubmit={form.handleSubmit((values) => create.mutate(values))}
+        onSubmit={form.handleSubmit((values) => save.mutate(values))}
         noValidate
       >
         <RadioCardGroup
@@ -362,6 +483,20 @@ export function JobCreatePage() {
             ]}
           />
         ) : null}
+        <Field
+          type="number"
+          step="0.1"
+          min={0.1}
+          label={t('jobs.distanceKmLabel')}
+          required
+          hint={
+            suggestedKm != null
+              ? t('jobs.distanceKmSuggested', { km: suggestedKm })
+              : t('jobs.distanceKmHint')
+          }
+          error={form.formState.errors.distanceKm?.message}
+          {...form.register('distanceKm', { valueAsNumber: true })}
+        />
         <Field
           type="number"
           label={t('validation.deadWeightLabel')}
@@ -432,13 +567,17 @@ export function JobCreatePage() {
             ) : null}
           </span>
         </label>
-        {create.isError ? (
+        {save.isError ? (
           <Notice tone="error" className="mb-4">
-            {getErrorDetail(create.error)}
+            {getErrorDetail(save.error)}
           </Notice>
         ) : null}
-        <Button type="submit" variant="cta" disabled={create.isPending}>
-          {create.isPending ? t('creating') : t('jobs.createDraft')}
+        <Button type="submit" variant="cta" disabled={save.isPending}>
+          {save.isPending
+            ? t('saving')
+            : isEdit
+              ? t('jobs.saveDraft')
+              : t('jobs.createDraft')}
         </Button>
       </form>
     </div>
@@ -549,14 +688,18 @@ export function JobDetailPage() {
       </ul>
 
       {j.status === 'DRAFT' ? (
-        <Button
-          variant="cta"
-          className="mt-6"
-          disabled={publish.isPending}
-          onClick={() => publish.mutate()}
-        >
-          {t('jobs.publish')}
-        </Button>
+        <div className="mt-6 flex flex-wrap gap-2">
+          <Link to={`/jobs/${j.id}/edit`} className="clox-btn clox-btn-secondary inline-flex">
+            {t('jobs.editDraft')}
+          </Link>
+          <Button
+            variant="cta"
+            disabled={publish.isPending}
+            onClick={() => publish.mutate()}
+          >
+            {t('jobs.publish')}
+          </Button>
+        </div>
       ) : null}
 
       <h2 className="mt-8 font-display text-lg font-semibold text-clox-ink">
