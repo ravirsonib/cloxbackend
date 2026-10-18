@@ -1,0 +1,209 @@
+﻿node.exe : PASS src/common/pipes/zod-validation.pipe.spec.ts (9.566 s)
+At line:1 char:1
++ & "C:\nvm4w\nodejs/node.exe" "C:\nvm4w\nodejs/node_modules/npm/bin/np ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (PASS src/common...ec.ts (9.566 s):String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+PASS src/modules/notifications/notifications.service.spec.ts (9.774 s)
+[Nest] 19672  - 10/06/2026, 11:33:42 PM    WARN [NotificationsService] SMTP not configured ΓÇö skipped email to clox.mail@yopmail.com: Hi
+[Nest] 19672  - 10/06/2026, 11:33:42 PM    WARN [NotificationsService] SMTP not configured ΓÇö skipped email to clox.mail@yopmail.com: CLOX login code
+[Nest] 19672  - 10/06/2026, 11:33:42 PM    WARN [NotificationsService] SMTP not configured ΓÇö skipped email to founder.clox@yopmail.com: CLOX submission received (INVESTOR)
+[Nest] 19672  - 10/06/2026, 11:33:42 PM    WARN [NotificationsService] SMTP not configured ΓÇö skipped email to driver.invite@yopmail.com: CLOX driver invite ΓÇö Carrier
+PASS src/common/guards/step-up.guard.spec.ts (10.189 s)
+[Nest] 20688  - 10/06/2026, 11:33:43 PM   ERROR [ExpiryWatchdogService] Expiry watchdog failed: db down
+PASS src/modules/compliance/expiry-watchdog.service.spec.ts (10.442 s)
+PASS src/modules/payments/payments.accept.path.spec.ts (10.558 s)
+[Nest] 20688  - 10/06/2026, 11:33:43 PM    WARN [ExpiryWatchdogService] Compliance expiry watchdog disabled (COMPLIANCE_WATCHDOG_MS=0)
+[Nest] 20688  - 10/06/2026, 11:33:43 PM     LOG [ExpiryWatchdogService] Compliance expiry watchdog every 60000ms
+[Nest] 20688  - 10/06/2026, 11:34:43 PM    WARN [ExpiryWatchdogService] Expiry watchdog: expired=1 vehicles=0 companies=0 drivers=2
+[Nest] 20688  - 10/06/2026, 11:35:43 PM    WARN [ExpiryWatchdogService] Expiry watchdog: expired=1 vehicles=0 companies=0 drivers=2
+[Nest] 20688  - 10/06/2026, 11:33:43 PM     LOG [ExpiryWatchdogService] Compliance expiry watchdog every 30000ms
+PASS src/modules/sender/sender.payment.path.spec.ts (10.633 s)
+PASS src/modules/sender/sender.service.spec.ts (10.683 s)
+PASS src/modules/sender/sender.go-nogo.spec.ts (10.784 s)
+PASS src/modules/carrier/carrier.register.path.spec.ts
+[Nest] 19672  - 10/06/2026, 11:33:43 PM    WARN [PaymentsService] Webhook signature failed: bad sig
+PASS src/modules/payments/payments.surcharge.path.spec.ts
+PASS src/modules/trips/trips.lifecycle.path.spec.ts (10.963 s)
+PASS src/modules/payments/payments.guards.spec.ts (10.976 s)
+PASS src/modules/auth/auth.otp.spec.ts
+PASS src/modules/matching/matching.service.path.spec.ts (11.144 s)
+PASS src/modules/driver/driver.invite.path.spec.ts
+PASS src/modules/jobs/jobs.service.path.spec.ts
+PASS src/modules/trips/trips.service.path.spec.ts
+PASS src/modules/payments/stripe.mock.path.spec.ts
+[Nest] 19672  - 10/06/2026, 11:33:44 PM    WARN [StripeService] STRIPE_MOCK: Connect account acct_mock_carriercloxyopma
+[Nest] 19672  - 10/06/2026, 11:33:44 PM    WARN [StripeService] STRIPE_MOCK: AccountLink https://app/return?connect=mock&account=acct_mock_carriercloxyopma
+[Nest] 19672  - 10/06/2026, 11:33:44 PM    WARN [StripeService] STRIPE_MOCK: cancel pi_mock_abc
+[Nest] 19672  - 10/06/2026, 11:33:44 PM    WARN [StripeService] STRIPE_MOCK: refund stub re_mock_1791309824196 for pi_mock_abc
+[Nest] 19672  - 10/06/2026, 11:33:44 PM    WARN [StripeService] STRIPE_MOCK: attach pm_mock_1791309824236 to cus_1
+PASS src/modules/trips/trips.geofence.path.spec.ts
+PASS src/modules/auth/auth.sessions.path.spec.ts
+PASS src/common/guards/roles.guard.spec.ts
+[Nest] 1948  - 10/06/2026, 11:33:44 PM    WARN [AuthService] OTP requested for unknown account email=ghost.clox@yopmail.com phone=-
+[Nest] 1948  - 10/06/2026, 11:33:44 PM    WARN [AuthService] DEV OTP for sender.clox@yopmail.com: 339765
+PASS src/modules/payments/payments.leftover.path.spec.ts
+PASS src/modules/auth/auth.refresh.spec.ts
+PASS src/modules/ops/ops.service.spec.ts
+PASS src/modules/driver/driver.service.spec.ts
+PASS src/modules/identity/identity.service.spec.ts
+PASS src/modules/carrier/carrier.invite.path.spec.ts
+PASS src/modules/payments/payments.service.path.spec.ts
+PASS src/shared/edge-schemas.spec.ts
+PASS src/modules/compliance/compliance.service.spec.ts
+PASS src/modules/carrier/carrier.onboarding.path.spec.ts
+PASS src/modules/carrier/carrier.service.spec.ts
+PASS src/common/guards/jwt-auth.guard.spec.ts
+PASS src/modules/health/health.controller.spec.ts
+PASS src/modules/payments/stripe.service.spec.ts
+PASS src/modules/documents/documents.upload.spec.ts
+PASS src/modules/documents/documents.driver-acl.spec.ts
+[Nest] 20688  - 10/06/2026, 11:33:45 PM    WARN [StripeService] STRIPE_MOCK: PaymentIntent pi_mock_acceptjobprop_1791309825106 amount=15000
+[Nest] 20688  - 10/06/2026, 11:33:45 PM    WARN [StripeService] STRIPE_MOCK: created customer cus_mock_cloxmailyopmailcom
+[Nest] 20688  - 10/06/2026, 11:33:45 PM    WARN [StripeService] STRIPE_MOCK: setupIntent seti_mock_1791309825107
+PASS src/modules/compliance/compliance.list.spec.ts
+PASS src/modules/trips/trips.complete.path.spec.ts
+PASS src/modules/documents/documents.confirm.spec.ts
+PASS src/modules/admin/admin.dashboard.path.spec.ts
+PASS src/common/services/scope.service.spec.ts
+PASS src/common/filters/problem-details.filter.spec.ts
+PASS src/modules/compliance/compliance.watchdog.spec.ts
+PASS src/modules/audit/audit.service.spec.ts
+PASS src/modules/jobs/job-pricing.util.spec.ts
+PASS src/modules/leads/leads.service.spec.ts
+PASS src/modules/sender/sender.onboarding.path.spec.ts
+PASS src/modules/documents/documents.metadata.path.spec.ts
+PASS src/modules/jobs/routing.mock.spec.ts
+PASS src/modules/compliance/compliance.decisions.spec.ts
+[Nest] 8944  - 10/06/2026, 11:33:45 PM    WARN [LeadsService] Honeypot triggered on registry submission
+[Nest] 8944  - 10/06/2026, 11:33:45 PM     LOG [LeadsService] Idempotent registry retry ΓÇö returning existing lead 66666666-6666-4666-8666-666666666666
+PASS src/modules/trips/geofence.util.spec.ts
+PASS src/config/env.validation.spec.ts
+PASS src/common/utils/crypto.spec.ts
+PASS src/modules/jobs/job-pricing.money.spec.ts
+PASS src/modules/trips/trips.service.spec.ts
+PASS src/modules/admin/admin.service.spec.ts
+PASS src/modules/jobs/job-origin.util.spec.ts
+PASS src/modules/compliance/compliance.submit.path.spec.ts
+PASS src/modules/compliance/abr.service.spec.ts
+[Nest] 17324  - 10/06/2026, 11:33:45 PM    WARN [AbrService] ABR lookup failed for 51824753556: network
+---------------------------------|---------|----------|---------|---------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+File                             | % Stmts | % Branch | % Funcs | % Lines | Uncovered Line #s                                                                                                                                                                              
+---------------------------------|---------|----------|---------|---------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+All files                        |   60.51 |       50 |   60.46 |   62.45 |                                                                                                                                                                                                
+ src                             |       0 |        0 |       0 |       0 |                                                                                                                                                                                                
+  app.module.ts                  |       0 |        0 |       0 |       0 | 1-77                                                                                                                                                                                           
+  main.ts                        |       0 |        0 |       0 |       0 | 1-83                                                                                                                                                                                           
+ src/common/decorators           |      40 |      100 |       0 |    37.5 |                                                                                                                                                                                                
+  current-admin.decorator.ts     |       0 |      100 |       0 |       0 | 1-12                                                                                                                                                                                           
+  roles.decorator.ts             |      80 |      100 |       0 |     100 |                                                                                                                                                                                                
+ src/common/filters              |     100 |    89.65 |     100 |     100 |                                                                                                                                                                                                
+  problem-details.filter.ts      |     100 |    89.65 |     100 |     100 | 30-33,41                                                                                                                                                                                       
+ src/common/guards               |   88.63 |    78.78 |     100 |    87.5 |                                                                                                                                                                                                
+  jwt-auth.guard.ts              |   81.63 |    71.42 |     100 |      80 | 46,65,69,83,97,120,126-135,139                                                                                                                                                                 
+  roles.guard.ts                 |   94.11 |       80 |     100 |   93.33 | 29                                                                                                                                                                                             
+  step-up.guard.ts               |     100 |      100 |     100 |     100 |                                                                                                                                                                                                
+ src/common/middleware           |       0 |        0 |       0 |       0 |                                                                                                                                                                                                
+  correlation-id.middleware.ts   |       0 |        0 |       0 |       0 | 1-12                                                                                                                                                                                           
+  security-headers.middleware.ts |       0 |      100 |       0 |       0 | 1-13                                                                                                                                                                                           
+ src/common/pipes                |     100 |    66.66 |     100 |     100 |                                                                                                                                                                                                
+  zod-validation.pipe.ts         |     100 |    66.66 |     100 |     100 | 16                                                                                                                                                                                             
+ src/common/services             |   85.18 |       50 |     100 |      84 |                                                                                                                                                                                                
+  scope.service.ts               |   85.18 |       50 |     100 |      84 | 12,28,31,49                                                                                                                                                                                    
+ src/common/utils                |    87.5 |        0 |     100 |    87.5 |                                                                                                                                                                                                
+  crypto.ts                      |    87.5 |        0 |     100 |    87.5 | 9,23                                                                                                                                                                                           
+ src/config                      |   63.15 |       50 |     100 |   70.58 |                                                                                                                                                                                                
+  config.module.ts               |       0 |      100 |     100 |       0 | 1-15                                                                                                                                                                                           
+  env.validation.ts              |    92.3 |       50 |     100 |    92.3 | 7                                                                                                                                                                                              
+ src/modules/admin               |   54.54 |    37.09 |    61.9 |   58.18 |                                                                                                                                                                                                
+  admin.controller.ts            |       0 |      100 |       0 |       0 | 1-97                                                                                                                                                                                           
+  admin.module.ts                |       0 |      100 |     100 |       0 | 1-15                                                                                                                                                                                           
+  admin.service.ts               |   78.57 |    37.09 |     100 |   83.11 | 68,75,212-254,262,400                                                                                                                                                                          
+ src/modules/audit               |      36 |       50 |      50 |   36.84 |                                                                                                                                                                                                
+  audit.controller.ts            |       0 |      100 |       0 |       0 | 1-10                                                                                                                                                                                           
+  audit.module.ts                |       0 |      100 |     100 |       0 | 1-10                                                                                                                                                                                           
+  audit.service.ts               |      75 |       50 |   66.66 |      70 | 16-19                                                                                                                                                                                          
+ src/modules/auth                |   61.61 |    37.59 |   48.38 |   62.43 |                                                                                                                                                                                                
+  auth.controller.ts             |       0 |        0 |       0 |       0 | 1-118                                                                                                                                                                                          
+  auth.module.ts                 |       0 |      100 |     100 |       0 | 1-15                                                                                                                                                                                           
+  auth.service.ts                |   76.02 |    38.16 |   68.18 |   75.73 | 69,92,110-122,145-149,218,225,239,255-261,265,270-280,322,326,350-367,379,394-395,504,517,531,547,574-585                                                                                      
+ src/modules/carrier             |   63.46 |    56.32 |   55.81 |   66.11 |                                                                                                                                                                                                
+  carrier.controller.ts          |       0 |      100 |       0 |       0 | 1-165                                                                                                                                                                                          
+  carrier.module.ts              |       0 |      100 |       0 |       0 | 1-24                                                                                                                                                                                           
+  carrier.service.ts             |   80.48 |    56.32 |   85.71 |   83.76 | 51,80,136,139,150-159,257,273,360,482,487-508,526,534-551,562,568,573,584,593,610,616                                                                                                          
+ src/modules/compliance          |   60.47 |    53.12 |    62.5 |   60.71 |                                                                                                                                                                                                
+  abr.service.ts                 |     100 |    46.15 |     100 |     100 | 52-66                                                                                                                                                                                          
+  compliance.controller.ts       |       0 |      100 |       0 |       0 | 1-139                                                                                                                                                                                          
+  compliance.module.ts           |       0 |      100 |     100 |       0 | 1-26                                                                                                                                                                                           
+  compliance.service.ts          |   64.82 |    51.88 |   78.26 |   64.92 | 48,58,61-68,72,83-117,129,144,150-151,168,176,181,184,195,207,212-214,219-221,232,285,288,293-294,373-379,497-552,586-590                                                                      
+  expiry-watchdog.service.ts     |     100 |    77.77 |     100 |     100 | 42-49                                                                                                                                                                                          
+ src/modules/documents           |    36.5 |    26.73 |   41.66 |   36.84 |                                                                                                                                                                                                
+  documents.controller.ts        |       0 |      100 |       0 |       0 | 1-90                                                                                                                                                                                           
+  documents.module.ts            |       0 |      100 |       0 |       0 | 1-19                                                                                                                                                                                           
+  documents.service.ts           |   44.24 |    26.73 |    62.5 |   44.02 | 48-62,74,78-85,90,100-135,152,160,174,202-231,241,244,251-359,378,439-449                                                                                                                      
+ src/modules/driver              |    48.2 |    48.33 |   45.45 |      50 |                                                                                                                                                                                                
+  driver.controller.ts           |       0 |      100 |       0 |       0 | 1-66                                                                                                                                                                                           
+  driver.module.ts               |       0 |      100 |     100 |       0 | 1-16                                                                                                                                                                                           
+  driver.service.ts              |   64.42 |    48.33 |    62.5 |   65.65 | 34-85,127,169,172,178,216-218,247,254-303,328                                                                                                                                                  
+ src/modules/geolocation         |       0 |      100 |       0 |       0 |                                                                                                                                                                                                
+  geolocation.controller.ts      |       0 |      100 |       0 |       0 | 1-10                                                                                                                                                                                           
+  geolocation.module.ts          |       0 |      100 |     100 |       0 | 1-7                                                                                                                                                                                            
+ src/modules/health              |   70.37 |       80 |     100 |   73.91 |                                                                                                                                                                                                
+  health.controller.ts           |   86.36 |       80 |     100 |      85 | 26-30                                                                                                                                                                                          
+  health.module.ts               |       0 |      100 |     100 |       0 | 1-7                                                                                                                                                                                            
+ src/modules/identity            |   41.66 |       75 |   57.14 |   43.33 |                                                                                                                                                                                                
+  identity.controller.ts         |       0 |      100 |       0 |       0 | 1-23                                                                                                                                                                                           
+  identity.module.ts             |       0 |      100 |     100 |       0 | 1-13                                                                                                                                                                                           
+  identity.service.ts            |     100 |       75 |     100 |     100 | 36,55                                                                                                                                                                                          
+ src/modules/jobs                |   62.17 |    36.29 |   64.58 |   64.66 |                                                                                                                                                                                                
+  job-pricing.util.ts            |   74.41 |    28.57 |     100 |    90.9 | 77-79                                                                                                                                                                                          
+  jobs.controller.ts             |       0 |      100 |       0 |       0 | 1-108                                                                                                                                                                                          
+  jobs.module.ts                 |       0 |      100 |     100 |       0 | 1-17                                                                                                                                                                                           
+  jobs.service.ts                |    60.6 |    31.91 |      65 |   61.53 | 48,72,80,94,198-273,298,312,315,320-321,335,363,438,455-506                                                                                                                                    
+  routing.mock.ts                |   90.58 |    55.55 |    90.9 |    92.1 | 50,97,110-113,170                                                                                                                                                                              
+ src/modules/leads               |   56.36 |    36.84 |      60 |   57.42 |                                                                                                                                                                                                
+  leads.controller.ts            |       0 |        0 |       0 |       0 | 1-53                                                                                                                                                                                           
+  leads.module.ts                |       0 |      100 |     100 |       0 | 1-13                                                                                                                                                                                           
+  leads.service.ts               |   72.09 |    43.75 |      75 |    71.6 | 198,219-295,311-312,329-332,377                                                                                                                                                                
+ src/modules/matching            |   62.28 |       60 |   66.66 |    64.7 |                                                                                                                                                                                                
+  matching.controller.ts         |       0 |      100 |       0 |       0 | 1-44                                                                                                                                                                                           
+  matching.module.ts             |       0 |      100 |       0 |       0 | 1-22                                                                                                                                                                                           
+  matching.service.ts            |   86.58 |       60 |     100 |   89.18 | 40,46,61,159,170,190,223,238                                                                                                                                                                   
+ src/modules/notifications       |   62.26 |    47.36 |   77.77 |   65.95 |                                                                                                                                                                                                
+  notifications.controller.ts    |       0 |      100 |       0 |       0 | 1-10                                                                                                                                                                                           
+  notifications.module.ts        |       0 |      100 |     100 |       0 | 1-10                                                                                                                                                                                           
+  notifications.service.ts       |    82.5 |    47.36 |    87.5 |   81.57 | 22-35,57-70                                                                                                                                                                                    
+ src/modules/ops                 |   48.57 |    68.75 |   55.55 |      50 |                                                                                                                                                                                                
+  ops.controller.ts              |       0 |      100 |       0 |       0 | 1-43                                                                                                                                                                                           
+  ops.module.ts                  |       0 |      100 |     100 |       0 | 1-18                                                                                                                                                                                           
+  ops.service.ts                 |   91.89 |    68.75 |     100 |   91.42 | 25,54,61                                                                                                                                                                                       
+ src/modules/payments            |   64.64 |    55.04 |   68.18 |   67.51 |                                                                                                                                                                                                
+  payments.controller.ts         |       0 |        0 |       0 |       0 | 1-125                                                                                                                                                                                          
+  payments.module.ts             |       0 |      100 |       0 |       0 | 1-17                                                                                                                                                                                           
+  payments.service.ts            |   73.94 |    55.05 |   76.92 |   78.07 | 42,48,75,124,126,129,135-140,145-149,169,187,192,232-233,257,266,389,427-487,547-554,641-642,670-681,735,748,887,898,910-917,927,934,995-996,1035,1048,1132,1146-1151,1294-1298,1307,1328-1379 
+  stripe.service.ts              |   56.38 |    61.11 |   93.75 |   55.43 | 20-27,40-45,58-63,78-85,99-111,124-130,142-143,179-197,216-220,228-229,237-238,247-250,267-274                                                                                                 
+ src/modules/sender              |   67.97 |    66.21 |   66.66 |   70.73 |                                                                                                                                                                                                
+  sender.controller.ts           |       0 |      100 |       0 |       0 | 1-96                                                                                                                                                                                           
+  sender.module.ts               |       0 |      100 |     100 |       0 | 1-16                                                                                                                                                                                           
+  sender.service.ts              |   87.05 |    66.21 |     100 |   89.92 | 53,76,125,293,296,312,318,341,347,401,443,446,449                                                                                                                                              
+ src/modules/settlements         |       0 |      100 |       0 |       0 |                                                                                                                                                                                                
+  settlements.controller.ts      |       0 |      100 |       0 |       0 | 1-10                                                                                                                                                                                           
+  settlements.module.ts          |       0 |      100 |     100 |       0 | 1-7                                                                                                                                                                                            
+ src/modules/trips               |   74.72 |     59.9 |   71.66 |   76.71 |                                                                                                                                                                                                
+  geofence.util.ts               |   95.23 |    66.66 |     100 |   97.43 | 97                                                                                                                                                                                             
+  trips.controller.ts            |       0 |      100 |       0 |       0 | 1-142                                                                                                                                                                                          
+  trips.module.ts                |       0 |      100 |       0 |       0 | 1-16                                                                                                                                                                                           
+  trips.service.ts               |   83.75 |    59.18 |   86.84 |   85.88 | 49,55,210,343,401-404,414,419,422,434-438,506,511,517,624,627,633,648,698,703,763,827,845-854,914-917,1026-1051,1110                                                                           
+ src/prisma                      |      25 |        0 |       0 |   18.75 |                                                                                                                                                                                                
+  prisma.module.ts               |       0 |      100 |     100 |       0 | 1-9                                                                                                                                                                                            
+  prisma.service.ts              |   33.33 |        0 |       0 |   23.07 | 6-29                                                                                                                                                                                           
+ src/shared                      |   73.33 |       26 |      36 |   75.43 |                                                                                                                                                                                                
+  types.ts                       |   73.33 |       26 |      36 |   75.43 | 62,169,307-319,449-450,476-478,494,605-606,628-629,681-682,812-838                                                                                                                             
+---------------------------------|---------|----------|---------|---------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+Test Suites: 60 passed, 60 total
+Tests:       313 passed, 313 total
+Snapshots:   0 total
+Time:        24.371 s
+Ran all test suites.

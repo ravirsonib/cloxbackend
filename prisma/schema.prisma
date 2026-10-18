@@ -1,0 +1,911 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── Phase 0 (pre-launch leads) ─────────────────────────────────────────────
+
+enum LeadType {
+  REGISTRY_SENDER
+  REGISTRY_CARRIER
+  EOI_STATE_MASTER
+  EOI_LOCAL_BDE
+  INVESTOR
+}
+
+enum LeadStatus {
+  NEW
+  CONTACTED
+  QUALIFIED
+  INVITED
+  ONBOARDED
+  REJECTED
+  DUPLICATE
+  UNDER_REVIEW
+  KYB_PENDING
+  EXECUTIVE_REVIEW
+  APPROVED
+  AGREEMENT_SENT
+  PROVISIONED
+}
+
+enum AdminRole {
+  SUPER_ADMIN
+  STATE_MASTER
+  LOCAL_BDE
+}
+
+model AdminUser {
+  id        String    @id @default(uuid())
+  email     String    @unique
+  role      AdminRole @default(SUPER_ADMIN)
+  name      String?
+  active    Boolean   @default(true)
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  assignedLeads Lead[]
+  notes         LeadNote[]
+  events        LeadEvent[]     @relation("EventActor")
+  otpChallenges OtpChallenge[]
+  sessions      AuthSession[]
+  scopes        AdminScope[]
+  auditEvents   AuditEvent[]    @relation("AuditActor")
+  policyVersions PolicyVersion[] @relation("PolicyPublisher")
+}
+
+model Lead {
+  id             String     @id @default(uuid())
+  type           LeadType
+  status         LeadStatus @default(NEW)
+  email          String
+  phone          String?
+  companyName    String?
+  abn            String?
+  acn            String?
+  state          String?
+  territory      String?
+  payload        Json
+  priority       Boolean    @default(false)
+  assigneeId     String?
+  assignee       AdminUser? @relation(fields: [assigneeId], references: [id])
+  source         String?
+  ipHash         String?
+  locale         String?
+  promotedUserId String?
+  createdAt      DateTime   @default(now())
+  updatedAt      DateTime   @updatedAt
+
+  notes  LeadNote[]
+  events LeadEvent[]
+
+  @@index([type, status, createdAt])
+  @@index([abn])
+  @@index([email])
+}
+
+model LeadNote {
+  id        String    @id @default(uuid())
+  leadId    String
+  lead      Lead      @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  authorId  String
+  author    AdminUser @relation(fields: [authorId], references: [id])
+  body      String
+  createdAt DateTime  @default(now())
+
+  @@index([leadId, createdAt])
+}
+
+model LeadEvent {
+  id        String     @id @default(uuid())
+  leadId    String?
+  lead      Lead?      @relation(fields: [leadId], references: [id], onDelete: SetNull)
+  actorId   String?
+  actor     AdminUser? @relation("EventActor", fields: [actorId], references: [id], onDelete: SetNull)
+  action    String
+  metadata  Json?
+  createdAt DateTime   @default(now())
+
+  @@index([leadId, createdAt])
+  @@index([action, createdAt])
+}
+
+enum OtpPurpose {
+  LOGIN
+  STEP_UP
+}
+
+enum AuthPrincipalType {
+  ADMIN
+  USER
+}
+
+model OtpChallenge {
+  id          String     @id @default(uuid())
+  adminUserId String?
+  adminUser   AdminUser? @relation(fields: [adminUserId], references: [id], onDelete: Cascade)
+  userId      String?
+  user        User?      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  purpose     OtpPurpose @default(LOGIN)
+  codeHash    String
+  expiresAt   DateTime
+  consumedAt  DateTime?
+  attempts    Int        @default(0)
+  createdAt   DateTime   @default(now())
+
+  @@index([adminUserId, createdAt])
+  @@index([userId, createdAt])
+}
+
+/// Refresh-token sessions (rotating). One row per device/login.
+model AuthSession {
+  id               String            @id @default(uuid())
+  principalType    AuthPrincipalType
+  adminUserId      String?
+  adminUser        AdminUser?        @relation(fields: [adminUserId], references: [id], onDelete: Cascade)
+  userId           String?
+  user             User?             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  /// Hash of current refresh token
+  refreshTokenHash String
+  /// Rotation family — reused across refresh chain
+  familyId         String
+  deviceLabel      String?
+  userAgent        String?
+  ipHash           String?
+  expiresAt        DateTime
+  revokedAt        DateTime?
+  lastUsedAt       DateTime          @default(now())
+  createdAt        DateTime          @default(now())
+
+  @@index([adminUserId, revokedAt])
+  @@index([userId, revokedAt])
+  @@index([refreshTokenHash])
+  @@index([familyId])
+}
+
+// ─── Phase 1 ERD v0 — identity & geography ──────────────────────────────────
+
+enum PlatformRole {
+  SENDER
+  TRANSPORT_COMPANY
+  DRIVER
+}
+
+enum UserStatus {
+  PENDING
+  ACTIVE
+  SUSPENDED
+  DISABLED
+}
+
+enum CompanyType {
+  SENDER
+  CARRIER
+}
+
+enum CompanyStatus {
+  DRAFT
+  PENDING_VERIFICATION
+  PENDING_REVIEW
+  INFO_REQUESTED
+  PENDING_PAYMENT
+  PENDING_COMPLIANCE_DOCS
+  PENDING_SETTLEMENT_SETUP
+  PENDING_FLEET_READINESS
+  ACTIVE
+  BID_ELIGIBLE
+  SUSPENDED
+  REJECTED
+}
+
+enum AdminScopeType {
+  STATE
+  LOCAL
+}
+
+model Region {
+  id        String   @id @default(uuid())
+  /// AU state code e.g. VIC, NSW
+  code      String   @unique
+  name      String
+  /// Pilot gate: only enabled regions accept marketplace traffic (G0-5)
+  enabled   Boolean  @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  territories LocalTerritory[]
+  scopes      AdminScope[]
+  companies   Company[]        @relation("CompanyHomeRegion")
+  jobsOrigin  Job[]            @relation("JobOriginRegion")
+  complianceCases ComplianceCase[]
+}
+
+model LocalTerritory {
+  id        String   @id @default(uuid())
+  regionId  String
+  region    Region   @relation(fields: [regionId], references: [id], onDelete: Cascade)
+  code      String
+  name      String
+  enabled   Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  scopes     AdminScope[]
+  jobsOrigin Job[]        @relation("JobOriginTerritory")
+
+  @@unique([regionId, code])
+  @@index([regionId])
+}
+
+model AdminScope {
+  id               String         @id @default(uuid())
+  adminUserId      String
+  adminUser        AdminUser      @relation(fields: [adminUserId], references: [id], onDelete: Cascade)
+  scopeType        AdminScopeType
+  regionId         String?
+  region           Region?        @relation(fields: [regionId], references: [id], onDelete: Restrict)
+  localTerritoryId String?
+  localTerritory   LocalTerritory? @relation(fields: [localTerritoryId], references: [id], onDelete: Restrict)
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+
+  @@index([adminUserId])
+  @@index([regionId])
+  @@index([localTerritoryId])
+}
+
+model User {
+  id        String       @id @default(uuid())
+  email     String       @unique
+  phone     String?
+  role      PlatformRole
+  status    UserStatus   @default(PENDING)
+  name      String?
+  companyId String?
+  company   Company?     @relation(fields: [companyId], references: [id], onDelete: SetNull)
+  createdAt DateTime     @default(now())
+  updatedAt DateTime     @updatedAt
+
+  driver          Driver?
+  otpChallenges   OtpChallenge[]
+  sessions        AuthSession[]
+
+  @@index([companyId])
+  @@index([role, status])
+  @@index([phone])
+}
+
+enum SenderAccountType {
+  BUSINESS
+  INDIVIDUAL
+}
+
+model Company {
+  id                    String        @id @default(uuid())
+  type                  CompanyType
+  status                CompanyStatus @default(DRAFT)
+  legalName             String
+  tradingName           String?
+  abn                   String?
+  acn                   String?
+  email                 String?
+  phone                 String?
+  homeRegionId          String?
+  homeRegion            Region?       @relation("CompanyHomeRegion", fields: [homeRegionId], references: [id], onDelete: SetNull)
+  /// Sender onboarding (M3)
+  senderAccountType     SenderAccountType?
+  invoiceLegalName      String?
+  invoiceAddressLine1   String?
+  invoiceSuburb         String?
+  invoiceState          String?
+  invoicePostcode       String?
+  gstRegistered         Boolean       @default(false)
+  paymentReady          Boolean       @default(false)
+  stripeCustomerId      String?
+  stripeDefaultPaymentMethodId String?
+  stripeConnectAccountId String?
+  /// Carrier Stripe Connect Express — payouts ready (M4)
+  stripeConnectPayoutsEnabled Boolean @default(false)
+  /// Carrier capability flags e.g. DG, REEFER, OVERSIZE, TAIL_LIFT
+  capabilities          String[]      @default([])
+  /// AU region codes carrier serves (in addition to homeRegion)
+  serviceRegionCodes    String[]      @default([])
+  createdAt             DateTime      @default(now())
+  updatedAt             DateTime      @updatedAt
+
+  users               User[]
+  vehicles            Vehicle[]
+  drivers             Driver[]
+  complianceDocuments ComplianceDocument[]
+  complianceCases     ComplianceCase[]
+  jobsAsSender        Job[]                @relation("JobSenderCompany")
+  proposals           Proposal[]
+  assignments         Assignment[]         @relation("AssignmentCarrier")
+
+  @@index([type, status])
+  @@index([abn])
+  @@index([homeRegionId])
+}
+
+// ─── Fleet & compliance ─────────────────────────────────────────────────────
+
+enum VehicleStatus {
+  DRAFT
+  PENDING_REVIEW
+  ACTIVE
+  SUSPENDED
+  RETIRED
+}
+
+enum DriverStatus {
+  INVITED
+  PENDING_REVIEW
+  ACTIVE
+  SUSPENDED
+  DISABLED
+}
+
+enum ComplianceDocType {
+  ABN_EXTRACT
+  GOVERNMENT_ID
+  SELFIE
+  DRIVER_LICENCE
+  VEHICLE_REGO
+  RWC
+  PUBLIC_LIABILITY
+  CARGO_INSURANCE
+  INSURANCE
+  NHVR
+  OTHER
+}
+
+enum ComplianceDocStatus {
+  UPLOAD_PENDING
+  UPLOADED
+  UNDER_REVIEW
+  APPROVED
+  REJECTED
+  EXPIRED
+}
+
+enum ComplianceCaseType {
+  SENDER_KYB
+  SENDER_KYC
+  CARRIER_KYB
+}
+
+enum ComplianceCaseStatus {
+  OPEN
+  INFO_REQUESTED
+  ESCALATED
+  APPROVED
+  REJECTED
+  CLOSED
+}
+
+model Vehicle {
+  id           String        @id @default(uuid())
+  companyId    String
+  company      Company       @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  status       VehicleStatus @default(DRAFT)
+  label        String?
+  registration String?
+  /// e.g. UTE, RIGID_1_2T — floor G0-12
+  vehicleClass String?
+  tareKg       Int?
+  gvmKg        Int?
+  gcmKg        Int?
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+
+  assignments Assignment[]
+  proposals   Proposal[]
+  complianceDocuments ComplianceDocument[]
+
+  @@index([companyId, status])
+}
+
+model Driver {
+  id        String       @id @default(uuid())
+  userId    String       @unique
+  user      User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  companyId String?
+  company   Company?     @relation(fields: [companyId], references: [id], onDelete: SetNull)
+  status    DriverStatus @default(INVITED)
+  licenceNo String?
+  /// e.g. C, LR, MR, HR, HC, MC
+  licenceClass String?
+  licenceExpiry DateTime?
+  nhvrAcknowledgedAt DateTime?
+  /// SHA-256 of raw invite token (single-use until accept)
+  inviteTokenHash String?
+  inviteExpiresAt DateTime?
+  inviteAcceptedAt DateTime?
+  createdAt DateTime     @default(now())
+  updatedAt DateTime     @updatedAt
+
+  assignments Assignment[]
+  proposals   Proposal[]
+  complianceDocuments ComplianceDocument[]
+
+  @@index([companyId, status])
+  @@index([inviteTokenHash])
+}
+
+model ComplianceDocument {
+  id               String              @id @default(uuid())
+  companyId        String?
+  company          Company?            @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  vehicleId        String?
+  vehicle          Vehicle?            @relation(fields: [vehicleId], references: [id], onDelete: Cascade)
+  driverId         String?
+  driver           Driver?             @relation(fields: [driverId], references: [id], onDelete: Cascade)
+  caseId           String?
+  case             ComplianceCase?     @relation(fields: [caseId], references: [id], onDelete: SetNull)
+  docType          ComplianceDocType
+  status           ComplianceDocStatus @default(UPLOADED)
+  storageKey       String?
+  contentHash      String?
+  mimeType         String?
+  sizeBytes        Int?
+  originalFilename String?
+  uploadedByUserId String?
+  expiresAt        DateTime?
+  reviewedAt       DateTime?
+  reviewNote       String?
+  createdAt        DateTime            @default(now())
+  updatedAt        DateTime            @updatedAt
+
+  @@index([companyId, status])
+  @@index([vehicleId])
+  @@index([driverId])
+  @@index([caseId])
+  @@index([expiresAt])
+  @@index([status, expiresAt])
+}
+
+model ComplianceCase {
+  id               String               @id @default(uuid())
+  companyId        String
+  company          Company              @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  caseType         ComplianceCaseType
+  status           ComplianceCaseStatus @default(OPEN)
+  regionId         String?
+  region           Region?              @relation(fields: [regionId], references: [id], onDelete: SetNull)
+  submittedByUserId String?
+  assignedAdminId  String?
+  decisionNote     String?
+  escalatedAt      DateTime?
+  decidedAt        DateTime?
+  decidedByAdminId String?
+  createdAt        DateTime             @default(now())
+  updatedAt        DateTime             @updatedAt
+
+  documents ComplianceDocument[]
+
+  @@index([status, createdAt])
+  @@index([companyId, status])
+  @@index([regionId, status])
+  @@index([caseType, status])
+}
+
+// ─── Jobs / matching / trips ────────────────────────────────────────────────
+
+enum JobStatus {
+  DRAFT
+  PUBLISHED
+  BIDDING
+  ASSIGNED
+  IN_TRANSIT
+  COMPLETED
+  CANCELLED
+  EXPIRED
+}
+
+enum JobPricingModel {
+  PER_KM
+  HOURLY
+}
+
+enum ProposalStatus {
+  SUBMITTED
+  WITHDRAWN
+  ACCEPTED
+  REJECTED
+  EXPIRED
+}
+
+enum AssignmentStatus {
+  PENDING
+  LOCKED
+  CANCELLED
+  COMPLETED
+}
+
+enum TripStatus {
+  PENDING_GATES
+  EN_ROUTE_PICKUP
+  AT_PICKUP
+  IN_TRANSIT
+  AT_DROPOFF
+  COMPLETED
+  CANCELLED
+  BREAKDOWN
+}
+
+model Job {
+  id                   String          @id @default(uuid())
+  senderCompanyId      String
+  senderCompany        Company         @relation("JobSenderCompany", fields: [senderCompanyId], references: [id], onDelete: Restrict)
+  status               JobStatus       @default(DRAFT)
+  pricingModel         JobPricingModel
+  title                String?
+  /// Origin attribution for commissions (G0 / origin-based)
+  originRegionId       String?
+  originRegion         Region?         @relation("JobOriginRegion", fields: [originRegionId], references: [id], onDelete: SetNull)
+  originTerritoryId    String?
+  originTerritory      LocalTerritory? @relation("JobOriginTerritory", fields: [originTerritoryId], references: [id], onDelete: SetNull)
+  /// Money in integer cents AUD (G0-11)
+  estimateExGstCents   Int?
+  estimateGstCents     Int?
+  estimateIncGstCents  Int?
+  receiverName         String?
+  receiverEmail        String?
+  receiverPhone        String?
+  /// Scheduled pickup window start
+  pickupAt             DateTime?
+  deadWeightKg         Float?
+  lengthCm             Float?
+  widthCm              Float?
+  heightCm             Float?
+  chargeableWeightKg   Float?
+  /// e.g. GENERAL, DG, REEFER, OVERSIZE
+  loadTypes            String[]        @default([])
+  requiresDg           Boolean         @default(false)
+  requiresReefer       Boolean         @default(false)
+  requiresOversize     Boolean         @default(false)
+  minVehicleClass      String?
+  recommendedVehicleClass String?
+  siteManeuverability  String?
+  siteFacility         String?
+  siteDisclaimerAcceptedAt DateTime?
+  /// Hourly Pattern A | B (null for PER_KM)
+  hourlyPattern        String?
+  routeDistanceKm      Float?
+  routeDurationMinutes Float?
+  /// 0 or 15 when planned duration > 5.25h
+  routeFatigueBreakMinutes Int           @default(0)
+  /// Hourly billable hours (floor 4.0)
+  billableHours        Float?
+  publishedAt          DateTime?
+  createdAt            DateTime        @default(now())
+  updatedAt            DateTime        @updatedAt
+
+  stops       JobStop[]
+  proposals   Proposal[]
+  assignment  Assignment?
+  trip        Trip?
+  paymentEvents PaymentEvent[]
+  settlementLines SettlementLine[]
+  surcharges    Surcharge[]
+
+  @@index([senderCompanyId, status])
+  @@index([originRegionId])
+  @@index([status, publishedAt])
+}
+
+model JobStop {
+  id        String   @id @default(uuid())
+  jobId     String
+  job       Job      @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  sequence  Int
+  /// PICKUP | DROPOFF | WAYPOINT
+  stopType  String
+  label     String?
+  addressLine String?
+  suburb    String?
+  state     String?
+  postcode  String?
+  lat       Decimal? @db.Decimal(10, 7)
+  lng       Decimal? @db.Decimal(10, 7)
+  /// Drop-level receiver (multi-drop); job-level used when null
+  receiverName  String?
+  receiverEmail String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  stopProgress TripStopProgress[]
+
+  @@unique([jobId, sequence])
+  @@index([jobId])
+}
+
+model Proposal {
+  id                 String         @id @default(uuid())
+  jobId              String
+  job                Job            @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  carrierCompanyId   String
+  carrierCompany     Company        @relation(fields: [carrierCompanyId], references: [id], onDelete: Restrict)
+  status             ProposalStatus @default(SUBMITTED)
+  vehicleId          String?
+  vehicle            Vehicle?       @relation(fields: [vehicleId], references: [id], onDelete: SetNull)
+  driverId           String?
+  driver             Driver?        @relation(fields: [driverId], references: [id], onDelete: SetNull)
+  etaMinutes         Int?
+  /// Bid / quoted total in cents AUD (inc-GST gross when accepted)
+  amountExGstCents   Int
+  amountGstCents     Int
+  amountIncGstCents  Int
+  createdAt          DateTime       @default(now())
+  updatedAt          DateTime       @updatedAt
+
+  assignment Assignment?
+
+  @@index([jobId, status])
+  @@index([carrierCompanyId, status])
+  @@index([vehicleId])
+  @@index([driverId])
+}
+
+model Assignment {
+  id               String           @id @default(uuid())
+  jobId            String           @unique
+  job              Job              @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  proposalId       String           @unique
+  proposal         Proposal         @relation(fields: [proposalId], references: [id], onDelete: Restrict)
+  carrierCompanyId String
+  carrierCompany   Company          @relation("AssignmentCarrier", fields: [carrierCompanyId], references: [id], onDelete: Restrict)
+  vehicleId        String?
+  vehicle          Vehicle?         @relation(fields: [vehicleId], references: [id], onDelete: SetNull)
+  driverId         String?
+  driver           Driver?          @relation(fields: [driverId], references: [id], onDelete: SetNull)
+  status           AssignmentStatus @default(PENDING)
+  lockedAt         DateTime?
+  createdAt        DateTime         @default(now())
+  updatedAt        DateTime         @updatedAt
+
+  trip Trip?
+
+  @@index([carrierCompanyId, status])
+  @@index([driverId])
+  @@index([vehicleId])
+}
+
+model Trip {
+  id           String     @id @default(uuid())
+  jobId        String     @unique
+  job          Job        @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  assignmentId String     @unique
+  assignment   Assignment @relation(fields: [assignmentId], references: [id], onDelete: Cascade)
+  status       TripStatus @default(PENDING_GATES)
+  /// Pre-trip NHVR / walk-around
+  safetyPassedAt   DateTime?
+  safetyFailedAt   DateTime?
+  safetyNotes      String?
+  /// Mass gate (kg) — declared from job; actual from driver
+  declaredMassKg   Float?
+  actualMassKg     Float?
+  massCheckOk      Boolean  @default(false)
+  massCheckedAt    DateTime?
+  massOverDeclared Boolean  @default(false)
+  /// Break pauses sender ETA/telemetry visibility
+  onBreak          Boolean  @default(false)
+  breakStartedAt   DateTime?
+  startedAt    DateTime?
+  completedAt  DateTime?
+  /// SOG POD metadata refs (blob keys) — evidence validation in M9/M10
+  podStorageKey String?
+  podCapturedAt DateTime?
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+
+  locations     TripLocationSample[]
+  stopProgress  TripStopProgress[]
+  surcharges    Surcharge[]
+
+  @@index([status])
+}
+
+model TripLocationSample {
+  id        String   @id @default(uuid())
+  tripId    String
+  trip      Trip     @relation(fields: [tripId], references: [id], onDelete: Cascade)
+  lat       Decimal  @db.Decimal(10, 7)
+  lng       Decimal  @db.Decimal(10, 7)
+  recordedAt DateTime @default(now())
+  createdAt DateTime @default(now())
+
+  @@index([tripId, recordedAt])
+}
+
+/// M9 — per-stop geofence / dwell progress (run-sheet prep for M10)
+model TripStopProgress {
+  id               String    @id @default(uuid())
+  tripId           String
+  trip             Trip      @relation(fields: [tripId], references: [id], onDelete: Cascade)
+  jobStopId        String
+  jobStop          JobStop   @relation(fields: [jobStopId], references: [id], onDelete: Cascade)
+  /// Consecutive inside-radius samples (anti-bounce)
+  insideCount      Int       @default(0)
+  currentlyInside  Boolean   @default(false)
+  enteredAt        DateTime?
+  exitedAt         DateTime?
+  waitStartedAt    DateTime?
+  freeWaitEndsAt   DateTime?
+  waitOverageMinutes Int     @default(0)
+  arrivalRecorded  Boolean   @default(false)
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  surcharges Surcharge[]
+
+  @@unique([tripId, jobStopId])
+  @@index([tripId])
+  @@index([jobStopId])
+}
+
+enum SurchargeKind {
+  WAITING
+  MASS
+}
+
+enum SurchargeStatus {
+  PENDING_PAYMENT
+  PAID
+  WAIVED
+}
+
+model Surcharge {
+  id                String          @id @default(uuid())
+  jobId             String
+  job               Job             @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  tripId            String
+  trip              Trip            @relation(fields: [tripId], references: [id], onDelete: Cascade)
+  kind              SurchargeKind
+  status            SurchargeStatus @default(PENDING_PAYMENT)
+  amountExGstCents  Int
+  amountGstCents    Int
+  amountIncGstCents Int
+  currency          String          @default("AUD")
+  paymentEventId    String?         @unique
+  paymentEvent      PaymentEvent?   @relation(fields: [paymentEventId], references: [id], onDelete: SetNull)
+  stopProgressId    String?
+  stopProgress      TripStopProgress? @relation(fields: [stopProgressId], references: [id], onDelete: SetNull)
+  idempotencyKey    String          @unique
+  metadata          Json?
+  paidAt            DateTime?
+  waivedAt          DateTime?
+  waivedByAdminId   String?
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+
+  @@index([jobId, status])
+  @@index([tripId, kind, status])
+  @@index([status])
+}
+
+// ─── Payments & settlements (money = integer cents AUD) ─────────────────────
+
+enum PaymentEventType {
+  CHARGE
+  REFUND
+  TRANSFER
+  TRANSFER_REVERSAL
+  ADJUSTMENT
+  SURCHARGE
+}
+
+enum PaymentEventStatus {
+  PENDING
+  REQUIRES_ACTION
+  SUCCEEDED
+  FAILED
+  CANCELLED
+}
+
+enum SettlementRecipientType {
+  CARRIER
+  SUPER_ADMIN
+  STATE_MASTER
+  LOCAL_BDE
+  HQ_HOLDING
+}
+
+enum SettlementLineStatus {
+  ACCRUED
+  PAYABLE
+  PAID
+  VOID
+}
+
+model PaymentEvent {
+  id                  String             @id @default(uuid())
+  jobId               String?
+  job                 Job?               @relation(fields: [jobId], references: [id], onDelete: SetNull)
+  type                PaymentEventType
+  status              PaymentEventStatus @default(PENDING)
+  /// Always persist ex / GST / inc (G0-11)
+  amountExGstCents    Int
+  amountGstCents      Int
+  amountIncGstCents   Int
+  currency            String             @default("AUD")
+  stripePaymentIntentId String?
+  stripeTransferId    String?
+  stripeRefundId      String?
+  idempotencyKey      String?            @unique
+  metadata            Json?
+  createdAt           DateTime           @default(now())
+  updatedAt           DateTime           @updatedAt
+
+  surcharge Surcharge?
+
+  @@index([jobId, type, status])
+  @@index([stripePaymentIntentId])
+}
+
+model SettlementLine {
+  id             String                  @id @default(uuid())
+  jobId          String?
+  job            Job?                    @relation(fields: [jobId], references: [id], onDelete: SetNull)
+  recipientType  SettlementRecipientType
+  /// Share of gross percent e.g. 70, 15, 10, 5
+  sharePercent   Int?
+  amountCents    Int
+  currency       String                  @default("AUD")
+  status         SettlementLineStatus    @default(ACCRUED)
+  regionId       String?
+  territoryId    String?
+  paidAt         DateTime?
+  createdAt      DateTime                @default(now())
+  updatedAt      DateTime                @updatedAt
+
+  @@index([jobId])
+  @@index([recipientType, status])
+}
+
+// ─── Ops / policy / audit ───────────────────────────────────────────────────
+
+model PolicyVersion {
+  id          String    @id @default(uuid())
+  key         String
+  version     Int
+  payload     Json
+  publishedAt DateTime?
+  publishedBy String?
+  publisher   AdminUser? @relation("PolicyPublisher", fields: [publishedBy], references: [id], onDelete: SetNull)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@unique([key, version])
+  @@index([key, publishedAt])
+}
+
+model AuditEvent {
+  id         String     @id @default(uuid())
+  actorAdminId String?
+  actorAdmin AdminUser? @relation("AuditActor", fields: [actorAdminId], references: [id], onDelete: SetNull)
+  actorUserId  String?
+  action     String
+  entityType String?
+  entityId   String?
+  correlationId String?
+  metadata   Json?
+  createdAt  DateTime   @default(now())
+
+  @@index([action, createdAt])
+  @@index([entityType, entityId])
+  @@index([actorAdminId, createdAt])
+}
+
+/// Stripe webhook idempotency (M7)
+model StripeWebhookEvent {
+  id            String   @id @default(uuid())
+  stripeEventId String   @unique
+  type          String
+  processedAt   DateTime @default(now())
+  payload       Json?
+}
