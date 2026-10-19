@@ -3,6 +3,10 @@ import { AdminRole } from '@prisma/client';
 import { OpsService } from './ops.service';
 import { AppRole } from '../../shared/types';
 
+const config = {
+  get: (k: string) => (k === 'ADMIN_APP_URL' ? 'http://localhost:5174' : undefined),
+};
+
 describe('OpsService.provisionAdmin paths', () => {
   const superP = {
     id: 'super-1',
@@ -24,6 +28,7 @@ describe('OpsService.provisionAdmin paths', () => {
       prisma as never,
       { recordPlatform: jest.fn() } as never,
       { sendMail: jest.fn() } as never,
+      config as never,
     );
     await expect(
       service.provisionAdmin(superP, {
@@ -44,6 +49,7 @@ describe('OpsService.provisionAdmin paths', () => {
       prisma as never,
       { recordPlatform: jest.fn() } as never,
       { sendMail: jest.fn() } as never,
+      config as never,
     );
     await expect(
       service.provisionAdmin(superP, {
@@ -79,9 +85,14 @@ describe('OpsService.provisionAdmin paths', () => {
       },
     };
     const audit = { recordPlatform: jest.fn() };
-    const service = new OpsService(prisma as never, audit as never, {
-      sendMail: jest.fn().mockResolvedValue({ skipped: true }),
-    } as never);
+    const service = new OpsService(
+      prisma as never,
+      audit as never,
+      {
+        sendMail: jest.fn().mockResolvedValue({ skipped: true }),
+      } as never,
+      config as never,
+    );
 
     const result = await service.provisionAdmin(superP, {
       email: 'state@x.com',
@@ -123,6 +134,7 @@ describe('OpsService.provisionAdmin paths', () => {
       prisma as never,
       { recordPlatform: jest.fn() } as never,
       { sendMail: jest.fn() } as never,
+      config as never,
     );
     await expect(
       service.provisionAdmin(superP, {
@@ -150,6 +162,7 @@ describe('OpsService.provisionAdmin paths', () => {
       prisma as never,
       { recordPlatform: jest.fn() } as never,
       { sendMail: jest.fn() } as never,
+      config as never,
     );
     await expect(service.publishPolicyStub(superP)).resolves.toEqual({
       id: 'pv-1',

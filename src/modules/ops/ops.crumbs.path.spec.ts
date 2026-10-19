@@ -39,6 +39,9 @@ describe('OpsService crumb branch leftovers', () => {
       prisma as never,
       audit as never,
       notifications as never,
+      {
+        get: (k: string) => (k === 'ADMIN_APP_URL' ? 'http://localhost:5174' : undefined),
+      } as never,
     ).provisionAdmin(superAdmin, {
       email: 'state@yopmail.com',
       role: 'STATE_MASTER',

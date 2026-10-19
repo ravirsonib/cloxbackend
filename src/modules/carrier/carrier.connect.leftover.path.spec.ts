@@ -35,7 +35,9 @@ describe('CarrierService connect leftover paths', () => {
       prisma as never,
       audit as never,
       stripe as never,
-      { get: () => 'http://localhost:3000,http://localhost:5174' } as never,
+      {
+        get: (k: string) => (k === 'ADMIN_APP_URL' ? 'http://localhost:5174' : undefined),
+      } as never,
       drivers as never,
     );
   }

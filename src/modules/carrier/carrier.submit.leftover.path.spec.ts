@@ -68,7 +68,7 @@ describe('CarrierService submitVerification leftover gates', () => {
   };
   const config = {
     get: (k: string) =>
-      k === 'CORS_ORIGINS' ? 'http://localhost:3000,http://localhost:5174' : undefined,
+      k === 'ADMIN_APP_URL' ? 'http://localhost:5174' : undefined,
   };
   const drivers = {
     createInviteToken: jest.fn(),

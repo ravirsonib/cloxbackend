@@ -323,10 +323,9 @@ export class CarrierService {
         data: { stripeConnectAccountId: accountId },
       });
     }
-    const corsRaw = this.config.get('CORS_ORIGINS', { infer: true }) || '';
-    const corsOrigins = corsRaw.split(',');
-    const secondOrigin = corsOrigins.length > 1 ? corsOrigins[1].trim() : '';
-    const adminOrigin = secondOrigin || 'http://localhost:5174';
+    const adminOrigin = this.config
+      .get('ADMIN_APP_URL', { infer: true })
+      .replace(/\/$/, '');
     const refreshUrl = urls?.refreshUrl ?? `${adminOrigin}/carrier/onboarding`;
     const returnUrl = urls?.returnUrl ?? `${adminOrigin}/carrier/onboarding?connect=return`;
     const link = await this.stripe.createAccountLink({

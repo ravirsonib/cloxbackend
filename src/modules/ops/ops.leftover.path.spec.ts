@@ -19,8 +19,17 @@ describe('OpsService leftover paths', () => {
   const audit = { recordPlatform: jest.fn() };
   const notifications = { sendMail: jest.fn() };
 
+  const config = {
+    get: (k: string) => (k === 'ADMIN_APP_URL' ? 'http://localhost:5174' : undefined),
+  };
+
   function makeService(prisma: Record<string, unknown>) {
-    return new OpsService(prisma as never, audit as never, notifications as never);
+    return new OpsService(
+      prisma as never,
+      audit as never,
+      notifications as never,
+      config as never,
+    );
   }
 
   it('ensureDatabase throws when offline', async () => {

@@ -30,14 +30,14 @@ describe('CarrierService crumb branch leftovers', () => {
 
   function makeService(
     prisma: Record<string, unknown>,
-    cors = 'http://localhost:3000,http://localhost:5174',
+    adminAppUrl = 'http://localhost:5174',
   ) {
     return new CarrierService(
       prisma as never,
       audit as never,
       stripe as never,
       {
-        get: (k: string) => (k === 'CORS_ORIGINS' ? cors : undefined),
+        get: (k: string) => (k === 'ADMIN_APP_URL' ? adminAppUrl : undefined),
       } as never,
       drivers as never,
     );
@@ -76,7 +76,7 @@ describe('CarrierService crumb branch leftovers', () => {
     );
   });
 
-  it('getOnboarding maps latestCase; connect uses CORS second origin', async () => {
+  it('getOnboarding maps latestCase; connect uses ADMIN_APP_URL', async () => {
     const company = {
       id: 'co-c',
       type: CompanyType.CARRIER,
@@ -130,13 +130,15 @@ describe('CarrierService crumb branch leftovers', () => {
       }),
     );
 
-    // Falsy / single CORS → localhost:5174 fallback
     stripe.createAccountLink.mockClear();
     company.stripeConnectAccountId = 'acct_existing';
-    await makeService(prisma, '').createConnectOnboarding(carrierPrincipal);
+    await makeService(prisma, 'https://admin.clox.test/').createConnectOnboarding(
+      carrierPrincipal,
+    );
     expect(stripe.createAccountLink).toHaveBeenCalledWith(
       expect.objectContaining({
-        refreshUrl: 'http://localhost:5174/carrier/onboarding',
+        refreshUrl: 'https://admin.clox.test/carrier/onboarding',
+        returnUrl: 'https://admin.clox.test/carrier/onboarding?connect=return',
       }),
     );
   });

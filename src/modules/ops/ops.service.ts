@@ -5,9 +5,11 @@ import {
   NotFoundException,
   ServiceUnavailableException,
 } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { AdminRole, AdminScopeType } from '@prisma/client';
 import { AuditAction, type ProvisionAdminInput } from '../../shared/types';
 import type { AuthenticatedPrincipal } from '../../common/guards/jwt-auth.guard';
+import type { AppEnv } from '../../config/env.validation';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { NotificationsService } from '../notifications/notifications.service';
@@ -18,6 +20,7 @@ export class OpsService {
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
     private readonly notifications: NotificationsService,
+    private readonly config: ConfigService<AppEnv, true>,
   ) {}
 
   private ensureDatabase() {
@@ -98,11 +101,18 @@ export class OpsService {
       },
     });
 
+    const loginUrl = `${this.config.get('ADMIN_APP_URL', { infer: true }).replace(/\/$/, '')}/login`;
     void this.notifications.sendMail({
       to: admin.email,
       subject: 'CLOX admin access provisioned',
-      text: `You have been provisioned as ${admin.role} on CLOX. Sign in with OTP using this email.`,
-      html: `<p>You have been provisioned as <strong>${admin.role}</strong> on CLOX.</p><p>Sign in with OTP using this email.</p>`,
+      text: [
+        `You have been provisioned as ${admin.role} on CLOX.`,
+        `Sign in with OTP using this email: ${loginUrl}`,
+      ].join('\n'),
+      html: [
+        `<p>You have been provisioned as <strong>${admin.role}</strong> on CLOX.</p>`,
+        `<p><a href="${loginUrl}">Sign in with OTP</a> using this email.</p>`,
+      ].join(''),
     });
 
     return {
