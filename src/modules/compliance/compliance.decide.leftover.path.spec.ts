@@ -1,6 +1,7 @@
 import { ForbiddenException } from '@nestjs/common';
 import {
   ComplianceCaseStatus,
+  ComplianceCaseType,
   CompanyStatus,
   CompanyType,
 } from '@prisma/client';
@@ -43,6 +44,7 @@ describe('ComplianceService approve/reject region + decision leftovers', () => {
       audit as never,
       scope as never,
       abr as never,
+      { sendComplianceApprovedEmail: jest.fn().mockResolvedValue({ skipped: true }), sendComplianceInfoRequestedEmail: jest.fn().mockResolvedValue({ skipped: true }) } as never,
     );
   }
 
@@ -51,10 +53,16 @@ describe('ComplianceService approve/reject region + decision leftovers', () => {
       id: 'case-1',
       status: ComplianceCaseStatus.OPEN,
       companyId: 'co-1',
+      caseType:
+        companyType === CompanyType.CARRIER
+          ? ComplianceCaseType.CARRIER_KYB
+          : ComplianceCaseType.SENDER_KYB,
       company: {
         id: 'co-1',
         type: companyType,
         status: CompanyStatus.PENDING_REVIEW,
+        legalName: 'Test Co',
+        email: 'ops.contact@yopmail.com',
         homeRegionId: withRegion ? 'reg-1' : null,
         homeRegion: withRegion ? { code: 'VIC' } : null,
       },
@@ -85,6 +93,7 @@ describe('ComplianceService approve/reject region + decision leftovers', () => {
       complianceCase: {
         findUnique: jest.fn().mockResolvedValue(openCase(CompanyType.SENDER, false)),
       },
+      user: { findMany: jest.fn().mockResolvedValue([{ email: 'ops.contact@yopmail.com' }]) },
       $transaction: jest.fn().mockImplementation(async (fn: (tx: unknown) => unknown) => {
         const tx = {
           complianceCase: { update: jest.fn() },

@@ -6,6 +6,7 @@ import {
   ParseUUIDPipe,
   Post,
   Put,
+  StreamableFile,
   UploadedFile,
   UseGuards,
   UseInterceptors,
@@ -79,6 +80,21 @@ export class DocumentsController {
     @Body(new ZodValidationPipe(confirmDocumentSchema)) body: ConfirmDocumentInput,
   ) {
     return this.documentsService.confirm(principal, id, body);
+  }
+
+  @Get(':id/content')
+  @ApiOperation({ summary: 'Download/view document bytes (Ops visual review)' })
+  async getContent(
+    @CurrentPrincipal() principal: AuthenticatedPrincipal,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    const file = await this.documentsService.getContent(principal, id);
+    const safeName = file.filename.replace(/[^\w.\- ()[\]]+/g, '_');
+    return new StreamableFile(file.stream, {
+      type: file.mimeType,
+      disposition: `inline; filename="${safeName}"`,
+      length: file.sizeBytes ?? undefined,
+    });
   }
 
   @Get(':id')

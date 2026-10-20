@@ -6,7 +6,9 @@ describe('AdminService dashboard + lead detail paths', () => {
   const audit = { record: jest.fn() };
 
   function makeService(prisma: Record<string, unknown>) {
-    return new AdminService(prisma as never, audit as never);
+    return new AdminService(prisma as never, audit as never, {
+      sendAccountSuspendedEmail: jest.fn(),
+    } as never);
   }
 
   beforeEach(() => {

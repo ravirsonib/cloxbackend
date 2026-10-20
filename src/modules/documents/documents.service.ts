@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'crypto';
-import { existsSync, mkdirSync } from 'fs';
+import { createReadStream, existsSync, mkdirSync, type ReadStream } from 'fs';
 import { access, mkdir, writeFile } from 'fs/promises';
 import { dirname, join, resolve } from 'path';
 import {
@@ -432,6 +432,47 @@ export class DocumentsService {
       contentHash: doc.contentHash,
       expiresAt: doc.expiresAt,
       createdAt: doc.createdAt,
+    };
+  }
+
+  /**
+   * Stream stored file for Ops visual review (G0-2 / G0-15) or company member access.
+   * Inline Content-Disposition so PDF/images open in the browser.
+   */
+  async getContent(
+    principal: AuthenticatedPrincipal,
+    documentId: string,
+  ): Promise<{ stream: ReadStream; mimeType: string; filename: string; sizeBytes: number | null }> {
+    this.ensureDatabase();
+    const doc = await this.prisma.complianceDocument.findUnique({
+      where: { id: documentId },
+    });
+    if (!doc || !doc.companyId || !doc.storageKey) {
+      throw new NotFoundException('Document not found');
+    }
+    await this.assertCompanyAccess(principal, doc.companyId);
+    this.assertDocActionAllowed(principal, doc);
+    await this.assertDriverOwnsDoc(principal, doc);
+
+    if (doc.status === ComplianceDocStatus.UPLOAD_PENDING) {
+      throw new BadRequestException('Document has not been uploaded yet');
+    }
+
+    const fullPath = this.absolutePath(doc.storageKey);
+    try {
+      await access(fullPath);
+    } catch {
+      throw new NotFoundException('Document file missing from storage');
+    }
+
+    const mimeType = doc.mimeType && ALLOWED_MIME.has(doc.mimeType) ? doc.mimeType : 'application/octet-stream';
+    const filename = doc.originalFilename?.trim() || `${doc.docType.toLowerCase()}.bin`;
+
+    return {
+      stream: createReadStream(fullPath),
+      mimeType,
+      filename,
+      sizeBytes: doc.sizeBytes,
     };
   }
 

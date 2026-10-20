@@ -15,6 +15,7 @@ describe('ComplianceService.runExpiryWatchdog leftover edges', () => {
       audit as never,
       {} as never,
       { lookupAbn: jest.fn() } as never,
+      { sendComplianceApprovedEmail: jest.fn().mockResolvedValue({ skipped: true }), sendComplianceInfoRequestedEmail: jest.fn().mockResolvedValue({ skipped: true }) } as never,
     );
   }
 

@@ -83,6 +83,7 @@ describe('CarrierService submitVerification leftover gates', () => {
       stripe as never,
       config as never,
       drivers as never,
+      { sendRegistrationConfirmation: jest.fn().mockResolvedValue({ skipped: true }) } as never,
     );
   }
 
@@ -148,6 +149,7 @@ describe('CarrierService submitVerification leftover gates', () => {
       user: {
         findUnique: jest.fn().mockResolvedValue(userWith(carrierCompany())),
       },
+      complianceCase: { findFirst: jest.fn().mockResolvedValue(null) },
       complianceDocument: { findMany: jest.fn().mockResolvedValue([]) },
     };
     await expect(
@@ -163,6 +165,7 @@ describe('CarrierService submitVerification leftover gates', () => {
       user: {
         findUnique: jest.fn().mockResolvedValue(userWith(carrierCompany())),
       },
+      complianceCase: { findFirst: jest.fn().mockResolvedValue(null) },
       complianceDocument: {
         findMany: jest.fn().mockResolvedValue([
           { id: DOC_IDS[0], docType: ComplianceDocType.PUBLIC_LIABILITY },
@@ -206,7 +209,7 @@ describe('CarrierService submitVerification leftover gates', () => {
   });
 
   it('reopens INFO_REQUESTED case instead of creating new', async () => {
-    const company = carrierCompany();
+    const company = carrierCompany({ status: CompanyStatus.INFO_REQUESTED });
     const infoCase = {
       id: 'case-info',
       status: ComplianceCaseStatus.INFO_REQUESTED,
@@ -232,12 +235,12 @@ describe('CarrierService submitVerification leftover gates', () => {
           {
             id: DOC_IDS[0],
             docType: ComplianceDocType.PUBLIC_LIABILITY,
-            status: ComplianceDocStatus.UPLOADED,
+            status: ComplianceDocStatus.UNDER_REVIEW,
           },
           {
             id: DOC_IDS[1],
             docType: ComplianceDocType.CARGO_INSURANCE,
-            status: ComplianceDocStatus.UPLOADED,
+            status: ComplianceDocStatus.UNDER_REVIEW,
           },
           {
             id: DOC_IDS[2],
@@ -258,6 +261,15 @@ describe('CarrierService submitVerification leftover gates', () => {
     expect(result).toMatchObject({
       company: expect.objectContaining({ id: 'co-c' }),
     });
+    expect(prisma.complianceDocument.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          status: {
+            in: [ComplianceDocStatus.UPLOADED, ComplianceDocStatus.UNDER_REVIEW],
+          },
+        }),
+      }),
+    );
     expect(tx.complianceCase.update).toHaveBeenCalledWith(
       expect.objectContaining({
         where: { id: 'case-info' },

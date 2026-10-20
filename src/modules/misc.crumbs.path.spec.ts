@@ -85,9 +85,11 @@ describe('Shared types + admin/leads/stripe crumb leftovers', () => {
         ]),
       },
     };
-    const csv = await new AdminService(prisma as never, { record: jest.fn() } as never).exportLeadsCsv(
-      {},
-    );
+    const csv = await new AdminService(
+      prisma as never,
+      { record: jest.fn() } as never,
+      { sendAccountSuspendedEmail: jest.fn() } as never,
+    ).exportLeadsCsv({});
     expect(csv).toContain('investor@yopmail.com');
     expect(csv).toContain('bare@yopmail.com');
     expect(csv.split('\n')[1]).toMatch(/,false,,,/);
@@ -111,11 +113,11 @@ describe('Shared types + admin/leads/stripe crumb leftovers', () => {
       },
     };
     const audit = { record: jest.fn() };
-    await new AdminService(prisma as never, audit as never).updateLead(
-      'lead-1',
-      { priority: true, assigneeId: 'admin-2' },
-      'admin-1',
-    );
+    await new AdminService(
+      prisma as never,
+      audit as never,
+      { sendAccountSuspendedEmail: jest.fn() } as never,
+    ).updateLead('lead-1', { priority: true, assigneeId: 'admin-2' }, 'admin-1');
     expect(prisma.lead.update).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({

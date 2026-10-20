@@ -48,6 +48,7 @@ describe('ComplianceService submit leftover validation paths', () => {
       audit as never,
       scope as never,
       abr,
+      { sendComplianceApprovedEmail: jest.fn().mockResolvedValue({ skipped: true }), sendComplianceInfoRequestedEmail: jest.fn().mockResolvedValue({ skipped: true }) } as never,
     );
   }
 

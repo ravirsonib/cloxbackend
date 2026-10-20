@@ -44,6 +44,7 @@ describe('ComplianceService getCase territory leftovers', () => {
         audit as never,
         scope as never,
         abr as never,
+        { sendComplianceApprovedEmail: jest.fn().mockResolvedValue({ skipped: true }), sendComplianceInfoRequestedEmail: jest.fn().mockResolvedValue({ skipped: true }) } as never,
       ),
       scope,
     };

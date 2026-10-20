@@ -17,7 +17,7 @@ const superAdmin: AuthenticatedPrincipal = {
 
 describe('OpsService leftover paths', () => {
   const audit = { recordPlatform: jest.fn() };
-  const notifications = { sendMail: jest.fn() };
+  const notifications = { sendAdminProvisionedEmail: jest.fn() };
 
   const config = {
     get: (k: string) => (k === 'ADMIN_APP_URL' ? 'http://localhost:5174' : undefined),

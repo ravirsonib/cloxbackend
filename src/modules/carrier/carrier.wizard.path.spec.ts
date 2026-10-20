@@ -70,6 +70,7 @@ describe('CarrierService getOnboarding wizardStep leftovers', () => {
       stripe as never,
       config as never,
       drivers as never,
+      { sendRegistrationConfirmation: jest.fn().mockResolvedValue({ skipped: true }) } as never,
     );
   }
 
@@ -107,9 +108,9 @@ describe('CarrierService getOnboarding wizardStep leftovers', () => {
       'waiting_ops',
     ],
     [
-      'documents INFO_REQUESTED',
+      'submit INFO_REQUESTED',
       company({ status: CompanyStatus.INFO_REQUESTED }),
-      'documents',
+      'submit',
     ],
     ['profile missing ABN', company({ abn: null }), 'profile'],
     [

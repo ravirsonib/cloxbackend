@@ -8,6 +8,7 @@ describe('ComplianceService.runExpiryWatchdog paths', () => {
       { recordPlatform: jest.fn() } as never,
       {} as never,
       { lookupAbn: jest.fn() } as never,
+      { sendComplianceApprovedEmail: jest.fn().mockResolvedValue({ skipped: true }), sendComplianceInfoRequestedEmail: jest.fn().mockResolvedValue({ skipped: true }) } as never,
     );
     await expect(service.runExpiryWatchdog()).resolves.toEqual({
       scanned: 0,
@@ -49,6 +50,7 @@ describe('ComplianceService.runExpiryWatchdog paths', () => {
       audit as never,
       {} as never,
       { lookupAbn: jest.fn() } as never,
+      { sendComplianceApprovedEmail: jest.fn().mockResolvedValue({ skipped: true }), sendComplianceInfoRequestedEmail: jest.fn().mockResolvedValue({ skipped: true }) } as never,
     );
 
     const result = await service.runExpiryWatchdog();

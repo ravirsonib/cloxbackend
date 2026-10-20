@@ -12,7 +12,9 @@ const superAdmin: AuthenticatedPrincipal = {
 
 describe('OpsService crumb branch leftovers', () => {
   const audit = { recordPlatform: jest.fn() };
-  const notifications = { sendMail: jest.fn().mockResolvedValue({ skipped: true }) };
+  const notifications = {
+    sendAdminProvisionedEmail: jest.fn().mockResolvedValue({ skipped: true }),
+  };
 
   it('provisionAdmin without name → null; scope without region/territory codes', async () => {
     const prisma = {

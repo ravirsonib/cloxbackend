@@ -40,6 +40,7 @@ describe('CarrierService crumb branch leftovers', () => {
         get: (k: string) => (k === 'ADMIN_APP_URL' ? adminAppUrl : undefined),
       } as never,
       drivers as never,
+      { sendRegistrationConfirmation: jest.fn().mockResolvedValue({ skipped: true }) } as never,
     );
   }
 

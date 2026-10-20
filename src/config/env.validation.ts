@@ -14,8 +14,13 @@ export const envSchema = z.object({
   PORT: z.coerce.number().int().positive().default(3000),
   API_PREFIX: z.string().default('v1'),
   CORS_ORIGINS: z.string().default('http://localhost:5173,http://localhost:5174'),
-  /** Admin/verification UI base URL for driver invite links. */
+  /** Admin/verification UI base URL for driver invite links + email CTAs (login/onboarding). */
   ADMIN_APP_URL: z.string().url().default('http://localhost:5174'),
+  /**
+   * Public marketing site for “Explore CLOX” email CTAs / footer.
+   * Optional — when unset, emails fall back to ADMIN_APP_URL login.
+   */
+  PUBLIC_SITE_URL: z.string().url().optional(),
   /** Driver invite token TTL hours. */
   DRIVER_INVITE_TTL_HOURS: z.coerce.number().int().positive().default(168),
   DATABASE_URL: z.string().min(1),

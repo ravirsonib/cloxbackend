@@ -36,6 +36,7 @@ describe('SenderService crumb branch leftovers', () => {
       audit as never,
       stripe as never,
       { get: () => publishable } as never,
+      { sendRegistrationConfirmation: jest.fn().mockResolvedValue({ skipped: true }) } as never,
     );
   }
 

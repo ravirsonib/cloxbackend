@@ -42,6 +42,7 @@ describe('ComplianceService listCases leftover filters', () => {
       audit as never,
       scope as never,
       abr as never,
+      { sendComplianceApprovedEmail: jest.fn().mockResolvedValue({ skipped: true }), sendComplianceInfoRequestedEmail: jest.fn().mockResolvedValue({ skipped: true }) } as never,
     );
   }
 
@@ -94,6 +95,7 @@ describe('ComplianceService listCases leftover filters', () => {
       audit as never,
       scope as never,
       abr as never,
+      { sendComplianceApprovedEmail: jest.fn().mockResolvedValue({ skipped: true }), sendComplianceInfoRequestedEmail: jest.fn().mockResolvedValue({ skipped: true }) } as never,
     );
 
     await service.listCases(stateMaster, { page: 2, pageSize: 5 });

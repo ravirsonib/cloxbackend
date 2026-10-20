@@ -57,7 +57,17 @@ export class ProblemDetailsFilter implements ExceptionFilter {
       !Array.isArray(exceptionResponse)
     ) {
       const extra = exceptionResponse as Record<string, unknown>;
-      for (const key of ['code', 'jobId', 'proposalId', 'amountIncGstCents', 'nextMilestone', 'goNoGo', 'minBaseCents', 'recommended']) {
+      for (const key of [
+        'code',
+        'reason',
+        'jobId',
+        'proposalId',
+        'amountIncGstCents',
+        'nextMilestone',
+        'goNoGo',
+        'minBaseCents',
+        'recommended',
+      ]) {
         if (key in extra && extra[key] !== undefined) {
           body[key] = extra[key];
         }

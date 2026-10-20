@@ -64,6 +64,7 @@ describe('CarrierService invite + eligibility paths', () => {
       stripe as never,
       config as never,
       drivers as never,
+      { sendRegistrationConfirmation: jest.fn().mockResolvedValue({ skipped: true }) } as never,
     );
   }
 

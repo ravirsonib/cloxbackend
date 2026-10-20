@@ -27,7 +27,7 @@ describe('OpsService.provisionAdmin paths', () => {
     const service = new OpsService(
       prisma as never,
       { recordPlatform: jest.fn() } as never,
-      { sendMail: jest.fn() } as never,
+      { sendAdminProvisionedEmail: jest.fn() } as never,
       config as never,
     );
     await expect(
@@ -48,7 +48,7 @@ describe('OpsService.provisionAdmin paths', () => {
     const service = new OpsService(
       prisma as never,
       { recordPlatform: jest.fn() } as never,
-      { sendMail: jest.fn() } as never,
+      { sendAdminProvisionedEmail: jest.fn() } as never,
       config as never,
     );
     await expect(
@@ -89,7 +89,7 @@ describe('OpsService.provisionAdmin paths', () => {
       prisma as never,
       audit as never,
       {
-        sendMail: jest.fn().mockResolvedValue({ skipped: true }),
+        sendAdminProvisionedEmail: jest.fn().mockResolvedValue({ skipped: true }),
       } as never,
       config as never,
     );
@@ -133,7 +133,7 @@ describe('OpsService.provisionAdmin paths', () => {
     const service = new OpsService(
       prisma as never,
       { recordPlatform: jest.fn() } as never,
-      { sendMail: jest.fn() } as never,
+      { sendAdminProvisionedEmail: jest.fn() } as never,
       config as never,
     );
     await expect(
@@ -161,7 +161,7 @@ describe('OpsService.provisionAdmin paths', () => {
     const service = new OpsService(
       prisma as never,
       { recordPlatform: jest.fn() } as never,
-      { sendMail: jest.fn() } as never,
+      { sendAdminProvisionedEmail: jest.fn() } as never,
       config as never,
     );
     await expect(service.publishPolicyStub(superP)).resolves.toEqual({

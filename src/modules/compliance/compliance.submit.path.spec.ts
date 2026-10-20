@@ -49,6 +49,7 @@ describe('ComplianceService submit + approve/reject happy paths', () => {
       audit as never,
       scope as never,
       abr,
+      { sendComplianceApprovedEmail: jest.fn().mockResolvedValue({ skipped: true }), sendComplianceInfoRequestedEmail: jest.fn().mockResolvedValue({ skipped: true }) } as never,
     );
   }
 
@@ -182,10 +183,16 @@ describe('ComplianceService submit + approve/reject happy paths', () => {
         id: 'case-1',
         status: ComplianceCaseStatus.OPEN,
         companyId: 'co-1',
+        caseType:
+          type === CompanyType.CARRIER
+            ? ComplianceCaseType.CARRIER_KYB
+            : ComplianceCaseType.SENDER_KYB,
         company: {
           id: 'co-1',
           type,
           status: CompanyStatus.PENDING_REVIEW,
+          legalName: type === CompanyType.CARRIER ? 'Carrier Co' : 'Sender Co',
+          email: type === CompanyType.CARRIER ? 'carrier@yopmail.com' : 'sender@yopmail.com',
           homeRegion: { code: 'VIC' },
           homeRegionId: 'reg-vic',
         },
@@ -200,6 +207,7 @@ describe('ComplianceService submit + approve/reject happy paths', () => {
         complianceCase: {
           findUnique: jest.fn().mockResolvedValue(openCase(CompanyType.CARRIER)),
         },
+        user: { findMany: jest.fn().mockResolvedValue([{ email: 'carrier@yopmail.com' }]) },
         $transaction: jest.fn().mockImplementation(async (fn: (tx: unknown) => unknown) => {
           const tx = {
             complianceCase: { update: jest.fn() },
@@ -216,6 +224,8 @@ describe('ComplianceService submit + approve/reject happy paths', () => {
         status: ComplianceCaseStatus.APPROVED,
         companyStatus: CompanyStatus.BID_ELIGIBLE,
       });
+      await Promise.resolve();
+      expect(prisma.user.findMany).toHaveBeenCalled();
     });
 
     it('approve sender → PENDING_PAYMENT', async () => {
@@ -224,6 +234,7 @@ describe('ComplianceService submit + approve/reject happy paths', () => {
         complianceCase: {
           findUnique: jest.fn().mockResolvedValue(openCase(CompanyType.SENDER)),
         },
+        user: { findMany: jest.fn().mockResolvedValue([{ email: 'sender@yopmail.com' }]) },
         $transaction: jest.fn().mockImplementation(async (fn: (tx: unknown) => unknown) => {
           const tx = {
             complianceCase: { update: jest.fn() },

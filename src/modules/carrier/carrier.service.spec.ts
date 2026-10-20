@@ -43,6 +43,7 @@ describe('CarrierService bid gate', () => {
         sendInviteMail: jest.fn(),
         inviteUrl: jest.fn(),
       } as never,
+      { sendRegistrationConfirmation: jest.fn().mockResolvedValue({ skipped: true }) } as never,
     );
     const result = await service.getBidEligibility({
       id: 'u1',

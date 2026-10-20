@@ -28,3 +28,4 @@ dist-ssr
 coverage/
 src1/
 .env1.example
+prisma1/

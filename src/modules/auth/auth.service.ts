@@ -206,6 +206,7 @@ export class AuthService {
         to: account.email,
         code,
         ttlMinutes,
+        accountType: account.role,
       })
       .then((mailResult) => {
         if (mailResult.skipped) {
@@ -498,6 +499,7 @@ export class AuthService {
       to: principal.email,
       code,
       ttlMinutes,
+      accountType: principal.role,
     });
 
     if (this.config.get('EXPOSE_OTP_IN_RESPONSE', { infer: true })) {

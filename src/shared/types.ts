@@ -75,6 +75,7 @@ export const AuditAction = {
   LEAD_STATUS_CHANGED: 'lead.status_changed',
   LEAD_UPDATED: 'lead.updated',
   LEAD_NOTE_ADDED: 'lead.note_added',
+  LEAD_DELETED: 'lead.deleted',
   AUTH_OTP_REQUESTED: 'auth.otp_requested',
   AUTH_OTP_VERIFIED: 'auth.otp_verified',
   AUTH_OTP_FAILED: 'auth.otp_failed',
@@ -95,6 +96,8 @@ export const AuditAction = {
   COMPLIANCE_ESCALATED: 'compliance.escalated',
   COMPLIANCE_DOC_EXPIRED: 'compliance.doc_expired',
   COMPANY_SUSPENDED: 'company.suspended',
+  COMPANY_REACTIVATED: 'company.reactivated',
+  COMPANY_DELETED: 'company.deleted',
   SENDER_REGISTERED: 'sender.registered',
   SENDER_PROFILE_UPDATED: 'sender.profile_updated',
   SENDER_PAYMENT_SETUP: 'sender.payment_setup',
@@ -522,6 +525,43 @@ export const adminLeadExportQuerySchema = z.object({
 });
 
 export type AdminLeadExportQuery = z.infer<typeof adminLeadExportQuerySchema>;
+
+export const companyTypeSchema = z.enum(['SENDER', 'CARRIER']);
+export type CompanyTypeFilter = z.infer<typeof companyTypeSchema>;
+
+export const companyStatusSchema = z.enum([
+  'DRAFT',
+  'PENDING_VERIFICATION',
+  'PENDING_REVIEW',
+  'INFO_REQUESTED',
+  'PENDING_PAYMENT',
+  'PENDING_COMPLIANCE_DOCS',
+  'PENDING_SETTLEMENT_SETUP',
+  'PENDING_FLEET_READINESS',
+  'ACTIVE',
+  'BID_ELIGIBLE',
+  'SUSPENDED',
+  'REJECTED',
+]);
+export type CompanyStatusFilter = z.infer<typeof companyStatusSchema>;
+
+export const adminCompanyListQuerySchema = z.object({
+  page: z.coerce.number().int().positive().default(1),
+  pageSize: z.coerce.number().int().min(1).max(100).default(20),
+  type: companyTypeSchema.optional(),
+  status: companyStatusSchema.optional(),
+  regionCode: z.string().trim().max(16).optional(),
+  q: z.string().trim().max(200).optional(),
+});
+
+export type AdminCompanyListQuery = z.infer<typeof adminCompanyListQuerySchema>;
+
+/** Super Admin soft-disable (suspend) company + cascade users/drivers/vehicles. */
+export const disableCompanySchema = z.object({
+  reason: z.string().trim().min(3).max(500),
+  note: z.string().trim().max(2000).optional(),
+});
+export type DisableCompanyInput = z.infer<typeof disableCompanySchema>;
 
 export const ComplianceDocType = {
   ABN_EXTRACT: 'ABN_EXTRACT',

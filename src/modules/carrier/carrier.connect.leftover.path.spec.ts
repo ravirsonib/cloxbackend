@@ -39,6 +39,7 @@ describe('CarrierService connect leftover paths', () => {
         get: (k: string) => (k === 'ADMIN_APP_URL' ? 'http://localhost:5174' : undefined),
       } as never,
       drivers as never,
+      { sendRegistrationConfirmation: jest.fn().mockResolvedValue({ skipped: true }) } as never,
     );
   }
 

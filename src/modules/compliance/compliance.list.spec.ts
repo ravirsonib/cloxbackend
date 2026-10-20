@@ -18,6 +18,7 @@ describe('ComplianceService.listCases territory filter', () => {
       { recordPlatform: jest.fn() } as never,
       scope as never,
       { lookupAbn: jest.fn() } as never,
+      { sendComplianceApprovedEmail: jest.fn().mockResolvedValue({ skipped: true }), sendComplianceInfoRequestedEmail: jest.fn().mockResolvedValue({ skipped: true }) } as never,
     );
 
     const result = await service.listCases(
@@ -61,6 +62,7 @@ describe('ComplianceService.listCases territory filter', () => {
       { recordPlatform: jest.fn() } as never,
       scope as never,
       { lookupAbn: jest.fn() } as never,
+      { sendComplianceApprovedEmail: jest.fn().mockResolvedValue({ skipped: true }), sendComplianceInfoRequestedEmail: jest.fn().mockResolvedValue({ skipped: true }) } as never,
     );
 
     // Patch count/findMany used inside $transaction array - service passes prisma promises

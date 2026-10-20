@@ -30,7 +30,11 @@ describe('AdminService', () => {
     record: jest.fn(),
   } as unknown as AuditService;
 
-  const service = new AdminService(prisma, audit);
+  const notifications = {
+    sendAccountSuspendedEmail: jest.fn(),
+  };
+
+  const service = new AdminService(prisma, audit, notifications as never);
 
   beforeEach(() => {
     jest.clearAllMocks();

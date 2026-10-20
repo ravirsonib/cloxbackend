@@ -5,6 +5,7 @@ import { RolesGuard } from '../../common/guards/roles.guard';
 import { AuditModule } from '../audit/audit.module';
 import { DriverModule } from '../driver/driver.module';
 import { MatchingModule } from '../matching/matching.module';
+import { NotificationsModule } from '../notifications/notifications.module';
 import { PaymentsModule } from '../payments/payments.module';
 import { CarrierController } from './carrier.controller';
 import { CarrierService } from './carrier.service';
@@ -14,6 +15,7 @@ import { CarrierService } from './carrier.service';
     JwtModule.register({}),
     AuditModule,
     PaymentsModule,
+    NotificationsModule,
     forwardRef(() => DriverModule),
     forwardRef(() => MatchingModule),
   ],

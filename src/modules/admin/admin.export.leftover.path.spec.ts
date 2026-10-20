@@ -3,10 +3,12 @@ import { AuditAction, LeadStatus, LeadType } from '../../shared/types';
 import { AdminService } from './admin.service';
 
 describe('AdminService export / updateLead leftovers', () => {
-  const audit = { record: jest.fn() };
+  const audit = { record: jest.fn(), recordPlatform: jest.fn() };
 
   function makeService(prisma: Record<string, unknown>) {
-    return new AdminService(prisma as never, audit as never);
+    return new AdminService(prisma as never, audit as never, {
+      sendAccountSuspendedEmail: jest.fn(),
+    } as never);
   }
 
   beforeEach(() => {
@@ -98,6 +100,139 @@ describe('AdminService export / updateLead leftovers', () => {
         }),
       }),
     );
+  });
+
+  it('listCompanies filters by type and maps openCase', async () => {
+    const prisma = {
+      isConnected: () => true,
+      company: {
+        findMany: jest.fn().mockResolvedValue([
+          {
+            id: 'co-1',
+            type: 'CARRIER',
+            status: 'BID_ELIGIBLE',
+            legalName: 'Haul Co',
+            tradingName: null,
+            abn: '51824753556',
+            email: 'haul@yopmail.com',
+            phone: null,
+            createdAt: new Date('2026-01-01T00:00:00.000Z'),
+            updatedAt: new Date('2026-01-01T00:00:00.000Z'),
+            homeRegion: { code: 'VIC', name: 'Victoria' },
+            complianceCases: [{ id: 'case-1', status: 'OPEN', caseType: 'CARRIER_KYB' }],
+            _count: { users: 1, vehicles: 2, drivers: 1 },
+          },
+        ]),
+        count: jest.fn().mockResolvedValue(1),
+      },
+    };
+    const result = await makeService(prisma).listCompanies({
+      page: 1,
+      pageSize: 20,
+      type: 'CARRIER',
+    });
+    expect(prisma.company.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ type: 'CARRIER' }),
+      }),
+    );
+    expect(result).toMatchObject({
+      total: 1,
+      items: [
+        expect.objectContaining({
+          id: 'co-1',
+          openCase: { id: 'case-1', status: 'OPEN', caseType: 'CARRIER_KYB' },
+          counts: { users: 1, vehicles: 2, drivers: 1 },
+        }),
+      ],
+    });
+  });
+
+  it('disableCompany cascades and notifies', async () => {
+    const company = {
+      id: 'co-1',
+      type: 'CARRIER',
+      status: 'BID_ELIGIBLE',
+      legalName: 'Haul Co',
+      tradingName: null,
+      email: 'haul@yopmail.com',
+      users: [{ id: 'u1', email: 'haul@yopmail.com', status: 'ACTIVE' }],
+    };
+    const tx = {
+      company: {
+        update: jest.fn().mockResolvedValue({
+          ...company,
+          status: 'SUSPENDED',
+          statusBeforeSuspend: 'BID_ELIGIBLE',
+          suspendedAt: new Date(),
+          suspendedReason: 'Policy breach',
+          suspendedNote: null,
+        }),
+      },
+      user: { updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
+      driver: { updateMany: jest.fn().mockResolvedValue({ count: 2 }) },
+      vehicle: { updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
+      authSession: { updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
+    };
+    const notifications = { sendAccountSuspendedEmail: jest.fn() };
+    const prisma = {
+      isConnected: () => true,
+      company: { findUnique: jest.fn().mockResolvedValue(company) },
+      $transaction: jest.fn(async (fn: (t: typeof tx) => Promise<unknown>) => fn(tx)),
+    };
+    const service = new AdminService(prisma as never, audit as never, notifications as never);
+    const result = await service.disableCompany('co-1', { reason: 'Policy breach' }, 'admin-1');
+    expect(result.status).toBe('SUSPENDED');
+    expect(result.cascade.usersSuspended).toBe(1);
+    expect(notifications.sendAccountSuspendedEmail).toHaveBeenCalled();
+    expect(audit.recordPlatform).toHaveBeenCalledWith(
+      expect.objectContaining({ action: AuditAction.COMPANY_SUSPENDED }),
+    );
+  });
+
+  it('deleteCompany rejects non-draft', async () => {
+    const prisma = {
+      isConnected: () => true,
+      company: {
+        findUnique: jest.fn().mockResolvedValue({
+          id: 'co-1',
+          status: 'ACTIVE',
+          users: [],
+          _count: { jobsAsSender: 0, proposals: 0, assignments: 0 },
+        }),
+      },
+    };
+    await expect(makeService(prisma).deleteCompany('co-1', 'admin-1')).rejects.toThrow(
+      /draft companies/i,
+    );
+  });
+
+  it('deleteLead records LEAD_DELETED then removes row', async () => {
+    const prisma = {
+      isConnected: () => true,
+      lead: {
+        findUnique: jest.fn().mockResolvedValue({
+          id: 'lead-1',
+          type: 'REGISTRY_SENDER',
+          status: LeadStatus.NEW,
+          email: 'lead@yopmail.com',
+          companyName: 'Acme',
+        }),
+        delete: jest.fn().mockResolvedValue({ id: 'lead-1' }),
+      },
+    };
+    await expect(makeService(prisma).deleteLead('lead-1', 'admin-1')).resolves.toEqual({
+      ok: true,
+      id: 'lead-1',
+    });
+    expect(audit.record).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: AuditAction.LEAD_DELETED,
+        leadId: 'lead-1',
+        actorId: 'admin-1',
+      }),
+    );
+    expect(prisma.lead.delete).toHaveBeenCalledWith({ where: { id: 'lead-1' } });
   });
 
   it('updateLead rejects inactive assignee', async () => {

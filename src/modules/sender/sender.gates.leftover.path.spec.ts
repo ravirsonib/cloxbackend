@@ -75,6 +75,7 @@ describe('SenderService gate leftovers', () => {
       audit as never,
       stripe as never,
       config as never,
+      { sendRegistrationConfirmation: jest.fn().mockResolvedValue({ skipped: true }) } as never,
     );
   }
 
@@ -144,6 +145,7 @@ describe('SenderService gate leftovers', () => {
         user: {
           findUnique: jest.fn().mockResolvedValue(baseUser(senderCompany())),
         },
+        complianceCase: { findFirst: jest.fn().mockResolvedValue(null) },
         complianceDocument: { findMany: jest.fn().mockResolvedValue([]) },
       }).submitVerification(senderPrincipal, {
         documentIds: ['11111111-1111-4111-8111-111111111111'],
@@ -158,6 +160,7 @@ describe('SenderService gate leftovers', () => {
             baseUser(senderCompany({ abn: null })),
           ),
         },
+        complianceCase: { findFirst: jest.fn().mockResolvedValue(null) },
         complianceDocument: {
           findMany: jest.fn().mockResolvedValue([
             {

@@ -1,4 +1,5 @@
 import {
+  ForbiddenException,
   ServiceUnavailableException,
   UnauthorizedException,
 } from '@nestjs/common';
@@ -104,6 +105,7 @@ describe('JwtAuthGuard', () => {
             email: 'clox.mail@yopmail.com',
             role: AppRole.DRIVER,
             status: 'PENDING',
+            company: null,
           }),
         },
       } as never,
@@ -111,5 +113,46 @@ describe('JwtAuthGuard', () => {
     await expect(
       guard.canActivate(mockCtx('Bearer tok') as never),
     ).rejects.toBeInstanceOf(UnauthorizedException);
+  });
+
+  it('returns 403 with reason when user is suspended', async () => {
+    const guard = new JwtAuthGuard(
+      {
+        verifyAsync: jest.fn().mockResolvedValue({
+          sub: 'u1',
+          email: 'carrier@yopmail.com',
+          role: AppRole.TRANSPORT_COMPANY,
+          typ: 'access',
+          kind: 'user',
+        }),
+      } as never,
+      { get: () => 'secret' } as never,
+      {
+        isConnected: () => true,
+        user: {
+          findUnique: jest.fn().mockResolvedValue({
+            id: 'u1',
+            email: 'carrier@yopmail.com',
+            role: AppRole.TRANSPORT_COMPANY,
+            status: 'SUSPENDED',
+            company: {
+              id: 'co-1',
+              status: 'SUSPENDED',
+              suspendedReason: 'Compliance failure',
+              suspendedNote: 'Insurance expired',
+            },
+          }),
+        },
+      } as never,
+    );
+    await expect(guard.canActivate(mockCtx('Bearer tok') as never)).rejects.toMatchObject({
+      response: expect.objectContaining({
+        code: 'ACCOUNT_SUSPENDED',
+        reason: 'Compliance failure',
+      }),
+    });
+    await expect(guard.canActivate(mockCtx('Bearer tok') as never)).rejects.toBeInstanceOf(
+      ForbiddenException,
+    );
   });
 });

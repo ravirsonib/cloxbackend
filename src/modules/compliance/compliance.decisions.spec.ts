@@ -51,6 +51,7 @@ describe('ComplianceService decision gates', () => {
       audit as never,
       scope as never,
       abr,
+      { sendComplianceApprovedEmail: jest.fn().mockResolvedValue({ skipped: true }), sendComplianceInfoRequestedEmail: jest.fn().mockResolvedValue({ skipped: true }) } as never,
     );
 
     await expect(service.reject(superAdmin(), 'case-1', { note: 'oops' })).rejects.toThrow(
@@ -90,6 +91,7 @@ describe('ComplianceService decision gates', () => {
         assertTerritoryAccess: jest.fn(),
       } as never,
       { lookupAbn: jest.fn() } as never,
+      { sendComplianceApprovedEmail: jest.fn().mockResolvedValue({ skipped: true }), sendComplianceInfoRequestedEmail: jest.fn().mockResolvedValue({ skipped: true }) } as never,
     );
 
     await expect(service.requestInfo(superAdmin(), 'case-1', {})).rejects.toBeInstanceOf(

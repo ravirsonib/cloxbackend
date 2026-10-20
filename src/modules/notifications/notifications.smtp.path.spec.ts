@@ -28,6 +28,7 @@ describe('NotificationsService SMTP leftovers', () => {
       SMTP_PORT: 587,
       SMTP_SECURE: false,
       MAIL_FROM: 'CLOX <noreply@clox.com.au>',
+      ADMIN_APP_URL: 'http://localhost:5174',
     });
     const service = new NotificationsService({ get } as never);
 
@@ -42,6 +43,7 @@ describe('NotificationsService SMTP leftovers', () => {
       to: 'dest.clox@yopmail.com',
       code: '424242',
       ttlMinutes: 5,
+      accountType: 'SENDER',
     });
 
     expect(first).toEqual({ skipped: false });
@@ -87,6 +89,7 @@ describe('NotificationsService SMTP leftovers', () => {
       SMTP_SECURE: false,
       MAIL_FROM: 'CLOX <noreply@clox.com.au>',
       INVEST_NOTIFY_EMAIL: 'founder.clox@yopmail.com',
+      ADMIN_APP_URL: 'http://localhost:5174',
     });
     const service = new NotificationsService({ get } as never);
     await service.notifyLeadSubmitted({
@@ -98,7 +101,7 @@ describe('NotificationsService SMTP leftovers', () => {
       expect.objectContaining({
         to: 'founder.clox@yopmail.com',
         cc: undefined,
-        subject: 'CLOX submission received (INVESTOR)',
+        subject: 'CLOX — we received your Investor enquiry submission',
       }),
     );
   });
@@ -112,20 +115,51 @@ describe('NotificationsService SMTP leftovers', () => {
       SMTP_SECURE: false,
       MAIL_FROM: 'CLOX <noreply@clox.com.au>',
       INVEST_NOTIFY_EMAIL: undefined,
+      ADMIN_APP_URL: 'http://localhost:5174',
     });
     const service = new NotificationsService({ get } as never);
     await service.notifyLeadSubmitted({
-      type: 'REGISTRY',
+      type: 'REGISTRY_SENDER',
       leadId: 'lead-2',
       email: 'reg.clox@yopmail.com',
     });
     expect(sendMail).toHaveBeenCalledWith(
       expect.objectContaining({
         to: 'reg.clox@yopmail.com',
-        subject: 'CLOX submission received (REGISTRY)',
+        subject: 'CLOX — we received your Registry — Sender submission',
       }),
     );
     const html = (sendMail.mock.calls[0][0] as { html: string }).html;
-    expect(html).not.toContain('Company:');
+    expect(html).not.toContain('Company / Name:');
+    // No PUBLIC_SITE_URL in this fixture → text wordmark (no hosted img / CID).
+    expect(html).not.toMatch(/<img\b/i);
+    expect(html).not.toMatch(/cid:/i);
+    expect(html).toContain('Account type');
+    expect(html).not.toMatch(/pre-launch/i);
+  });
+
+  it('notifyLeadSubmitted includes hosted logo when PUBLIC_SITE_URL is set', async () => {
+    const get = configGet({
+      SMTP_USER: 'smtp@yopmail.com',
+      SMTP_PASS: 'secret',
+      SMTP_HOST: 'smtp.example.com',
+      SMTP_PORT: 587,
+      SMTP_SECURE: false,
+      MAIL_FROM: 'CLOX <noreply@clox.com.au>',
+      INVEST_NOTIFY_EMAIL: undefined,
+      ADMIN_APP_URL: 'http://localhost:5174',
+      PUBLIC_SITE_URL: 'https://clox.com.au',
+    });
+    const service = new NotificationsService({ get } as never);
+    await service.notifyLeadSubmitted({
+      type: 'REGISTRY_SENDER',
+      leadId: 'lead-logo',
+      email: 'reg.clox@yopmail.com',
+    });
+    const html = (sendMail.mock.calls[0][0] as { html: string }).html;
+    expect(html).toContain('https://clox.com.au/brand/logo-clox-light.webp');
+    expect(html).not.toMatch(/cid:/i);
+    expect(html).not.toMatch(/data:image/i);
   });
 });
+

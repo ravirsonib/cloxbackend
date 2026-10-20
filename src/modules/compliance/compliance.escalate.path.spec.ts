@@ -1,6 +1,7 @@
 import { ForbiddenException } from '@nestjs/common';
 import {
   ComplianceCaseStatus,
+  ComplianceCaseType,
   CompanyStatus,
   CompanyType,
 } from '@prisma/client';
@@ -44,15 +45,24 @@ describe('ComplianceService requestInfo + escalate paths', () => {
       id: 'case-1',
       status: ComplianceCaseStatus.OPEN,
       companyId: 'co-1',
+      caseType: ComplianceCaseType.CARRIER_KYB,
+      infoRequestedAt: null as Date | null,
       company: {
         id: 'co-1',
         type: CompanyType.CARRIER,
         status: CompanyStatus.PENDING_REVIEW,
+        legalName: 'Carrier Co',
+        email: 'carrier@yopmail.com',
         homeRegion: { code: 'VIC' },
         homeRegionId: 'reg-vic',
       },
       region: { code: 'VIC' },
-      documents: [],
+      documents: [] as Array<{
+        id: string;
+        createdAt: Date;
+        docType: string;
+        status: string;
+      }>,
     };
   }
 
@@ -62,6 +72,7 @@ describe('ComplianceService requestInfo + escalate paths', () => {
       audit as never,
       scope as never,
       abr,
+      { sendComplianceApprovedEmail: jest.fn().mockResolvedValue({ skipped: true }), sendComplianceInfoRequestedEmail: jest.fn().mockResolvedValue({ skipped: true }) } as never,
     );
   }
 
@@ -70,14 +81,16 @@ describe('ComplianceService requestInfo + escalate paths', () => {
   });
 
   it('requestInfo sets INFO_REQUESTED on case + company', async () => {
+    const caseUpdate = jest.fn();
     const prisma = {
       isConnected: () => true,
       complianceCase: {
         findUnique: jest.fn().mockResolvedValue(openCase()),
       },
+      user: { findMany: jest.fn().mockResolvedValue([{ email: 'carrier@yopmail.com' }]) },
       $transaction: jest.fn().mockImplementation(async (fn: (tx: unknown) => unknown) => {
         const tx = {
-          complianceCase: { update: jest.fn() },
+          complianceCase: { update: caseUpdate },
           company: { update: jest.fn() },
         };
         return fn(tx);
@@ -90,6 +103,14 @@ describe('ComplianceService requestInfo + escalate paths', () => {
       id: 'case-1',
       status: ComplianceCaseStatus.INFO_REQUESTED,
       companyStatus: CompanyStatus.INFO_REQUESTED,
+    });
+    expect(caseUpdate).toHaveBeenCalledWith({
+      where: { id: 'case-1' },
+      data: expect.objectContaining({
+        status: ComplianceCaseStatus.INFO_REQUESTED,
+        decisionNote: 'Need RWC photo',
+        infoRequestedAt: expect.any(Date),
+      }),
     });
     expect(audit.recordPlatform).toHaveBeenCalled();
   });
@@ -178,5 +199,37 @@ describe('ComplianceService requestInfo + escalate paths', () => {
     const result = await service.getCase(superAdmin, 'case-1');
     expect(result.abrAssist).toMatchObject({ abn: '51824753556', configured: false });
     expect(abr.lookupAbn).toHaveBeenCalledWith('51824753556');
+  });
+
+  it('getCase flags documents uploaded after infoRequestedAt', async () => {
+    const infoRequestedAt = new Date('2026-10-01T10:00:00.000Z');
+    const row = {
+      ...openCase(),
+      infoRequestedAt,
+      documents: [
+        {
+          id: 'doc-old',
+          docType: 'RWC',
+          status: 'UNDER_REVIEW',
+          createdAt: new Date('2026-09-20T10:00:00.000Z'),
+        },
+        {
+          id: 'doc-new',
+          docType: 'RWC',
+          status: 'UNDER_REVIEW',
+          createdAt: new Date('2026-10-02T10:00:00.000Z'),
+        },
+      ],
+    };
+    const prisma = {
+      isConnected: () => true,
+      complianceCase: {
+        findUnique: jest.fn().mockResolvedValue(row),
+      },
+    };
+    const result = await makeService(prisma).getCase(superAdmin, 'case-1');
+    expect(result.documents.map((d) => d.id)).toEqual(['doc-new', 'doc-old']);
+    expect(result.documents[0].isNewSinceInfoRequest).toBe(true);
+    expect(result.documents[1].isNewSinceInfoRequest).toBe(false);
   });
 });

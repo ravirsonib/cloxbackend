@@ -101,18 +101,10 @@ export class OpsService {
       },
     });
 
-    const loginUrl = `${this.config.get('ADMIN_APP_URL', { infer: true }).replace(/\/$/, '')}/login`;
-    void this.notifications.sendMail({
+    void this.notifications.sendAdminProvisionedEmail({
       to: admin.email,
-      subject: 'CLOX admin access provisioned',
-      text: [
-        `You have been provisioned as ${admin.role} on CLOX.`,
-        `Sign in with OTP using this email: ${loginUrl}`,
-      ].join('\n'),
-      html: [
-        `<p>You have been provisioned as <strong>${admin.role}</strong> on CLOX.</p>`,
-        `<p><a href="${loginUrl}">Sign in with OTP</a> using this email.</p>`,
-      ].join(''),
+      role: admin.role,
+      name: admin.name,
     });
 
     return {

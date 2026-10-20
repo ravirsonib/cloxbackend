@@ -32,6 +32,7 @@ describe('ComplianceService assertCanDecide role leftover', () => {
       { recordPlatform: jest.fn() } as never,
       scope as never,
       { lookupAbn: jest.fn() } as never,
+      { sendComplianceApprovedEmail: jest.fn().mockResolvedValue({ skipped: true }), sendComplianceInfoRequestedEmail: jest.fn().mockResolvedValue({ skipped: true }) } as never,
     );
 
     await expect(

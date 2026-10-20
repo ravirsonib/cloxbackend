@@ -2,6 +2,7 @@ import {
   BadRequestException,
   ForbiddenException,
   Injectable,
+  Logger,
   NotFoundException,
   ServiceUnavailableException,
 } from '@nestjs/common';
@@ -12,6 +13,8 @@ import {
   ComplianceCaseType,
   ComplianceDocStatus,
   ComplianceDocType,
+  PlatformRole,
+  UserStatus,
   VehicleStatus,
   type Prisma,
 } from '@prisma/client';
@@ -26,6 +29,7 @@ import {
 } from '../../shared/types';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
+import { NotificationsService } from '../notifications/notifications.service';
 import { AbrService } from './abr.service';
 
 const CARRIER_REQUIRED: ComplianceDocType[] = [
@@ -36,11 +40,14 @@ const CARRIER_REQUIRED: ComplianceDocType[] = [
 
 @Injectable()
 export class ComplianceService {
+  private readonly logger = new Logger(ComplianceService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
     private readonly scope: ScopeService,
     private readonly abr: AbrService,
+    private readonly notifications: NotificationsService,
   ) {}
 
   private ensureDatabase() {
@@ -375,7 +382,16 @@ export class ComplianceService {
     if (complianceCase.company.abn) {
       abrAssist = await this.abr.lookupAbn(complianceCase.company.abn);
     }
-    return { ...complianceCase, abrAssist };
+    const infoRequestedAt = complianceCase.infoRequestedAt;
+    const infoRequestedMs = infoRequestedAt?.getTime() ?? null;
+    const documents = [...complianceCase.documents]
+      .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
+      .map((doc) => ({
+        ...doc,
+        isNewSinceInfoRequest:
+          infoRequestedMs != null && doc.createdAt.getTime() > infoRequestedMs,
+      }));
+    return { ...complianceCase, documents, abrAssist };
   }
 
   private assertCaseActionable(status: ComplianceCaseStatus) {
@@ -431,11 +447,96 @@ export class ComplianceService {
       metadata: { nextCompanyStatus, note: input.note ?? null },
     });
 
+    void this.notifyCompanyDecision({
+      kind: 'approved',
+      companyId: complianceCase.companyId,
+      companyEmail: complianceCase.company.email,
+      companyName: complianceCase.company.legalName,
+      companyType: complianceCase.company.type,
+      companyStatus: nextCompanyStatus,
+      caseType: complianceCase.caseType,
+      decisionNote: input.note,
+    }).catch((error: unknown) => {
+      this.logger.error(
+        `Failed to send compliance approval email for case ${caseId}`,
+        error instanceof Error ? error.stack : String(error),
+      );
+    });
+
     return {
       id: caseId,
       status: ComplianceCaseStatus.APPROVED,
       companyStatus: nextCompanyStatus,
     };
+  }
+
+  /** Notify sender/carrier contacts after Ops decision (non-blocking). */
+  private async notifyCompanyDecision(params: {
+    kind: 'approved' | 'info_requested';
+    companyId: string;
+    companyEmail: string | null;
+    companyName: string;
+    companyType: CompanyType;
+    companyStatus: CompanyStatus;
+    caseType: ComplianceCaseType;
+    decisionNote?: string | null;
+  }) {
+    if (
+      params.companyType !== CompanyType.CARRIER &&
+      params.companyType !== CompanyType.SENDER
+    ) {
+      return;
+    }
+
+    const users = await this.prisma.user.findMany({
+      where: {
+        companyId: params.companyId,
+        status: UserStatus.ACTIVE,
+        role: {
+          in: [PlatformRole.SENDER, PlatformRole.TRANSPORT_COMPANY],
+        },
+      },
+      select: { email: true },
+    });
+
+    const recipients = new Set<string>();
+    if (params.companyEmail?.trim()) {
+      recipients.add(params.companyEmail.trim().toLowerCase());
+    }
+    for (const user of users) {
+      if (user.email?.trim()) {
+        recipients.add(user.email.trim().toLowerCase());
+      }
+    }
+
+    if (recipients.size < 1) {
+      this.logger.warn(
+        `No contact email for company ${params.companyId} — skipped ${params.kind} notification`,
+      );
+      return;
+    }
+
+    const companyType = params.companyType === CompanyType.CARRIER ? 'CARRIER' : 'SENDER';
+    await Promise.all(
+      [...recipients].map((to) =>
+        params.kind === 'approved'
+          ? this.notifications.sendComplianceApprovedEmail({
+              to,
+              companyName: params.companyName,
+              companyType,
+              companyStatus: params.companyStatus,
+              caseType: params.caseType,
+              decisionNote: params.decisionNote,
+            })
+          : this.notifications.sendComplianceInfoRequestedEmail({
+              to,
+              companyName: params.companyName,
+              companyType,
+              caseType: params.caseType,
+              decisionNote: params.decisionNote,
+            }),
+      ),
+    );
   }
 
   async reject(
@@ -493,12 +594,14 @@ export class ComplianceService {
     const complianceCase = await this.loadCaseForAdmin(principal, caseId);
     this.assertCaseActionable(complianceCase.status);
 
+    const infoRequestedAt = new Date();
     await this.prisma.$transaction(async (tx) => {
       await tx.complianceCase.update({
         where: { id: caseId },
         data: {
           status: ComplianceCaseStatus.INFO_REQUESTED,
           decisionNote: input.note,
+          infoRequestedAt,
         },
       });
       await tx.company.update({
@@ -513,6 +616,22 @@ export class ComplianceService {
       entityType: 'ComplianceCase',
       entityId: caseId,
       metadata: { note: input.note ?? null },
+    });
+
+    void this.notifyCompanyDecision({
+      kind: 'info_requested',
+      companyId: complianceCase.companyId,
+      companyEmail: complianceCase.company.email,
+      companyName: complianceCase.company.legalName,
+      companyType: complianceCase.company.type,
+      companyStatus: CompanyStatus.INFO_REQUESTED,
+      caseType: complianceCase.caseType,
+      decisionNote: input.note,
+    }).catch((error: unknown) => {
+      this.logger.error(
+        `Failed to send compliance info-requested email for case ${caseId}`,
+        error instanceof Error ? error.stack : String(error),
+      );
     });
 
     return {

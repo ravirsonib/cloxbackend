@@ -34,6 +34,7 @@ function makeService(company: Record<string, unknown>) {
     { recordPlatform: jest.fn() } as never,
     { isMockMode: () => true } as never,
     { get: () => undefined } as never,
+    { sendRegistrationConfirmation: jest.fn().mockResolvedValue({ skipped: true }) } as never,
   );
 }
 

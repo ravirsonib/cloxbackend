@@ -46,6 +46,7 @@ describe('ComplianceService crumb branch leftovers', () => {
       audit as never,
       scope as never,
       abr,
+      { sendComplianceApprovedEmail: jest.fn().mockResolvedValue({ skipped: true }), sendComplianceInfoRequestedEmail: jest.fn().mockResolvedValue({ skipped: true }) } as never,
     );
   }
 
@@ -142,10 +143,13 @@ describe('ComplianceService crumb branch leftovers', () => {
       id: 'case-1',
       status: ComplianceCaseStatus.OPEN,
       companyId: 'co-c',
+      caseType: ComplianceCaseType.CARRIER_KYB,
       company: {
         id: 'co-c',
         type: CompanyType.CARRIER,
         status: CompanyStatus.PENDING_REVIEW,
+        legalName: 'Carrier Co',
+        email: 'carrier@yopmail.com',
         homeRegion: { code: 'VIC' },
         homeRegionId: 'reg-vic',
       },
@@ -158,6 +162,7 @@ describe('ComplianceService crumb branch leftovers', () => {
         findUnique: jest.fn().mockResolvedValue(open),
         update: jest.fn().mockResolvedValue({}),
       },
+      user: { findMany: jest.fn().mockResolvedValue([{ email: 'carrier@yopmail.com' }]) },
       job: {
         findFirst: jest.fn().mockResolvedValue({
           id: 'job-1',

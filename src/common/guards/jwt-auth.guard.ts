@@ -1,6 +1,7 @@
 import {
   CanActivate,
   ExecutionContext,
+  ForbiddenException,
   Injectable,
   ServiceUnavailableException,
   UnauthorizedException,
@@ -114,11 +115,47 @@ export class JwtAuthGuard implements CanActivate {
 
       const user = await this.prisma.user.findUnique({
         where: { id: payload.sub },
-        select: { id: true, email: true, role: true, status: true },
+        select: {
+          id: true,
+          email: true,
+          role: true,
+          status: true,
+          company: {
+            select: {
+              id: true,
+              status: true,
+              suspendedReason: true,
+              suspendedNote: true,
+            },
+          },
+        },
       });
-      if (!user || user.status === 'DISABLED' || user.status === 'SUSPENDED') {
+      if (!user) {
         throw new UnauthorizedException('Account disabled');
       }
+
+      const companySuspended = user.company?.status === 'SUSPENDED';
+      const userSuspended =
+        user.status === 'DISABLED' || user.status === 'SUSPENDED' || companySuspended;
+
+      if (userSuspended) {
+        const reason =
+          user.company?.suspendedReason?.trim() ||
+          (user.status === 'DISABLED'
+            ? 'Your account has been disabled.'
+            : 'Your account has been suspended.');
+        const detail = user.company?.suspendedNote?.trim()
+          ? `${reason} ${user.company.suspendedNote.trim()}`
+          : reason;
+        throw new ForbiddenException({
+          statusCode: 403,
+          error: 'Forbidden',
+          message: detail,
+          code: user.status === 'DISABLED' ? 'ACCOUNT_DISABLED' : 'ACCOUNT_SUSPENDED',
+          reason,
+        });
+      }
+
       if (user.status !== 'ACTIVE') {
         throw new UnauthorizedException('Account not active');
       }
@@ -135,6 +172,7 @@ export class JwtAuthGuard implements CanActivate {
       return true;
     } catch (err) {
       if (err instanceof UnauthorizedException) throw err;
+      if (err instanceof ForbiddenException) throw err;
       if (err instanceof ServiceUnavailableException) throw err;
       throw new UnauthorizedException('Invalid access token');
     }

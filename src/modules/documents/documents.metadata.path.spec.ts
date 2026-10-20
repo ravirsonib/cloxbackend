@@ -151,4 +151,90 @@ describe('DocumentsService confirm success + getMetadata', () => {
       NotFoundException,
     );
   });
+
+  it('getContent streams uploaded file for company member', async () => {
+    const { mkdtempSync, mkdirSync, writeFileSync, rmSync } = await import('fs');
+    const { join } = await import('path');
+    const { tmpdir } = await import('os');
+    const root = mkdtempSync(join(tmpdir(), 'clox-doc-'));
+    const storageKey = 'co-1/doc-1.pdf';
+    mkdirSync(join(root, 'co-1'), { recursive: true });
+    writeFileSync(join(root, storageKey), Buffer.from('%PDF-1.4 test'));
+
+    const prisma = {
+      isConnected: () => true,
+      complianceDocument: {
+        findUnique: jest.fn().mockResolvedValue({
+          id: 'doc-1',
+          companyId: 'co-1',
+          storageKey,
+          docType: 'RWC',
+          status: ComplianceDocStatus.UPLOADED,
+          mimeType: 'application/pdf',
+          sizeBytes: 14,
+          originalFilename: 'rwc.pdf',
+          driverId: null,
+        }),
+      },
+      company: {
+        findUnique: jest.fn().mockResolvedValue({
+          id: 'co-1',
+          homeRegion: { code: 'VIC' },
+        }),
+      },
+      user: {
+        findUnique: jest.fn().mockResolvedValue({ id: 'u1', companyId: 'co-1' }),
+      },
+    };
+    const service = new DocumentsService(
+      prisma as never,
+      { get: (key: string) => (key === 'STORAGE_LOCAL_DIR' ? root : 'v1') } as never,
+      audit as never,
+      scope as never,
+    );
+    try {
+      const file = await service.getContent(carrier, 'doc-1');
+      expect(file.mimeType).toBe('application/pdf');
+      expect(file.filename).toBe('rwc.pdf');
+      await new Promise<void>((resolve, reject) => {
+        file.stream.once('error', reject);
+        file.stream.once('open', () => {
+          file.stream.once('close', () => resolve());
+          file.stream.destroy();
+        });
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('getContent rejects UPLOAD_PENDING', async () => {
+    const prisma = {
+      isConnected: () => true,
+      complianceDocument: {
+        findUnique: jest.fn().mockResolvedValue({
+          id: 'doc-1',
+          companyId: 'co-1',
+          storageKey: 'co-1/doc-1.pdf',
+          status: ComplianceDocStatus.UPLOAD_PENDING,
+          mimeType: 'application/pdf',
+          driverId: null,
+          docType: 'RWC',
+        }),
+      },
+      company: {
+        findUnique: jest.fn().mockResolvedValue({
+          id: 'co-1',
+          homeRegion: { code: 'VIC' },
+        }),
+      },
+      user: {
+        findUnique: jest.fn().mockResolvedValue({ id: 'u1', companyId: 'co-1' }),
+      },
+    };
+    const service = makeService(prisma);
+    await expect(service.getContent(carrier, 'doc-1')).rejects.toBeInstanceOf(
+      BadRequestException,
+    );
+  });
 });

@@ -3,6 +3,7 @@ import {
   ConflictException,
   ForbiddenException,
   Injectable,
+  Logger,
   NotFoundException,
   ServiceUnavailableException,
 } from '@nestjs/common';
@@ -29,6 +30,7 @@ import {
 } from '../../shared/types';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
+import { NotificationsService } from '../notifications/notifications.service';
 import { StripeService } from '../payments/stripe.service';
 
 type CompanyInvoiceShape = {
@@ -41,11 +43,14 @@ type CompanyInvoiceShape = {
 
 @Injectable()
 export class SenderService {
+  private readonly logger = new Logger(SenderService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
     private readonly stripe: StripeService,
     private readonly config: ConfigService<AppEnv, true>,
+    private readonly notifications: NotificationsService,
   ) {}
 
   private ensureDatabase() {
@@ -168,6 +173,19 @@ export class SenderService {
       entityId: company.id,
       metadata: { email: user.email },
     });
+
+    void this.notifications
+      .sendRegistrationConfirmation({
+        to: user.email,
+        name: user.name ?? company.legalName,
+        accountType: 'SENDER',
+      })
+      .catch((error: unknown) => {
+        this.logger.error(
+          `Failed to send sender registration email for ${user.email}`,
+          error instanceof Error ? error.stack : String(error),
+        );
+      });
 
     return {
       ok: true,
@@ -301,29 +319,6 @@ export class SenderService {
         ? ComplianceCaseType.SENDER_KYB
         : ComplianceCaseType.SENDER_KYC;
 
-    const docs = await this.prisma.complianceDocument.findMany({
-      where: {
-        id: { in: input.documentIds },
-        companyId: company.id,
-        status: ComplianceDocStatus.UPLOADED,
-      },
-    });
-    if (docs.length !== input.documentIds.length) {
-      throw new BadRequestException('All documents must be uploaded for this company');
-    }
-
-    if (caseType === ComplianceCaseType.SENDER_KYB) {
-      const hasAbnDoc = docs.some((d) => d.docType === ComplianceDocType.ABN_EXTRACT);
-      if (!hasAbnDoc && !company.abn) {
-        throw new BadRequestException('Business sender requires ABN extract or ABN on profile');
-      }
-    } else {
-      const hasId = docs.some((d) => d.docType === ComplianceDocType.GOVERNMENT_ID);
-      if (!hasId) {
-        throw new BadRequestException('Individual sender requires GOVERNMENT_ID');
-      }
-    }
-
     const open = await this.prisma.complianceCase.findFirst({
       where: {
         companyId: company.id,
@@ -339,6 +334,40 @@ export class SenderService {
 
     if (open && open.status !== ComplianceCaseStatus.INFO_REQUESTED) {
       throw new BadRequestException('An open compliance case already exists');
+    }
+
+    const isInfoResubmit =
+      company.status === CompanyStatus.INFO_REQUESTED ||
+      open?.status === ComplianceCaseStatus.INFO_REQUESTED;
+    const allowedDocStatuses = isInfoResubmit
+      ? [ComplianceDocStatus.UPLOADED, ComplianceDocStatus.UNDER_REVIEW]
+      : [ComplianceDocStatus.UPLOADED];
+
+    const docs = await this.prisma.complianceDocument.findMany({
+      where: {
+        id: { in: input.documentIds },
+        companyId: company.id,
+        status: { in: allowedDocStatuses },
+      },
+    });
+    if (docs.length !== input.documentIds.length) {
+      throw new BadRequestException(
+        isInfoResubmit
+          ? 'Documents must be uploaded (or previously submitted) for this company'
+          : 'All documents must be uploaded for this company',
+      );
+    }
+
+    if (caseType === ComplianceCaseType.SENDER_KYB) {
+      const hasAbnDoc = docs.some((d) => d.docType === ComplianceDocType.ABN_EXTRACT);
+      if (!hasAbnDoc && !company.abn) {
+        throw new BadRequestException('Business sender requires ABN extract or ABN on profile');
+      }
+    } else {
+      const hasId = docs.some((d) => d.docType === ComplianceDocType.GOVERNMENT_ID);
+      if (!hasId) {
+        throw new BadRequestException('Individual sender requires GOVERNMENT_ID');
+      }
     }
 
     const created = await this.prisma.$transaction(async (tx) => {

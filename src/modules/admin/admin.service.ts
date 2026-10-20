@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Injectable,
   NotFoundException,
   ServiceUnavailableException,
@@ -7,14 +8,24 @@ import {
   AuditAction,
   LeadType,
   type AdminAuditQuery,
+  type AdminCompanyListQuery,
   type AdminLeadExportQuery,
   type AdminLeadListQuery,
   type CreateLeadNoteInput,
+  type DisableCompanyInput,
   type UpdateLeadInput,
 } from '../../shared/types';
-import { Prisma } from '@prisma/client';
+import {
+  CompanyStatus,
+  ComplianceCaseStatus,
+  DriverStatus,
+  Prisma,
+  UserStatus,
+  VehicleStatus,
+} from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
+import { NotificationsService } from '../notifications/notifications.service';
 
 const leadListSelect = {
   id: true,
@@ -42,6 +53,7 @@ export class AdminService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
+    private readonly notifications: NotificationsService,
   ) {}
 
   private ensureDatabase() {
@@ -172,6 +184,364 @@ export class AdminService {
     };
   }
 
+  async listCompanies(query: AdminCompanyListQuery) {
+    this.ensureDatabase();
+
+    const where: Prisma.CompanyWhereInput = {};
+    if (query.type) where.type = query.type;
+    if (query.status) where.status = query.status;
+    if (query.regionCode) {
+      where.homeRegion = { code: query.regionCode.toUpperCase() };
+    }
+    if (query.q) {
+      const q = query.q;
+      const abnQ = q.replace(/\s+/g, '');
+      where.OR = [
+        { legalName: { contains: q, mode: 'insensitive' } },
+        { tradingName: { contains: q, mode: 'insensitive' } },
+        { email: { contains: q, mode: 'insensitive' } },
+        { phone: { contains: q, mode: 'insensitive' } },
+        ...(abnQ ? [{ abn: { contains: abnQ, mode: 'insensitive' as const } }] : []),
+      ];
+    }
+
+    const skip = (query.page - 1) * query.pageSize;
+    const openCaseStatuses: ComplianceCaseStatus[] = [
+      ComplianceCaseStatus.OPEN,
+      ComplianceCaseStatus.INFO_REQUESTED,
+      ComplianceCaseStatus.ESCALATED,
+    ];
+
+    const [rows, total] = await Promise.all([
+      this.prisma.company.findMany({
+        where,
+        orderBy: { createdAt: 'desc' },
+        skip,
+        take: query.pageSize,
+        select: {
+          id: true,
+          type: true,
+          status: true,
+          legalName: true,
+          tradingName: true,
+          abn: true,
+          email: true,
+          phone: true,
+          suspendedAt: true,
+          suspendedReason: true,
+          suspendedNote: true,
+          statusBeforeSuspend: true,
+          createdAt: true,
+          updatedAt: true,
+          homeRegion: { select: { code: true, name: true } },
+          complianceCases: {
+            where: { status: { in: openCaseStatuses } },
+            orderBy: { createdAt: 'desc' },
+            take: 1,
+            select: { id: true, status: true, caseType: true },
+          },
+          _count: {
+            select: {
+              users: true,
+              vehicles: true,
+              drivers: true,
+            },
+          },
+        },
+      }),
+      this.prisma.company.count({ where }),
+    ]);
+
+    const items = rows.map((row) => {
+      const { complianceCases, _count, ...company } = row;
+      return {
+        ...company,
+        openCase: complianceCases[0] ?? null,
+        counts: {
+          users: _count.users,
+          vehicles: _count.vehicles,
+          drivers: _count.drivers,
+        },
+      };
+    });
+
+    return {
+      items,
+      page: query.page,
+      pageSize: query.pageSize,
+      total,
+      totalPages: Math.max(1, Math.ceil(total / query.pageSize)),
+    };
+  }
+
+  /**
+   * Soft-disable company (SUSPENDED) with required reason.
+   * Cascades users → SUSPENDED, drivers → SUSPENDED, active vehicles → SUSPENDED,
+   * revokes sessions, and emails account holders.
+   */
+  async disableCompany(id: string, input: DisableCompanyInput, actorId: string) {
+    this.ensureDatabase();
+
+    const company = await this.prisma.company.findUnique({
+      where: { id },
+      include: {
+        users: { select: { id: true, email: true, status: true } },
+      },
+    });
+    if (!company) {
+      throw new NotFoundException('Company not found');
+    }
+    if (company.status === CompanyStatus.SUSPENDED) {
+      throw new BadRequestException('Company is already suspended');
+    }
+    if (company.status === CompanyStatus.DRAFT) {
+      throw new BadRequestException(
+        'Draft companies cannot be suspended — use permanent delete instead',
+      );
+    }
+
+    const reason = input.reason.trim();
+    const note = input.note?.trim() || null;
+    const now = new Date();
+
+    const result = await this.prisma.$transaction(async (tx) => {
+      const updated = await tx.company.update({
+        where: { id },
+        data: {
+          statusBeforeSuspend: company.status,
+          status: CompanyStatus.SUSPENDED,
+          suspendedAt: now,
+          suspendedReason: reason,
+          suspendedNote: note,
+        },
+      });
+
+      const userIds = company.users.map((u) => u.id);
+
+      const usersSuspended = await tx.user.updateMany({
+        where: {
+          companyId: id,
+          status: { in: [UserStatus.ACTIVE, UserStatus.PENDING] },
+        },
+        data: { status: UserStatus.SUSPENDED },
+      });
+
+      const driversSuspended = await tx.driver.updateMany({
+        where: {
+          OR: [{ companyId: id }, ...(userIds.length ? [{ userId: { in: userIds } }] : [])],
+          status: { in: [DriverStatus.ACTIVE, DriverStatus.PENDING_REVIEW] },
+        },
+        data: { status: DriverStatus.SUSPENDED },
+      });
+
+      const vehiclesSuspended = await tx.vehicle.updateMany({
+        where: { companyId: id, status: VehicleStatus.ACTIVE },
+        data: { status: VehicleStatus.SUSPENDED },
+      });
+
+      let sessionsRevoked = 0;
+      if (userIds.length) {
+        const revoked = await tx.authSession.updateMany({
+          where: { userId: { in: userIds }, revokedAt: null },
+          data: { revokedAt: now },
+        });
+        sessionsRevoked = revoked.count;
+      }
+
+      return {
+        company: updated,
+        usersSuspended: usersSuspended.count,
+        driversSuspended: driversSuspended.count,
+        vehiclesSuspended: vehiclesSuspended.count,
+        sessionsRevoked,
+      };
+    });
+
+    await this.audit.recordPlatform({
+      action: AuditAction.COMPANY_SUSPENDED,
+      actorAdminId: actorId,
+      entityType: 'Company',
+      entityId: id,
+      metadata: {
+        reason,
+        note,
+        previousStatus: company.status,
+        usersSuspended: result.usersSuspended,
+        driversSuspended: result.driversSuspended,
+        vehiclesSuspended: result.vehiclesSuspended,
+        sessionsRevoked: result.sessionsRevoked,
+      },
+    });
+
+    const notifyEmails = new Set<string>();
+    if (company.email?.trim()) notifyEmails.add(company.email.trim().toLowerCase());
+    for (const user of company.users) {
+      if (user.email?.trim()) notifyEmails.add(user.email.trim().toLowerCase());
+    }
+
+    await Promise.all(
+      [...notifyEmails].map((to) =>
+        this.notifications.sendAccountSuspendedEmail({
+          to,
+          companyName: company.tradingName || company.legalName,
+          companyType: company.type === 'CARRIER' ? 'CARRIER' : 'SENDER',
+          reason,
+          note,
+        }),
+      ),
+    );
+
+    return {
+      id: result.company.id,
+      status: result.company.status,
+      statusBeforeSuspend: result.company.statusBeforeSuspend,
+      suspendedAt: result.company.suspendedAt,
+      suspendedReason: result.company.suspendedReason,
+      suspendedNote: result.company.suspendedNote,
+      cascade: {
+        usersSuspended: result.usersSuspended,
+        driversSuspended: result.driversSuspended,
+        vehiclesSuspended: result.vehiclesSuspended,
+        sessionsRevoked: result.sessionsRevoked,
+      },
+    };
+  }
+
+  async reactivateCompany(id: string, actorId: string) {
+    this.ensureDatabase();
+
+    const company = await this.prisma.company.findUnique({
+      where: { id },
+      include: {
+        users: { select: { id: true } },
+      },
+    });
+    if (!company) {
+      throw new NotFoundException('Company not found');
+    }
+    if (company.status !== CompanyStatus.SUSPENDED) {
+      throw new BadRequestException('Company is not suspended');
+    }
+
+    const restoreStatus = company.statusBeforeSuspend ?? CompanyStatus.PENDING_REVIEW;
+    const userIds = company.users.map((u) => u.id);
+
+    const updated = await this.prisma.$transaction(async (tx) => {
+      const next = await tx.company.update({
+        where: { id },
+        data: {
+          status: restoreStatus,
+          statusBeforeSuspend: null,
+          suspendedAt: null,
+          suspendedReason: null,
+          suspendedNote: null,
+        },
+      });
+
+      await tx.user.updateMany({
+        where: { companyId: id, status: UserStatus.SUSPENDED },
+        data: { status: UserStatus.ACTIVE },
+      });
+
+      await tx.driver.updateMany({
+        where: {
+          OR: [{ companyId: id }, ...(userIds.length ? [{ userId: { in: userIds } }] : [])],
+          status: DriverStatus.SUSPENDED,
+        },
+        data: { status: DriverStatus.ACTIVE },
+      });
+
+      await tx.vehicle.updateMany({
+        where: { companyId: id, status: VehicleStatus.SUSPENDED },
+        data: { status: VehicleStatus.ACTIVE },
+      });
+
+      return next;
+    });
+
+    await this.audit.recordPlatform({
+      action: AuditAction.COMPANY_REACTIVATED,
+      actorAdminId: actorId,
+      entityType: 'Company',
+      entityId: id,
+      metadata: { restoredStatus: restoreStatus },
+    });
+
+    return {
+      id: updated.id,
+      status: updated.status,
+      statusBeforeSuspend: updated.statusBeforeSuspend,
+      suspendedAt: updated.suspendedAt,
+      suspendedReason: updated.suspendedReason,
+      suspendedNote: updated.suspendedNote,
+    };
+  }
+
+  /** Permanent delete — DRAFT companies only. */
+  async deleteCompany(id: string, actorId: string) {
+    this.ensureDatabase();
+
+    const company = await this.prisma.company.findUnique({
+      where: { id },
+      include: {
+        users: { select: { id: true, email: true } },
+        _count: {
+          select: {
+            jobsAsSender: true,
+            proposals: true,
+            assignments: true,
+          },
+        },
+      },
+    });
+    if (!company) {
+      throw new NotFoundException('Company not found');
+    }
+    if (company.status !== CompanyStatus.DRAFT) {
+      throw new BadRequestException(
+        'Only draft companies can be permanently deleted. Suspend non-draft companies instead.',
+      );
+    }
+    if (
+      company._count.jobsAsSender > 0 ||
+      company._count.proposals > 0 ||
+      company._count.assignments > 0
+    ) {
+      throw new BadRequestException(
+        'Company has marketplace records and cannot be permanently deleted',
+      );
+    }
+
+    const userIds = company.users.map((u) => u.id);
+
+    await this.prisma.$transaction(async (tx) => {
+      await tx.driver.deleteMany({
+        where: {
+          OR: [{ companyId: id }, ...(userIds.length ? [{ userId: { in: userIds } }] : [])],
+        },
+      });
+      if (userIds.length) {
+        await tx.user.deleteMany({ where: { id: { in: userIds } } });
+      }
+      await tx.company.delete({ where: { id } });
+    });
+
+    await this.audit.recordPlatform({
+      action: AuditAction.COMPANY_DELETED,
+      actorAdminId: actorId,
+      entityType: 'Company',
+      entityId: id,
+      metadata: {
+        type: company.type,
+        legalName: company.legalName,
+        email: company.email,
+        userEmails: company.users.map((u) => u.email),
+      },
+    });
+
+    return { ok: true as const, id };
+  }
+
   async getLead(id: string) {
     this.ensureDatabase();
 
@@ -252,6 +622,31 @@ export class AdminService {
     }
 
     return lead;
+  }
+
+  async deleteLead(id: string, actorId: string) {
+    this.ensureDatabase();
+
+    const existing = await this.prisma.lead.findUnique({ where: { id } });
+    if (!existing) {
+      throw new NotFoundException('Lead not found');
+    }
+
+    await this.audit.record({
+      action: AuditAction.LEAD_DELETED,
+      leadId: id,
+      actorId,
+      metadata: {
+        type: existing.type,
+        status: existing.status,
+        email: existing.email,
+        companyName: existing.companyName,
+      },
+    });
+
+    await this.prisma.lead.delete({ where: { id } });
+
+    return { ok: true as const, id };
   }
 
   async addNote(id: string, input: CreateLeadNoteInput, actorId: string) {

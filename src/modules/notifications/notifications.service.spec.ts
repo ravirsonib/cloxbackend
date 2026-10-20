@@ -37,16 +37,83 @@ describe('NotificationsService', () => {
 
   it('sendDriverInviteEmail skips without SMTP', async () => {
     const service = new NotificationsService({
-      get: () => undefined,
+      get: (key: string) => (key === 'ADMIN_APP_URL' ? 'http://localhost:5174' : undefined),
     } as never);
     await expect(
       service.sendDriverInviteEmail({
         to: 'driver.invite@yopmail.com',
         driverName: 'Sam',
         companyName: 'Carrier',
-        inviteUrl: 'https://example/invite',
+        inviteUrl: 'http://localhost:5174/driver/invite/token',
         expiresHours: 48,
       }),
     ).resolves.toEqual({ skipped: true });
+  });
+
+  it('sendRegistrationConfirmation skips without SMTP and includes account type', async () => {
+    const service = new NotificationsService({
+      get: (key: string) => (key === 'ADMIN_APP_URL' ? 'http://localhost:5174' : undefined),
+    } as never);
+    await expect(
+      service.sendRegistrationConfirmation({
+        to: 'carrier@yopmail.com',
+        name: 'Acme Haulage',
+        accountType: 'TRANSPORT_COMPANY',
+      }),
+    ).resolves.toEqual({ skipped: true });
+  });
+
+  it('sendComplianceApprovedEmail skips without SMTP', async () => {
+    const service = new NotificationsService({
+      get: (key: string) => (key === 'ADMIN_APP_URL' ? 'http://localhost:5174' : undefined),
+    } as never);
+    await expect(
+      service.sendComplianceApprovedEmail({
+        to: 'carrier@yopmail.com',
+        companyName: 'Acme Haulage',
+        companyType: 'CARRIER',
+        companyStatus: 'BID_ELIGIBLE',
+        caseType: 'CARRIER_KYB',
+        decisionNote: 'Looks good',
+      }),
+    ).resolves.toEqual({ skipped: true });
+  });
+
+  it('sendComplianceInfoRequestedEmail skips without SMTP', async () => {
+    const service = new NotificationsService({
+      get: (key: string) => (key === 'ADMIN_APP_URL' ? 'http://localhost:5174' : undefined),
+    } as never);
+    await expect(
+      service.sendComplianceInfoRequestedEmail({
+        to: 'carrier@yopmail.com',
+        companyName: 'Acme Haulage',
+        companyType: 'CARRIER',
+        caseType: 'CARRIER_KYB',
+        decisionNote: 'Please upload a clearer RWC PDF',
+      }),
+    ).resolves.toEqual({ skipped: true });
+  });
+
+  it('sendComplianceInfoRequestedEmail CTA goes through login with switch', async () => {
+    const service = new NotificationsService({
+      get: (key: string) => (key === 'ADMIN_APP_URL' ? 'http://localhost:5174' : undefined),
+    } as never);
+    const branded = jest
+      .spyOn(service as never, 'sendBranded' as never)
+      .mockResolvedValue({ skipped: false } as never);
+    await service.sendComplianceInfoRequestedEmail({
+      to: 'Carrier@Yopmail.com',
+      companyName: 'Acme Haulage',
+      companyType: 'CARRIER',
+      caseType: 'CARRIER_KYB',
+      decisionNote: 'Need clearer RWC',
+    });
+    const href = (branded.mock.calls[0]?.[0] as { cta?: { href?: string } } | undefined)?.cta
+      ?.href;
+    expect(href).toContain('http://localhost:5174/login?');
+    expect(href).toContain('email=carrier%40yopmail.com');
+    expect(href).toContain('next=%2Fdocuments%2Fupload');
+    expect(href).toContain('switch=1');
+    branded.mockRestore();
   });
 });

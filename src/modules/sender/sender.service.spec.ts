@@ -45,6 +45,7 @@ describe('SenderService booking gate', () => {
       { recordPlatform: jest.fn() } as never,
       { isMockMode: () => true } as never,
       { get: () => undefined } as never,
+      { sendRegistrationConfirmation: jest.fn().mockResolvedValue({ skipped: true }) } as never,
     );
 
     const result = await service.getBookingEligibility({

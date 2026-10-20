@@ -3,6 +3,7 @@ import {
   ConflictException,
   ForbiddenException,
   Injectable,
+  Logger,
   NotFoundException,
   ServiceUnavailableException,
 } from '@nestjs/common';
@@ -34,16 +35,20 @@ import {
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { DriverService } from '../driver/driver.service';
+import { NotificationsService } from '../notifications/notifications.service';
 import { StripeService } from '../payments/stripe.service';
 
 @Injectable()
 export class CarrierService {
+  private readonly logger = new Logger(CarrierService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
     private readonly stripe: StripeService,
     private readonly config: ConfigService<AppEnv, true>,
     private readonly drivers: DriverService,
+    private readonly notifications: NotificationsService,
   ) {}
 
   private ensureDatabase() {
@@ -135,8 +140,10 @@ export class CarrierService {
     ) {
       return 'waiting_ops';
     }
+    // Re-open at Submit so carrier can replace only requested docs and resubmit
+    // without redoing Connect / fleet / capabilities.
     if (company.status === CompanyStatus.INFO_REQUESTED) {
-      return 'documents';
+      return 'submit';
     }
     if (!company.abn) return 'profile';
     const docs = new Set(company.complianceDocuments.map((d) => d.docType));
@@ -194,6 +201,20 @@ export class CarrierService {
       entityId: company.id,
       metadata: { email: user.email },
     });
+
+    void this.notifications
+      .sendRegistrationConfirmation({
+        to: user.email,
+        name: user.name ?? company.legalName,
+        accountType: 'TRANSPORT_COMPANY',
+      })
+      .catch((error: unknown) => {
+        this.logger.error(
+          `Failed to send carrier registration email for ${user.email}`,
+          error instanceof Error ? error.stack : String(error),
+        );
+      });
+
     return {
       ok: true,
       message: 'Carrier registered. Request an OTP to sign in and continue onboarding.',
@@ -573,27 +594,6 @@ export class CarrierService {
       throw new BadRequestException('Set service regions before submit');
     }
 
-    const docs = await this.prisma.complianceDocument.findMany({
-      where: {
-        id: { in: input.documentIds },
-        companyId: company.id,
-        status: ComplianceDocStatus.UPLOADED,
-      },
-    });
-    if (docs.length !== input.documentIds.length) {
-      throw new BadRequestException('All documents must be uploaded for this company');
-    }
-    const types = new Set(docs.map((d) => d.docType));
-    for (const required of [
-      ComplianceDocType.PUBLIC_LIABILITY,
-      ComplianceDocType.CARGO_INSURANCE,
-      ComplianceDocType.RWC,
-    ]) {
-      if (!types.has(required)) {
-        throw new BadRequestException(`Missing required doc: ${required}`);
-      }
-    }
-
     const open = await this.prisma.complianceCase.findFirst({
       where: {
         companyId: company.id,
@@ -608,6 +608,40 @@ export class CarrierService {
     });
     if (open && open.status !== ComplianceCaseStatus.INFO_REQUESTED) {
       throw new BadRequestException('An open compliance case already exists');
+    }
+
+    // First submit: UPLOADED only. Info-requested resubmit: keep prior UNDER_REVIEW
+    // docs and/or replace with newly UPLOADED files.
+    const isInfoResubmit =
+      company.status === CompanyStatus.INFO_REQUESTED ||
+      open?.status === ComplianceCaseStatus.INFO_REQUESTED;
+    const allowedDocStatuses = isInfoResubmit
+      ? [ComplianceDocStatus.UPLOADED, ComplianceDocStatus.UNDER_REVIEW]
+      : [ComplianceDocStatus.UPLOADED];
+
+    const docs = await this.prisma.complianceDocument.findMany({
+      where: {
+        id: { in: input.documentIds },
+        companyId: company.id,
+        status: { in: allowedDocStatuses },
+      },
+    });
+    if (docs.length !== input.documentIds.length) {
+      throw new BadRequestException(
+        isInfoResubmit
+          ? 'Documents must be uploaded (or previously submitted) for this company'
+          : 'All documents must be uploaded for this company',
+      );
+    }
+    const types = new Set(docs.map((d) => d.docType));
+    for (const required of [
+      ComplianceDocType.PUBLIC_LIABILITY,
+      ComplianceDocType.CARGO_INSURANCE,
+      ComplianceDocType.RWC,
+    ]) {
+      if (!types.has(required)) {
+        throw new BadRequestException(`Missing required doc: ${required}`);
+      }
     }
 
     const created = await this.prisma.$transaction(async (tx) => {

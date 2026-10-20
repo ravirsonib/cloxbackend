@@ -314,6 +314,13 @@ model Company {
   capabilities          String[]      @default([])
   /// AU region codes carrier serves (in addition to homeRegion)
   serviceRegionCodes    String[]      @default([])
+  /// Soft-disable (suspend): prior status for reactivate
+  statusBeforeSuspend   CompanyStatus?
+  suspendedAt           DateTime?
+  /// Required ops reason shown to account holders
+  suspendedReason       String?
+  /// Optional internal / longer note
+  suspendedNote         String?
   createdAt             DateTime      @default(now())
   updatedAt             DateTime      @updatedAt
 
@@ -329,6 +336,7 @@ model Company {
   @@index([type, status])
   @@index([abn])
   @@index([homeRegionId])
+  @@index([suspendedAt])
 }
 
 // ─── Fleet & compliance ─────────────────────────────────────────────────────
@@ -479,6 +487,8 @@ model ComplianceCase {
   submittedByUserId String?
   assignedAdminId  String?
   decisionNote     String?
+  /// Latest Request info time — used to flag docs uploaded after that request.
+  infoRequestedAt  DateTime?
   escalatedAt      DateTime?
   decidedAt        DateTime?
   decidedByAdminId String?
