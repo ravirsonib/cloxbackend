@@ -12,7 +12,7 @@ describe('email-layout', () => {
 
   it('resolves hosted logo URL from public site base', () => {
     expect(resolveEmailLogoUrl('https://clox.com.au/')).toBe(
-      'https://clox.com.au/brand/logo-clox-light.webp',
+      'https://clox.com.au/brand/logo-clox-light.png',
     );
     expect(resolveEmailLogoUrl(null)).toBeNull();
     expect(resolveEmailLogoUrl('not-a-url')).toBeNull();
@@ -35,8 +35,8 @@ describe('email-layout', () => {
     expect(html).toContain('Account type');
     expect(html).toContain('http://localhost:5174/login');
     expect(html).toContain('clox.com.au');
-    expect(html).toContain('https://clox.com.au/brand/logo-clox-light.webp');
-    expect(html).toMatch(/<img\b[^>]*src="https:\/\/clox\.com\.au\/brand\/logo-clox-light\.webp"/i);
+    expect(html).toContain('https://clox.com.au/brand/logo-clox-light.png');
+    expect(html).toMatch(/<img\b[^>]*src="https:\/\/clox\.com\.au\/brand\/logo-clox-light\.png"/i);
     expect(html).not.toMatch(/cid:/i);
     expect(html).not.toMatch(/data:image/i);
     expect(html).not.toMatch(/pre-launch/i);

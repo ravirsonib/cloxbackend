@@ -157,7 +157,7 @@ describe('NotificationsService SMTP leftovers', () => {
       email: 'reg.clox@yopmail.com',
     });
     const html = (sendMail.mock.calls[0][0] as { html: string }).html;
-    expect(html).toContain('https://clox.com.au/brand/logo-clox-light.webp');
+    expect(html).toContain('https://clox.com.au/brand/logo-clox-light.png');
     expect(html).not.toMatch(/cid:/i);
     expect(html).not.toMatch(/data:image/i);
   });

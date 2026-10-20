@@ -1,6 +1,6 @@
 /**
  * Cross-client email HTML (table layout, inline CSS).
- * Header logo is a hosted absolute URL only (no CID / base64 attachments).
+ * Header logo is a hosted absolute PNG URL only (no CID / base64 / WebP).
  * When PUBLIC_SITE_URL is unset, the navy bar falls back to a text wordmark.
  * Icons in the body are CSS/text only (numbered circles, emoji-free labels).
  */
@@ -18,9 +18,11 @@ export const EMAIL_BRAND = {
   legalEntity: 'Achieve Global Enterprises Pty Ltd trading as CLOX Freight Forwarding',
   abn: '48 626 269 387',
   tagline: "AUSTRALIA'S DIGITAL FULL-LOAD FREIGHT MARKETPLACE",
-  /** Light wordmark for navy header — served from public web `/brand/`. */
-  logoLightPath: '/brand/logo-clox-light.webp',
+  /** Light wordmark for navy header — PNG for email-client compatibility (not WebP). */
+  logoLightPath: '/brand/logo-clox-light.png',
   logoWidthPx: 148,
+  /** Intrinsic aspect from brand asset (1400×401). */
+  logoHeightPx: 42,
 } as const;
 
 /** Absolute logo URL from marketing site base, or null if unavailable. */
@@ -152,7 +154,8 @@ function headerBrandHtml(publicSiteUrl: string | null | undefined): string {
   const brandBlock =
     logoUrl && siteHref
       ? `<a href="${escapeHtml(siteHref)}" target="_blank" rel="noopener noreferrer" style="text-decoration:none;">
-                <img src="${escapeHtml(logoUrl)}" width="${EMAIL_BRAND.logoWidthPx}" alt="CLOX Freight Forwarding"
+                <img src="${escapeHtml(logoUrl)}" width="${EMAIL_BRAND.logoWidthPx}" height="${EMAIL_BRAND.logoHeightPx}"
+                  alt="CLOX Freight Forwarding" border="0"
                   style="display:block;border:0;outline:none;text-decoration:none;height:auto;max-width:${EMAIL_BRAND.logoWidthPx}px;" />
               </a>`
       : `<p style="margin:0;font-family:Helvetica,Arial,sans-serif;font-size:26px;font-weight:800;letter-spacing:0.02em;color:${EMAIL_BRAND.white};">
