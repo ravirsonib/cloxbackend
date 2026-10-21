@@ -128,6 +128,10 @@ export class LeadsService {
         leadId: lead.id,
         email: lead.email,
         companyName: lead.companyName,
+        phone: lead.phone,
+        abn: lead.abn,
+        state: lead.state,
+        territory: lead.territory,
       })
       .then(async (result) => {
         if (result.skipped) {

@@ -72,21 +72,8 @@ export class NotificationsService {
     return this.assetUrl('logo-clox-email-header.png');
   }
 
-  private iconUrl(
-    name: 'truck' | 'building' | 'envelope',
-  ): string {
-    return this.assetUrl('icons', `icon-${name}.png`);
-  }
-
   private stepCircleUrl(name: 'document' | 'shield' | 'bell'): string {
     return this.assetUrl('icons', `icon-${name}-circle.png`);
-  }
-
-  private iconImg(
-    name: 'truck' | 'building' | 'envelope',
-    size: number,
-  ): string {
-    return `<img src="${this.iconUrl(name)}" width="${size}" height="${size}" alt="" style="display:block;border:0;outline:none;width:${size}px;height:${size}px;" />`;
   }
 
   private stepCircleImg(name: 'document' | 'shield' | 'bell'): string {
@@ -220,26 +207,88 @@ export class NotificationsService {
     }
   }
 
-  private detailRow(
-    icon: 'truck' | 'building' | 'envelope',
-    label: string,
-    value: string,
-  ) {
+  /** Friendly ABN: 11 digits → "XX XXX XXX XXX" */
+  private formatAbn(abn?: string | null): string | null {
+    if (!abn) return null;
+    const digits = abn.replace(/\s+/g, '');
+    if (!/^\d{11}$/.test(digits)) return abn.trim() || null;
+    return `${digits.slice(0, 2)} ${digits.slice(2, 5)} ${digits.slice(5, 8)} ${digits.slice(8)}`;
+  }
+
+  private locationLabel(type: LeadEmailKind): string {
+    switch (type) {
+      case 'REGISTRY_SENDER':
+        return 'Shipping origin';
+      case 'REGISTRY_CARRIER':
+        return 'Depot state';
+      case 'EOI_STATE_MASTER':
+      case 'EOI_LOCAL_BDE':
+        return 'Target state / region';
+      case 'INVESTOR':
+        return 'Country / residence';
+      default:
+        return 'Location';
+    }
+  }
+
+  private companyLabel(type: LeadEmailKind): string {
+    switch (type) {
+      case 'REGISTRY_CARRIER':
+        return 'Fleet / company';
+      case 'INVESTOR':
+        return 'Name / entity';
+      default:
+        return 'Company';
+    }
+  }
+
+  /**
+   * Clean stacked label + value for non-tech readers.
+   * Empty values are omitted so the box stays short.
+   */
+  private detailItem(label: string, value: string | null | undefined, isLast: boolean) {
+    const trimmed = value?.trim();
+    if (!trimmed) return '';
     return `
       <tr>
-        <td style="padding:0 0 12px 0;">
-          <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">
-            <tr>
-              <td width="28" valign="middle" style="width:28px;padding:0 10px 0 0;vertical-align:middle;">
-                ${this.iconImg(icon, 22)}
-              </td>
-              <td valign="middle" style="font-size:14px;line-height:1.45;color:#0f172a;vertical-align:middle;">
-                <strong style="color:#0a1f3c;">${label}:</strong> ${value}
-              </td>
-            </tr>
-          </table>
+        <td style="padding:0 0 ${isLast ? '4px' : '14px'} 0;">
+          <p style="margin:0 0 3px;font-size:12px;line-height:1.3;font-weight:600;color:#64748b;letter-spacing:0.02em;">${label}</p>
+          <p style="margin:0;font-size:15px;line-height:1.4;font-weight:600;color:#0a1f3c;">${trimmed}</p>
         </td>
       </tr>`;
+  }
+
+  private buildDetailRows(params: {
+    type: LeadEmailKind;
+    label: string;
+    companyName?: string | null;
+    email: string;
+    phone?: string | null;
+    abn?: string | null;
+    state?: string | null;
+    territory?: string | null;
+  }): { html: string; textLines: string[] } {
+    const location =
+      [params.state?.trim(), params.territory?.trim()].filter(Boolean).join(' · ') ||
+      null;
+
+    const items: { label: string; value: string | null }[] = [
+      { label: 'Application type', value: params.label },
+      { label: this.companyLabel(params.type), value: params.companyName ?? null },
+      { label: 'Email', value: params.email },
+      { label: 'Phone', value: params.phone ?? null },
+      { label: 'ABN', value: this.formatAbn(params.abn) },
+      { label: this.locationLabel(params.type), value: location },
+    ].filter((item) => Boolean(item.value?.trim()));
+
+    const html = items
+      .map((item, index) =>
+        this.detailItem(item.label, item.value, index === items.length - 1),
+      )
+      .join('');
+
+    const textLines = items.map((item) => `${item.label}: ${item.value}`);
+    return { html, textLines };
   }
 
   private nextStepRow(
@@ -273,12 +322,25 @@ export class NotificationsService {
     leadId: string;
     email: string;
     companyName?: string | null;
+    phone?: string | null;
+    abn?: string | null;
+    state?: string | null;
+    territory?: string | null;
   }) {
     const label = this.leadLabel(params.type);
     const welcome = this.welcomeCopy(params.type);
-    const company = params.companyName?.trim() || '—';
     const siteUrl = 'https://www.clox.com.au';
     const logoHtml = `<img src="${this.logoUrl()}" width="180" height="62" alt="CLOX Freight Forwarding" style="display:block;margin:0 auto;border:0;outline:none;width:180px;height:auto;max-width:180px;" />`;
+    const details = this.buildDetailRows({
+      type: params.type,
+      label,
+      companyName: params.companyName,
+      email: params.email,
+      phone: params.phone,
+      abn: params.abn,
+      state: params.state,
+      territory: params.territory,
+    });
 
     const nextStepIcons = ['document', 'shield', 'bell'] as const;
     const nextStepsHtml = welcome.nextSteps
@@ -299,10 +361,8 @@ export class NotificationsService {
       '',
       welcome.intro,
       '',
-      'Registration details',
-      `Type: ${label}`,
-      `Company / Name: ${company}`,
-      `Email: ${params.email}`,
+      'Your details',
+      ...details.textLines,
       '',
       'What happens next?',
       ...welcome.nextSteps.map((step) => `${step.title}: ${step.body}`),
@@ -379,12 +439,10 @@ export class NotificationsService {
 
               <table role="presentation" width="100%" cellpadding="0" cellspacing="0" bgcolor="#f4f7f9" style="background-color:#f4f7f9;background:#f4f7f9;border-radius:14px;margin:0 0 28px;">
                 <tr>
-                  <td bgcolor="#f4f7f9" style="background-color:#f4f7f9;padding:22px 22px 8px;">
-                    <p style="margin:0 0 16px;font-size:12px;font-weight:700;color:#0a1f3c;text-transform:uppercase;letter-spacing:0.08em;">Registration details</p>
+                  <td bgcolor="#f4f7f9" style="background-color:#f4f7f9;padding:22px 22px 12px;">
+                    <p style="margin:0 0 16px;font-size:12px;font-weight:700;color:#0a1f3c;text-transform:uppercase;letter-spacing:0.08em;">Your details</p>
                     <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
-                      ${this.detailRow('truck', 'Type', label)}
-                      ${this.detailRow('building', 'Company / Name', company)}
-                      ${this.detailRow('envelope', 'Email', params.email)}
+                      ${details.html}
                     </table>
                   </td>
                 </tr>
@@ -490,6 +548,10 @@ export class NotificationsService {
     leadId: string;
     email: string;
     companyName?: string | null;
+    phone?: string | null;
+    abn?: string | null;
+    state?: string | null;
+    territory?: string | null;
   }) {
     const investNotify = this.config.get('INVEST_NOTIFY_EMAIL', { infer: true });
     const submitter = params.email.trim().toLowerCase();
@@ -507,6 +569,10 @@ export class NotificationsService {
       leadId: params.leadId,
       email: params.email,
       companyName: params.companyName,
+      phone: params.phone,
+      abn: params.abn,
+      state: params.state,
+      territory: params.territory,
     });
 
     this.logger.log(
