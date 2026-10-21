@@ -16,7 +16,9 @@ import {
   type UpdateLeadInput,
 } from '../../shared/types';
 import {
+  AdminUserStatus,
   CompanyStatus,
+  CompanyType,
   ComplianceCaseStatus,
   DriverStatus,
   Prisma,
@@ -188,7 +190,10 @@ export class AdminService {
     this.ensureDatabase();
 
     const where: Prisma.CompanyWhereInput = {};
-    if (query.type) where.type = query.type;
+    // Marketplace companies only — admin partners live under Ops → Admin partners.
+    where.type = query.type
+      ? query.type
+      : { in: [CompanyType.SENDER, CompanyType.CARRIER] };
     if (query.status) where.status = query.status;
     if (query.regionCode) {
       where.homeRegion = { code: query.regionCode.toUpperCase() };
@@ -286,6 +291,7 @@ export class AdminService {
       where: { id },
       include: {
         users: { select: { id: true, email: true, status: true } },
+        adminUsers: { select: { id: true, email: true } },
       },
     });
     if (!company) {
@@ -303,6 +309,7 @@ export class AdminService {
     const reason = input.reason.trim();
     const note = input.note?.trim() || null;
     const now = new Date();
+    const partnerAdminIds = company.adminUsers.map((a) => a.id);
 
     const result = await this.prisma.$transaction(async (tx) => {
       const updated = await tx.company.update({
@@ -339,13 +346,27 @@ export class AdminService {
         data: { status: VehicleStatus.SUSPENDED },
       });
 
+      if (partnerAdminIds.length) {
+        await tx.adminUser.updateMany({
+          where: { id: { in: partnerAdminIds } },
+          data: { status: AdminUserStatus.SUSPENDED, active: false },
+        });
+      }
+
       let sessionsRevoked = 0;
       if (userIds.length) {
         const revoked = await tx.authSession.updateMany({
           where: { userId: { in: userIds }, revokedAt: null },
           data: { revokedAt: now },
         });
-        sessionsRevoked = revoked.count;
+        sessionsRevoked += revoked.count;
+      }
+      if (partnerAdminIds.length) {
+        const revoked = await tx.authSession.updateMany({
+          where: { adminUserId: { in: partnerAdminIds }, revokedAt: null },
+          data: { revokedAt: now },
+        });
+        sessionsRevoked += revoked.count;
       }
 
       return {
@@ -366,10 +387,12 @@ export class AdminService {
         reason,
         note,
         previousStatus: company.status,
+        companyType: company.type,
         usersSuspended: result.usersSuspended,
         driversSuspended: result.driversSuspended,
         vehiclesSuspended: result.vehiclesSuspended,
         sessionsRevoked: result.sessionsRevoked,
+        partnerAdminsSuspended: partnerAdminIds.length,
       },
     });
 
@@ -378,13 +401,23 @@ export class AdminService {
     for (const user of company.users) {
       if (user.email?.trim()) notifyEmails.add(user.email.trim().toLowerCase());
     }
+    for (const partner of company.adminUsers) {
+      if (partner.email?.trim()) notifyEmails.add(partner.email.trim().toLowerCase());
+    }
+
+    const notifyType =
+      company.type === CompanyType.CARRIER
+        ? ('CARRIER' as const)
+        : company.type === CompanyType.ADMIN_PARTNER
+          ? ('ADMIN_PARTNER' as const)
+          : ('SENDER' as const);
 
     await Promise.all(
       [...notifyEmails].map((to) =>
         this.notifications.sendAccountSuspendedEmail({
           to,
           companyName: company.tradingName || company.legalName,
-          companyType: company.type === 'CARRIER' ? 'CARRIER' : 'SENDER',
+          companyType: notifyType,
           reason,
           note,
         }),
@@ -414,6 +447,7 @@ export class AdminService {
       where: { id },
       include: {
         users: { select: { id: true } },
+        adminUsers: { select: { id: true } },
       },
     });
     if (!company) {
@@ -425,6 +459,14 @@ export class AdminService {
 
     const restoreStatus = company.statusBeforeSuspend ?? CompanyStatus.PENDING_REVIEW;
     const userIds = company.users.map((u) => u.id);
+    const partnerAdminIds = company.adminUsers.map((a) => a.id);
+
+    const partnerRestore =
+      restoreStatus === CompanyStatus.ACTIVE
+        ? { status: AdminUserStatus.ACTIVE, active: true }
+        : restoreStatus === CompanyStatus.PENDING_REVIEW
+          ? { status: AdminUserStatus.PENDING_REVIEW, active: false }
+          : { status: AdminUserStatus.PENDING_DOCS, active: false };
 
     const updated = await this.prisma.$transaction(async (tx) => {
       const next = await tx.company.update({
@@ -456,6 +498,13 @@ export class AdminService {
         data: { status: VehicleStatus.ACTIVE },
       });
 
+      if (partnerAdminIds.length) {
+        await tx.adminUser.updateMany({
+          where: { id: { in: partnerAdminIds }, status: AdminUserStatus.SUSPENDED },
+          data: partnerRestore,
+        });
+      }
+
       return next;
     });
 
@@ -485,6 +534,7 @@ export class AdminService {
       where: { id },
       include: {
         users: { select: { id: true, email: true } },
+        adminUsers: { select: { id: true, email: true } },
         _count: {
           select: {
             jobsAsSender: true,
@@ -513,6 +563,7 @@ export class AdminService {
     }
 
     const userIds = company.users.map((u) => u.id);
+    const partnerAdminIds = company.adminUsers.map((a) => a.id);
 
     await this.prisma.$transaction(async (tx) => {
       await tx.driver.deleteMany({
@@ -523,6 +574,14 @@ export class AdminService {
       if (userIds.length) {
         await tx.user.deleteMany({ where: { id: { in: userIds } } });
       }
+      if (partnerAdminIds.length) {
+        await tx.authSession.deleteMany({ where: { adminUserId: { in: partnerAdminIds } } });
+        await tx.otpChallenge.deleteMany({ where: { adminUserId: { in: partnerAdminIds } } });
+        await tx.adminScope.deleteMany({ where: { adminUserId: { in: partnerAdminIds } } });
+        await tx.adminUser.deleteMany({ where: { id: { in: partnerAdminIds } } });
+      }
+      await tx.complianceDocument.deleteMany({ where: { companyId: id } });
+      await tx.complianceCase.deleteMany({ where: { companyId: id } });
       await tx.company.delete({ where: { id } });
     });
 

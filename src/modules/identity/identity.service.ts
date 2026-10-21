@@ -31,6 +31,9 @@ export class IdentityService {
         name: admin.name,
         role: admin.role,
         active: admin.active,
+        status: admin.status,
+        companyId: admin.companyId,
+        opsEligible: admin.status === 'ACTIVE' && admin.active,
         scopes: admin.scopes.map((s) => ({
           scopeType: s.scopeType,
           regionCode: s.region?.code ?? null,

@@ -39,14 +39,40 @@ enum AdminRole {
   LOCAL_BDE
 }
 
+/// Lifecycle for Super / State / Local admin accounts (invite → KYB → active).
+enum AdminUserStatus {
+  INVITED
+  PENDING_DOCS
+  PENDING_REVIEW
+  ACTIVE
+  SUSPENDED
+  REJECTED
+}
+
 model AdminUser {
-  id        String    @id @default(uuid())
-  email     String    @unique
-  role      AdminRole @default(SUPER_ADMIN)
-  name      String?
-  active    Boolean   @default(true)
-  createdAt DateTime  @default(now())
-  updatedAt DateTime  @updatedAt
+  id               String          @id @default(uuid())
+  email            String          @unique
+  role             AdminRole       @default(SUPER_ADMIN)
+  name             String?
+  /// Source of truth for ops eligibility; keep `active` synced (ACTIVE only).
+  status           AdminUserStatus @default(ACTIVE)
+  active           Boolean         @default(true)
+  phone            String?
+  companyId        String?
+  company          Company?        @relation("AdminPartnerCompany", fields: [companyId], references: [id], onDelete: SetNull)
+  leadId           String?
+  lead             Lead?           @relation("AdminInviteLead", fields: [leadId], references: [id], onDelete: SetNull)
+  inviteTokenHash  String?
+  inviteExpiresAt  DateTime?
+  inviteAcceptedAt DateTime?
+  /// EOI-style declarations accepted at onboarding submit
+  declarationAccuracy   Boolean @default(false)
+  declarationNda        Boolean @default(false)
+  declarationNonCompete Boolean @default(false)
+  /// Partner onboarding profile extras (networkExperience, executionStrategy, corporateAddress, …)
+  profileJson      Json?
+  createdAt        DateTime        @default(now())
+  updatedAt        DateTime        @updatedAt
 
   assignedLeads Lead[]
   notes         LeadNote[]
@@ -56,6 +82,15 @@ model AdminUser {
   scopes        AdminScope[]
   auditEvents   AuditEvent[]    @relation("AuditActor")
   policyVersions PolicyVersion[] @relation("PolicyPublisher")
+  /// Marketplace companies this Local BDE referred (book of business)
+  referredCompanies Company[]       @relation("CompanyReferredBy")
+  companyInvites    CompanyInvite[] @relation("CompanyInviteInviter")
+  prospects         Prospect[]      @relation("ProspectOwner")
+
+  @@index([companyId])
+  @@index([status])
+  @@index([inviteTokenHash])
+  @@index([leadId])
 }
 
 model Lead {
@@ -80,8 +115,9 @@ model Lead {
   createdAt      DateTime   @default(now())
   updatedAt      DateTime   @updatedAt
 
-  notes  LeadNote[]
-  events LeadEvent[]
+  notes          LeadNote[]
+  events         LeadEvent[]
+  invitedAdmins  AdminUser[] @relation("AdminInviteLead")
 
   @@index([type, status, createdAt])
   @@index([abn])
@@ -185,6 +221,7 @@ enum UserStatus {
 enum CompanyType {
   SENDER
   CARRIER
+  ADMIN_PARTNER
 }
 
 enum CompanyStatus {
@@ -321,10 +358,16 @@ model Company {
   suspendedReason       String?
   /// Optional internal / longer note
   suspendedNote         String?
+  /// Local BDE who invited this marketplace company; null = HQ / organic
+  referredByAdminUserId String?
+  referredByAdminUser   AdminUser? @relation("CompanyReferredBy", fields: [referredByAdminUserId], references: [id], onDelete: SetNull)
+  /// First attribution timestamp (kept across reassign; history in audit)
+  referredAt            DateTime?
   createdAt             DateTime      @default(now())
   updatedAt             DateTime      @updatedAt
 
   users               User[]
+  adminUsers          AdminUser[]          @relation("AdminPartnerCompany")
   vehicles            Vehicle[]
   drivers             Driver[]
   complianceDocuments ComplianceDocument[]
@@ -332,11 +375,74 @@ model Company {
   jobsAsSender        Job[]                @relation("JobSenderCompany")
   proposals           Proposal[]
   assignments         Assignment[]         @relation("AssignmentCarrier")
+  tripExceptions      TripException[]
+  companyInvites      CompanyInvite[]
+  prospects           Prospect[]
 
   @@index([type, status])
   @@index([abn])
   @@index([homeRegionId])
   @@index([suspendedAt])
+  @@index([referredByAdminUserId])
+}
+
+enum ProspectStage {
+  LEAD
+  CONTACTED
+  INVITED
+  ONBOARDING
+  WON
+  LOST
+}
+
+/// Local BDE invite of a sender/carrier before (or linking into) Company registration.
+model CompanyInvite {
+  id                   String      @id @default(uuid())
+  tokenHash            String      @unique
+  expiresAt            DateTime
+  acceptedAt           DateTime?
+  invitedByAdminUserId String
+  invitedByAdminUser   AdminUser   @relation("CompanyInviteInviter", fields: [invitedByAdminUserId], references: [id], onDelete: Cascade)
+  companyType          CompanyType
+  email                String
+  legalNameHint        String?
+  homeRegionId         String?
+  localTerritoryId     String?
+  prospectId           String?
+  prospect             Prospect?   @relation(fields: [prospectId], references: [id], onDelete: SetNull)
+  companyId            String?
+  company              Company?    @relation(fields: [companyId], references: [id], onDelete: SetNull)
+  createdAt            DateTime    @default(now())
+  updatedAt            DateTime    @updatedAt
+
+  @@index([invitedByAdminUserId, createdAt])
+  @@index([email])
+  @@index([prospectId])
+  @@index([companyId])
+}
+
+/// Local BDE growth CRM row (M11) — owned by one Local; Super/State read in-scope.
+model Prospect {
+  id               String        @id @default(uuid())
+  ownerAdminUserId String
+  ownerAdminUser   AdminUser     @relation("ProspectOwner", fields: [ownerAdminUserId], references: [id], onDelete: Cascade)
+  companyType      CompanyType
+  legalName        String
+  contactName      String?
+  email            String?
+  phone            String?
+  stage            ProspectStage @default(LEAD)
+  notes            String?
+  companyId        String?
+  company          Company?      @relation(fields: [companyId], references: [id], onDelete: SetNull)
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @updatedAt
+
+  invites CompanyInvite[]
+
+  @@index([ownerAdminUserId, stage, createdAt])
+  @@index([companyId])
+  @@index([email])
 }
 
 // ─── Fleet & compliance ─────────────────────────────────────────────────────
@@ -368,6 +474,7 @@ enum ComplianceDocType {
   CARGO_INSURANCE
   INSURANCE
   NHVR
+  MASTER_ADMIN_AGREEMENT
   OTHER
 }
 
@@ -384,6 +491,7 @@ enum ComplianceCaseType {
   SENDER_KYB
   SENDER_KYC
   CARRIER_KYB
+  ADMIN_PARTNER_KYB
 }
 
 enum ComplianceCaseStatus {
@@ -407,6 +515,9 @@ model Vehicle {
   tareKg       Int?
   gvmKg        Int?
   gcmKg        Int?
+  disabledAt     DateTime?
+  disabledReason String?
+  disabledNote   String?
   createdAt    DateTime      @default(now())
   updatedAt    DateTime      @updatedAt
 
@@ -433,6 +544,9 @@ model Driver {
   inviteTokenHash String?
   inviteExpiresAt DateTime?
   inviteAcceptedAt DateTime?
+  disabledAt     DateTime?
+  disabledReason String?
+  disabledNote   String?
   createdAt DateTime     @default(now())
   updatedAt DateTime     @updatedAt
 
@@ -602,6 +716,7 @@ model Job {
   paymentEvents PaymentEvent[]
   settlementLines SettlementLine[]
   surcharges    Surcharge[]
+  tripExceptions TripException[]
 
   @@index([senderCompanyId, status])
   @@index([originRegionId])
@@ -679,6 +794,7 @@ model Assignment {
   updatedAt        DateTime         @updatedAt
 
   trip Trip?
+  tripExceptions TripException[]
 
   @@index([carrierCompanyId, status])
   @@index([driverId])
@@ -716,8 +832,67 @@ model Trip {
   locations     TripLocationSample[]
   stopProgress  TripStopProgress[]
   surcharges    Surcharge[]
+  tripExceptions TripException[]
 
   @@index([status])
+}
+
+/// Driver sick-call / breakdown / unavailability control loop (Phase X1)
+enum TripExceptionKind {
+  DRIVER_UNAVAILABLE
+  VEHICLE_BREAKDOWN
+  ACCIDENT
+  TRAFFIC
+  OTHER
+}
+
+enum TripExceptionPhase {
+  PRE_TRIP
+  MID_TRIP
+}
+
+enum TripExceptionStatus {
+  OPEN
+  AWAITING_CARRIER
+  REASSIGN_IN_PROGRESS
+  ESCALATED
+  RESOLVED_REASSIGNED
+  RESOLVED_CONTINUED
+  RESOLVED_CANCELLED
+  CLOSED
+}
+
+model TripException {
+  id               String              @id @default(uuid())
+  jobId            String
+  job              Job                 @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  assignmentId     String
+  assignment       Assignment          @relation(fields: [assignmentId], references: [id], onDelete: Cascade)
+  tripId           String?
+  trip             Trip?               @relation(fields: [tripId], references: [id], onDelete: SetNull)
+  companyId        String
+  company          Company             @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  reportedByUserId String
+  kind             TripExceptionKind
+  phase            TripExceptionPhase
+  status           TripExceptionStatus @default(AWAITING_CARRIER)
+  reasonCode       String?
+  note             String?
+  gpsLat           Float?
+  gpsLng           Float?
+  photoDocumentId  String?
+  openedAt         DateTime            @default(now())
+  escalatedAt      DateTime?
+  resolvedAt       DateTime?
+  resolvedByUserId String?
+  resolutionNote   String?
+  createdAt        DateTime            @default(now())
+  updatedAt        DateTime            @updatedAt
+
+  @@index([companyId, status, openedAt])
+  @@index([assignmentId, status])
+  @@index([tripId])
+  @@index([jobId])
 }
 
 model TripLocationSample {

@@ -18,13 +18,16 @@ import { LeadsModule } from './modules/leads/leads.module';
 import { MatchingModule } from './modules/matching/matching.module';
 import { NotificationsModule } from './modules/notifications/notifications.module';
 import { OpsModule } from './modules/ops/ops.module';
+import { GrowthModule } from './modules/growth/growth.module';
 import { PaymentsModule } from './modules/payments/payments.module';
 import { SenderModule } from './modules/sender/sender.module';
 import { CarrierModule } from './modules/carrier/carrier.module';
 import { DriverModule } from './modules/driver/driver.module';
+import { ExceptionsModule } from './modules/exceptions/exceptions.module';
 import { SettlementsModule } from './modules/settlements/settlements.module';
 import { TripsModule } from './modules/trips/trips.module';
 import { PrismaModule } from './prisma/prisma.module';
+import { AttributionModule } from './common/services/attribution.module';
 
 @Module({
   imports: [
@@ -51,6 +54,7 @@ import { PrismaModule } from './prisma/prisma.module';
       ],
     }),
     PrismaModule,
+    AttributionModule,
     HealthModule,
     LeadsModule,
     AuthModule,
@@ -64,11 +68,13 @@ import { PrismaModule } from './prisma/prisma.module';
     JobsModule,
     MatchingModule,
     TripsModule,
+    ExceptionsModule,
     PaymentsModule,
     SettlementsModule,
     GeolocationModule,
     NotificationsModule,
     OpsModule,
+    GrowthModule,
     AuditModule,
   ],
 })

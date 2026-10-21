@@ -39,6 +39,7 @@ describe('DocumentsService upload intent + putContent paths', () => {
       { get: configGet } as never,
       audit as never,
       scope as never,
+    { assertLocalOwnsCompany: jest.fn() } as never,
     );
   }
 

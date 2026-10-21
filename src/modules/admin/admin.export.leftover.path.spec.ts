@@ -136,6 +136,15 @@ describe('AdminService export / updateLead leftovers', () => {
         where: expect.objectContaining({ type: 'CARRIER' }),
       }),
     );
+
+    await makeService(prisma).listCompanies({ page: 1, pageSize: 20 });
+    expect(prisma.company.findMany).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          type: { in: ['SENDER', 'CARRIER'] },
+        }),
+      }),
+    );
     expect(result).toMatchObject({
       total: 1,
       items: [

@@ -51,6 +51,7 @@ describe('DocumentsService ACL / mime leftover paths', () => {
       } as never,
       audit as never,
       scope as never,
+    { assertLocalOwnsCompany: jest.fn() } as never,
     );
   }
 

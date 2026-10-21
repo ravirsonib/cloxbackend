@@ -38,6 +38,7 @@ describe('DocumentsService.createUploadIntent linked IDs', () => {
         assertRegionAccess: jest.fn(),
         allowedTerritoryCodes: jest.fn().mockReturnValue(null),
       } as never,
+    { assertLocalOwnsCompany: jest.fn() } as never,
     );
 
     await expect(

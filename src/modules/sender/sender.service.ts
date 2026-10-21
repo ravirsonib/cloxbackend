@@ -21,6 +21,7 @@ import {
 } from '@prisma/client';
 import type { AppEnv } from '../../config/env.validation';
 import type { AuthenticatedPrincipal } from '../../common/guards/jwt-auth.guard';
+import { AttributionService } from '../../common/services/attribution.service';
 import {
   AuditAction,
   type SenderPaymentConfirmInput,
@@ -51,6 +52,7 @@ export class SenderService {
     private readonly stripe: StripeService,
     private readonly config: ConfigService<AppEnv, true>,
     private readonly notifications: NotificationsService,
+    private readonly attribution: AttributionService,
   ) {}
 
   private ensureDatabase() {
@@ -142,7 +144,12 @@ export class SenderService {
       throw new ConflictException('Email already registered');
     }
 
+    const resolved = await this.attribution.resolveInviteForRegister(
+      input.inviteToken,
+      CompanyType.SENDER,
+    );
     const vic = await this.prisma.region.findUnique({ where: { code: 'VIC' } });
+    const homeRegionId = resolved.homeRegionId ?? vic?.id ?? null;
 
     const company = await this.prisma.company.create({
       data: {
@@ -151,7 +158,9 @@ export class SenderService {
         legalName: input.name,
         email: input.email,
         phone: input.phone,
-        homeRegionId: vic?.id,
+        homeRegionId,
+        referredByAdminUserId: resolved.referredByAdminUserId,
+        referredAt: resolved.referredByAdminUserId ? new Date() : null,
       },
     });
 
@@ -166,12 +175,29 @@ export class SenderService {
       },
     });
 
+    if (resolved.inviteId) {
+      await this.attribution.markInviteAccepted(resolved.inviteId, company.id);
+      await this.audit.recordPlatform({
+        action: AuditAction.COMPANY_INVITE_ACCEPTED,
+        actorUserId: user.id,
+        entityType: 'CompanyInvite',
+        entityId: resolved.inviteId,
+        metadata: {
+          companyId: company.id,
+          referredByAdminUserId: resolved.referredByAdminUserId,
+        },
+      });
+    }
+
     await this.audit.recordPlatform({
       action: AuditAction.SENDER_REGISTERED,
       actorUserId: user.id,
       entityType: 'Company',
       entityId: company.id,
-      metadata: { email: user.email },
+      metadata: {
+        email: user.email,
+        referredByAdminUserId: resolved.referredByAdminUserId,
+      },
     });
 
     void this.notifications

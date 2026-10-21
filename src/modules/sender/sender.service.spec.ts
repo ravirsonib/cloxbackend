@@ -46,6 +46,7 @@ describe('SenderService booking gate', () => {
       { isMockMode: () => true } as never,
       { get: () => undefined } as never,
       { sendRegistrationConfirmation: jest.fn().mockResolvedValue({ skipped: true }) } as never,
+      { resolveInviteForRegister: jest.fn().mockResolvedValue({ referredByAdminUserId: null, inviteId: null, prospectId: null, homeRegionId: null }), markInviteAccepted: jest.fn() } as never,
     );
 
     const result = await service.getBookingEligibility({

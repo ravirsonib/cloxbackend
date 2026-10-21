@@ -47,6 +47,7 @@ describe('ComplianceService submit leftover validation paths', () => {
       prisma as never,
       audit as never,
       scope as never,
+      { assertLocalOwnsCompany: jest.fn(), complianceCaseBookFilter: jest.fn().mockImplementation((p) => (p.role === 'LOCAL_BDE' ? { company: { referredByAdminUserId: p.id } } : null)) } as never,
       abr,
       { sendComplianceApprovedEmail: jest.fn().mockResolvedValue({ skipped: true }), sendComplianceInfoRequestedEmail: jest.fn().mockResolvedValue({ skipped: true }) } as never,
     );

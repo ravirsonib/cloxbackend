@@ -569,17 +569,21 @@ export class NotificationsService {
   async sendAccountSuspendedEmail(params: {
     to: string;
     companyName: string;
-    companyType: 'CARRIER' | 'SENDER';
+    companyType: 'CARRIER' | 'SENDER' | 'ADMIN_PARTNER';
     reason: string;
     note?: string | null;
   }) {
     const accountType =
       params.companyType === 'CARRIER'
         ? accountTypeLabel('TRANSPORT_COMPANY')
-        : accountTypeLabel('SENDER');
+        : params.companyType === 'ADMIN_PARTNER'
+          ? 'Admin partner'
+          : accountTypeLabel('SENDER');
     const subject = 'CLOX — your account has been suspended';
     const intro =
-      'Your CLOX company account has been suspended by an administrator. You cannot sign in or use marketplace features until the account is reactivated.';
+      params.companyType === 'ADMIN_PARTNER'
+        ? 'Your CLOX admin partner account has been suspended by Super Admin. Ops access is disabled until the account is reactivated.'
+        : 'Your CLOX company account has been suspended by an administrator. You cannot sign in or use marketplace features until the account is reactivated.';
     const details: EmailDetailRow[] = [
       { label: 'Account type', value: accountType },
       { label: 'Company / Name', value: params.companyName },
@@ -626,6 +630,111 @@ export class NotificationsService {
     });
   }
 
+  async sendAdminInviteEmail(params: {
+    to: string;
+    role: string;
+    name?: string | null;
+    regionCode?: string | null;
+    territoryCode?: string | null;
+    inviteUrl: string;
+  }) {
+    const typeLabel = accountTypeLabel(params.role);
+    const subject = `CLOX admin partner invite — ${typeLabel}`;
+    const text = [
+      `You are invited to join CLOX as ${typeLabel}.`,
+      params.name ? `Name: ${params.name}` : undefined,
+      `Email: ${params.to}`,
+      params.regionCode ? `Region: ${params.regionCode}` : undefined,
+      params.territoryCode ? `Territory: ${params.territoryCode}` : undefined,
+      '',
+      `Accept invite: ${params.inviteUrl}`,
+      'After accepting, sign in with OTP, upload KYB documents, and submit for Super Admin review.',
+    ]
+      .filter((line) => line !== undefined)
+      .join('\n');
+
+    return this.sendBranded({
+      to: params.to,
+      subject,
+      text,
+      eyebrow: 'Admin partner invite',
+      title: 'You are invited to CLOX Ops',
+      intro: `CLOX Super Admin invited you as ${typeLabel}. Accept the invite, complete KYB, then wait for Super approval before ops access is enabled.`,
+      details: [
+        { label: 'Account type', value: typeLabel },
+        ...(params.name ? [{ label: 'Name', value: params.name }] : []),
+        { label: 'Email', value: params.to },
+        ...(params.regionCode ? [{ label: 'Region', value: params.regionCode }] : []),
+        ...(params.territoryCode
+          ? [{ label: 'Territory', value: params.territoryCode }]
+          : []),
+      ],
+      nextSteps: [
+        {
+          title: 'Accept invite',
+          body: 'Open the invite link to confirm your email.',
+        },
+        {
+          title: 'Complete KYB',
+          body: 'Upload ABN extract, government ID, and signed Master Administration Agreement, then submit for review.',
+        },
+      ],
+      cta: { label: 'Accept invite →', href: params.inviteUrl },
+    });
+  }
+
+  async sendCompanyInviteEmail(params: {
+    to: string;
+    companyType: string;
+    legalNameHint?: string | null;
+    territoryLabel?: string | null;
+    inviteUrl: string;
+  }) {
+    const typeLabel = params.companyType === 'CARRIER' ? 'transport company' : 'sender';
+    const subject = `CLOX invite — register as ${typeLabel}`;
+    const text = [
+      `You are invited to join CLOX as a ${typeLabel}.`,
+      params.legalNameHint ? `Company: ${params.legalNameHint}` : undefined,
+      `Email: ${params.to}`,
+      params.territoryLabel ? `Territory: ${params.territoryLabel}` : undefined,
+      '',
+      `Register here: ${params.inviteUrl}`,
+      'Use this link so your Local BDE partner can support your onboarding.',
+    ]
+      .filter((line) => line !== undefined)
+      .join('\n');
+
+    return this.sendBranded({
+      to: params.to,
+      subject,
+      text,
+      eyebrow: 'Marketplace invite',
+      title: `Join CLOX as a ${typeLabel}`,
+      intro: `A CLOX Local BDE invited you to register. Open the link to create your account and continue onboarding.`,
+      details: [
+        { label: 'Account type', value: typeLabel },
+        ...(params.legalNameHint
+          ? [{ label: 'Company', value: params.legalNameHint }]
+          : []),
+        { label: 'Email', value: params.to },
+        ...(params.territoryLabel
+          ? [{ label: 'Territory', value: params.territoryLabel }]
+          : []),
+      ],
+      nextSteps: [
+        {
+          title: 'Register',
+          body: 'Open the invite link and complete registration with this email.',
+        },
+        {
+          title: 'Onboard',
+          body: 'Finish verification so you can publish jobs or bid on loads.',
+        },
+      ],
+      cta: { label: 'Register →', href: params.inviteUrl },
+    });
+  }
+
   async sendAdminProvisionedEmail(params: {
     to: string;
     role: string;
@@ -633,9 +742,9 @@ export class NotificationsService {
   }) {
     const typeLabel = accountTypeLabel(params.role);
     const login = this.loginCta();
-    const subject = 'CLOX admin access provisioned';
+    const subject = 'CLOX admin access approved';
     const text = [
-      `You have been provisioned as ${typeLabel} on CLOX.`,
+      `Your ${typeLabel} account on CLOX has been approved.`,
       params.name ? `Name: ${params.name}` : undefined,
       `Email: ${params.to}`,
       `Account type: ${typeLabel}`,
@@ -650,8 +759,8 @@ export class NotificationsService {
       subject,
       text,
       eyebrow: 'Admin access',
-      title: 'Your CLOX admin account is ready',
-      intro: `You have been provisioned as ${typeLabel}. Sign in with a one-time code using this email.`,
+      title: 'Your CLOX admin account is active',
+      intro: `Super Admin approved your ${typeLabel} KYB. You now have scoped ops access.`,
       details: [
         { label: 'Account type', value: typeLabel },
         ...(params.name ? [{ label: 'Name', value: params.name }] : []),
@@ -663,11 +772,351 @@ export class NotificationsService {
           body: 'Open the app and request a one-time code for this email.',
         },
         {
-          title: 'Complete setup',
-          body: 'Use your scoped access (state / territory) according to your role.',
+          title: 'Use your scope',
+          body: 'Access is limited to your assigned state / territory.',
         },
       ],
       cta: login,
     });
+  }
+
+  async sendAdminPartnerInfoRequestedEmail(params: {
+    to: string;
+    role: string;
+    name?: string | null;
+    companyName: string;
+    decisionNote?: string | null;
+  }) {
+    const typeLabel = accountTypeLabel(params.role);
+    const continueHref = this.signInContinueUrl(params.to, '/partner/onboarding');
+    const note = params.decisionNote?.trim();
+    const subject = 'CLOX — more information needed for your admin partner KYB';
+    const text = [
+      `Super Admin needs more information for your ${typeLabel} KYB.`,
+      `Company: ${params.companyName}`,
+      note ? `Ops note: ${note}` : undefined,
+      '',
+      `Continue onboarding: ${continueHref}`,
+    ]
+      .filter((line) => line !== undefined)
+      .join('\n');
+
+    return this.sendBranded({
+      to: params.to,
+      subject,
+      text,
+      eyebrow: 'Admin partner KYB',
+      title: 'Additional information required',
+      intro: note
+        ? 'Super Admin reviewed your partner KYB and needs additional information before approval. See the note below, update documents, and re-submit.'
+        : 'Super Admin reviewed your partner KYB and needs additional information. Sign in, update your documents, and re-submit for review.',
+      details: [
+        { label: 'Account type', value: typeLabel },
+        { label: 'Company', value: params.companyName },
+        ...(params.name ? [{ label: 'Name', value: params.name }] : []),
+        ...(note ? [{ label: 'Ops note', value: note }] : []),
+      ],
+      nextSteps: [
+        {
+          title: 'Sign in',
+          body: 'Open partner onboarding with a one-time code for this email.',
+        },
+        {
+          title: 'Update and re-submit',
+          body: 'Upload any requested documents, then submit KYB again for Super review.',
+        },
+      ],
+      cta: { label: 'Continue onboarding →', href: continueHref },
+    });
+  }
+
+  /** Trip exception opened — notify carrier (action) + sender (delay) + driver confirm. */
+  async notifyTripExceptionOpened(params: {
+    driverEmail: string;
+    carrierEmails: string[];
+    senderEmail: string | null;
+    opsEmail?: string | null;
+    jobTitle: string;
+    jobId: string;
+    kind: string;
+    phase: string;
+    reasonCode?: string | null;
+    note: string;
+    exceptionId: string;
+  }) {
+    const details: EmailDetailRow[] = [
+      { label: 'Job', value: params.jobTitle || params.jobId.slice(0, 8) },
+      { label: 'Kind', value: params.kind },
+      { label: 'Phase', value: params.phase },
+      ...(params.reasonCode
+        ? [{ label: 'Reason', value: params.reasonCode }]
+        : []),
+      { label: 'Note', value: params.note },
+      { label: 'Exception ID', value: params.exceptionId },
+    ];
+
+    const driverResult = await this.sendBranded({
+      to: params.driverEmail,
+      subject: 'CLOX — issue report received',
+      text: `We received your trip issue report (${params.kind}). Your carrier has been notified.`,
+      eyebrow: 'Trip exception',
+      title: 'Issue report received',
+      intro:
+        'Your report was logged. Your transport company has been notified and must act. You will get another message when a replacement is assigned or the issue is resolved.',
+      details,
+    });
+
+    const carrierCta = {
+      label: 'Open exceptions →',
+      href: `${this.adminAppUrl()}/carrier/exceptions/${params.exceptionId}`,
+    };
+    const carrierResults = await Promise.all(
+      [...new Set(params.carrierEmails.filter(Boolean))].map((to) =>
+        this.sendBranded({
+          to,
+          subject: 'CLOX — action required: trip exception',
+          text: `Action required: ${params.kind} on job ${params.jobTitle || params.jobId}. Open the exceptions inbox.`,
+          eyebrow: 'Action required',
+          title: 'Trip exception — act now',
+          intro:
+            'A driver reported an issue on an active assignment. Open the exceptions inbox to reassign, continue, or escalate. This is not a silent event.',
+          details,
+          nextSteps: [
+            {
+              title: 'Review the exception',
+              body: 'Confirm GPS/note and whether this is pre-trip or mid-trip.',
+            },
+            {
+              title: 'Reassign or continue',
+              body: 'Use intra-fleet reassign when possible. Escalate explicitly if you cannot rescue.',
+            },
+          ],
+          cta: carrierCta,
+        }),
+      ),
+    );
+
+    let senderResult: { skipped: boolean } | null = null;
+    if (params.senderEmail) {
+      senderResult = await this.sendBranded({
+        to: params.senderEmail,
+        subject: 'CLOX — update on your shipment',
+        text: `There is an issue on job ${params.jobTitle || params.jobId} (${params.kind}). Your carrier is handling it.`,
+        eyebrow: 'Shipment update',
+        title: 'Issue on your shipment',
+        intro:
+          'The assigned driver reported an issue. Your carrier has been notified and is arranging a response. You will be updated when a replacement is confirmed or the plan changes.',
+        details: details.filter((d) => d.label !== 'Exception ID'),
+      });
+    }
+
+    let opsResult: { skipped: boolean } | null = null;
+    const opsTo = params.opsEmail ?? this.config.get('NOTIFY_EMAIL', { infer: true });
+    if (opsTo && !params.carrierEmails.includes(opsTo)) {
+      opsResult = await this.sendBranded({
+        to: opsTo,
+        subject: `CLOX Ops — trip exception ${params.kind}`,
+        text: `Trip exception ${params.exceptionId} opened (${params.phase}).`,
+        eyebrow: 'Ops digest',
+        title: 'Trip exception opened',
+        intro: 'A trip exception was opened. Carrier action is required.',
+        details,
+      });
+    }
+
+    return {
+      driver: driverResult,
+      carrier: carrierResults,
+      sender: senderResult,
+      ops: opsResult,
+    };
+  }
+
+  async notifyTripExceptionContinued(params: {
+    driverEmail: string | null;
+    carrierEmails: string[];
+    senderEmail: string | null;
+    jobTitle: string;
+    jobId: string;
+    note: string;
+    etaNote: string | null;
+    exceptionId: string;
+  }) {
+    const details: EmailDetailRow[] = [
+      { label: 'Job', value: params.jobTitle || params.jobId.slice(0, 8) },
+      { label: 'Note', value: params.note },
+      ...(params.etaNote ? [{ label: 'ETA update', value: params.etaNote }] : []),
+      { label: 'Exception ID', value: params.exceptionId },
+    ];
+    const targets = new Set(
+      [params.driverEmail, ...params.carrierEmails, params.senderEmail].filter(
+        (e): e is string => Boolean(e),
+      ),
+    );
+    const results = [];
+    for (const to of targets) {
+      results.push(
+        await this.sendBranded({
+          to,
+          subject: 'CLOX — trip continuing after issue',
+          text: `Job ${params.jobTitle || params.jobId} will continue. ${params.note}`,
+          eyebrow: 'Trip update',
+          title: 'Repair & continue',
+          intro:
+            'The carrier chose to continue this trip after the reported issue. Check the latest ETA and status in the app.',
+          details,
+        }),
+      );
+    }
+    return results;
+  }
+
+  async notifyTripExceptionEscalated(params: {
+    driverEmail: string | null;
+    carrierEmails: string[];
+    senderEmail: string | null;
+    opsEmail?: string | null;
+    jobTitle: string;
+    jobId: string;
+    kind: string;
+    phase: string;
+    note: string;
+    automatic: boolean;
+    exceptionId: string;
+  }) {
+    const details: EmailDetailRow[] = [
+      { label: 'Job', value: params.jobTitle || params.jobId.slice(0, 8) },
+      { label: 'Kind', value: params.kind },
+      { label: 'Phase', value: params.phase },
+      { label: 'Escalation', value: params.automatic ? 'Automatic (SLA)' : 'Carrier requested' },
+      { label: 'Note', value: params.note },
+      { label: 'Exception ID', value: params.exceptionId },
+    ];
+
+    const opsTo = params.opsEmail ?? this.config.get('NOTIFY_EMAIL', { infer: true });
+    if (opsTo) {
+      await this.sendBranded({
+        to: opsTo,
+        subject: 'CLOX Ops — trip exception escalated (action)',
+        text: `Escalated exception ${params.exceptionId} on job ${params.jobTitle || params.jobId}.`,
+        eyebrow: 'Ops action required',
+        title: 'Exception escalated',
+        intro: params.automatic
+          ? 'A pre-trip exception was not handled within the SLA and was auto-escalated. Review the Ops exceptions queue.'
+          : 'A carrier escalated a trip exception to Ops. Review the Ops exceptions queue.',
+        details,
+        cta: {
+          label: 'Open Ops exceptions →',
+          href: `${this.adminAppUrl()}/ops/exceptions`,
+        },
+      });
+    }
+
+    const others = new Set(
+      [params.driverEmail, ...params.carrierEmails, params.senderEmail].filter(
+        (e): e is string => Boolean(e) && e !== opsTo,
+      ),
+    );
+    for (const to of others) {
+      await this.sendBranded({
+        to,
+        subject: 'CLOX — trip exception escalated',
+        text: `Exception on job ${params.jobTitle || params.jobId} was escalated to Ops.`,
+        eyebrow: 'Shipment update',
+        title: 'Exception escalated',
+        intro:
+          'This trip exception was escalated to CLOX Ops. You will receive another update when it is resolved.',
+        details: details.filter((d) => d.label !== 'Exception ID'),
+      });
+    }
+    return { opsNotified: Boolean(opsTo) };
+  }
+
+  async notifyTripExceptionReleased(params: {
+    driverEmail: string | null;
+    carrierEmails: string[];
+    senderEmail: string | null;
+    opsEmail?: string | null;
+    jobTitle: string;
+    jobId: string;
+    note: string;
+    exceptionId: string;
+    phase: string;
+  }) {
+    const details: EmailDetailRow[] = [
+      { label: 'Job', value: params.jobTitle || params.jobId.slice(0, 8) },
+      { label: 'Phase', value: params.phase },
+      { label: 'Note', value: params.note },
+      { label: 'Exception ID', value: params.exceptionId },
+    ];
+    const opsTo = params.opsEmail ?? this.config.get('NOTIFY_EMAIL', { infer: true });
+    const targets = new Set(
+      [params.driverEmail, ...params.carrierEmails, params.senderEmail, opsTo].filter(
+        (e): e is string => Boolean(e),
+      ),
+    );
+    const results = [];
+    for (const to of targets) {
+      results.push(
+        await this.sendBranded({
+          to,
+          subject: 'CLOX — trip released / cancelled (explicit)',
+          text: `Job ${params.jobTitle || params.jobId} was explicitly released from the exception path (not a silent marketplace swap).`,
+          eyebrow: 'Explicit release',
+          title: 'Trip released from exception',
+          intro:
+            'The carrier explicitly released this trip (cancel / marketplace path). This is never silent. Stripe/marketplace re-list hooks are queued for M10.',
+          details,
+        }),
+      );
+    }
+    return results;
+  }
+
+  async notifyTripExceptionReassigned(params: {
+    driverEmail: string | null;
+    previousDriverEmail: string | null;
+    carrierEmails: string[];
+    senderEmail: string | null;
+    jobTitle: string;
+    jobId: string;
+    vehicleLabel: string;
+    driverName: string;
+    exceptionId: string;
+  }) {
+    const details: EmailDetailRow[] = [
+      { label: 'Job', value: params.jobTitle || params.jobId.slice(0, 8) },
+      { label: 'New vehicle', value: params.vehicleLabel },
+      { label: 'New driver', value: params.driverName },
+      { label: 'Exception ID', value: params.exceptionId },
+    ];
+    const targets = new Set(
+      [
+        params.driverEmail,
+        params.previousDriverEmail,
+        ...params.carrierEmails,
+        params.senderEmail,
+      ].filter((e): e is string => Boolean(e)),
+    );
+    const results = [];
+    for (const to of targets) {
+      results.push(
+        await this.sendBranded({
+          to,
+          subject: 'CLOX — crew reassigned for your job',
+          text: `Job ${params.jobTitle || params.jobId} reassigned to ${params.driverName} / ${params.vehicleLabel}.`,
+          eyebrow: 'Trip update',
+          title: 'Crew reassigned',
+          intro:
+            'The carrier assigned a replacement vehicle/driver for this job. Check the app for the latest trip status and safety gates.',
+          details,
+          cta: {
+            label: 'Open CLOX →',
+            href: this.adminAppUrl(),
+          },
+        }),
+      );
+    }
+    return results;
   }
 }

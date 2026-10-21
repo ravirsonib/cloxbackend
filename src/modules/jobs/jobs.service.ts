@@ -10,6 +10,7 @@ import {
   JobPricingModel,
   JobStatus,
   ProposalStatus,
+  TripExceptionStatus,
 } from '@prisma/client';
 import type { AuthenticatedPrincipal } from '../../common/guards/jwt-auth.guard';
 import {
@@ -273,6 +274,29 @@ export class JobsService {
       },
     });
     if (!job) throw new NotFoundException('Job not found');
+    const openException = await this.prisma.tripException.findFirst({
+      where: {
+        jobId: job.id,
+        status: {
+          in: [
+            TripExceptionStatus.OPEN,
+            TripExceptionStatus.AWAITING_CARRIER,
+            TripExceptionStatus.REASSIGN_IN_PROGRESS,
+            TripExceptionStatus.ESCALATED,
+          ],
+        },
+      },
+      orderBy: { openedAt: 'desc' },
+      select: {
+        id: true,
+        kind: true,
+        phase: true,
+        status: true,
+        note: true,
+        openedAt: true,
+        escalatedAt: true,
+      },
+    });
     const mapped = this.mapJob(job);
     return {
       ...mapped,
@@ -290,6 +314,17 @@ export class JobsService {
             status: job.paymentEvents[0].status,
             amountIncGstCents: job.paymentEvents[0].amountIncGstCents,
             stripePaymentIntentId: job.paymentEvents[0].stripePaymentIntentId,
+          }
+        : null,
+      openException: openException
+        ? {
+            id: openException.id,
+            kind: openException.kind,
+            phase: openException.phase,
+            status: openException.status,
+            note: openException.note,
+            openedAt: openException.openedAt,
+            escalatedAt: openException.escalatedAt,
           }
         : null,
     };

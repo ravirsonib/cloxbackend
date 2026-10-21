@@ -4,6 +4,7 @@ import {
 } from '@nestjs/common';
 import { ComplianceDocStatus } from '@prisma/client';
 import type { AuthenticatedPrincipal } from '../../common/guards/jwt-auth.guard';
+import { AttributionService } from '../../common/services/attribution.service';
 import { DocumentsService } from './documents.service';
 
 const sender: AuthenticatedPrincipal = {
@@ -43,11 +44,16 @@ describe('DocumentsService ACL leftovers batch 2', () => {
   };
 
   function makeService(prisma: Record<string, unknown>) {
+    const db = {
+      adminUser: { findUnique: jest.fn().mockResolvedValue(null) },
+      ...prisma,
+    };
     return new DocumentsService(
-      prisma as never,
+      db as never,
       config as never,
       audit as never,
       scope as never,
+      new AttributionService(db as never),
     );
   }
 
@@ -77,17 +83,17 @@ describe('DocumentsService ACL leftovers batch 2', () => {
     ).rejects.toThrow('Not a member of this company');
   });
 
-  it('LOCAL_BDE blocked when company has no homeRegionId and no linked job', async () => {
+  it('LOCAL_BDE blocked when company is outside book of business', async () => {
     const prisma = {
       isConnected: () => true,
       company: {
         findUnique: jest.fn().mockResolvedValue({
           id: 'co-1',
           homeRegion: { code: 'VIC' },
-          homeRegionId: null,
+          homeRegionId: 'reg-1',
+          referredByAdminUserId: 'other-local',
         }),
       },
-      job: { findFirst: jest.fn().mockResolvedValue(null) },
     };
     await expect(
       makeService(prisma).createUploadIntent(localBde, {
@@ -96,7 +102,7 @@ describe('DocumentsService ACL leftovers batch 2', () => {
         mimeType: 'application/pdf',
         sizeBytes: 100,
       } as never),
-    ).rejects.toThrow('Company has no territory assignment — Super/State only');
+    ).rejects.toThrow('Outside your book of business');
   });
 
   it('driver putContent requires driver profile', async () => {

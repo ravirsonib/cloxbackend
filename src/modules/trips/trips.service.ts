@@ -401,7 +401,27 @@ export class TripsService {
     this.ensureDatabase();
     const user = await this.requireDriver(principal);
     const trip = await this.loadTripForDriver(user.driver!.id, tripId);
-    return this.mapTrip(trip);
+    const mapped = this.mapTrip(trip);
+    const openException = await this.prisma.tripException.findFirst({
+      where: {
+        tripId: trip.id,
+        status: {
+          in: ['OPEN', 'AWAITING_CARRIER', 'REASSIGN_IN_PROGRESS', 'ESCALATED'],
+        },
+      },
+      orderBy: { openedAt: 'desc' },
+      select: {
+        id: true,
+        kind: true,
+        phase: true,
+        status: true,
+        reasonCode: true,
+        note: true,
+        openedAt: true,
+        resolvedAt: true,
+      },
+    });
+    return { ...mapped, openException };
   }
 
   async safetyCheck(

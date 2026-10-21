@@ -1,6 +1,7 @@
 import { ForbiddenException, NotFoundException } from '@nestjs/common';
 import { CompanyType, ComplianceCaseStatus } from '@prisma/client';
 import type { AuthenticatedPrincipal } from '../../common/guards/jwt-auth.guard';
+import { AttributionService } from '../../common/services/attribution.service';
 import { AdminRole } from '../../shared/types';
 import { ComplianceService } from './compliance.service';
 
@@ -22,29 +23,30 @@ const stateMaster: AuthenticatedPrincipal = {
   territoryCodes: [],
 };
 
-describe('ComplianceService getCase territory leftovers', () => {
+describe('ComplianceService getCase book-of-business leftovers', () => {
   const audit = { recordPlatform: jest.fn() };
   const abr = { lookupAbn: jest.fn().mockResolvedValue(null) };
 
-  function makeService(
-    prisma: Record<string, unknown>,
-    scopeOverrides: Record<string, unknown> = {},
-  ) {
+  function makeService(prisma: Record<string, unknown>) {
     const scope = {
       assertAdmin: jest.fn(),
       assertRegionAccess: jest.fn(),
       assertTerritoryAccess: jest.fn(),
       allowedRegionCodes: jest.fn().mockReturnValue(['VIC']),
       allowedTerritoryCodes: jest.fn().mockReturnValue(['MEL']),
-      ...scopeOverrides,
     };
+    const attribution = new AttributionService(prisma as never);
     return {
       service: new ComplianceService(
         prisma as never,
         audit as never,
         scope as never,
+        attribution,
         abr as never,
-        { sendComplianceApprovedEmail: jest.fn().mockResolvedValue({ skipped: true }), sendComplianceInfoRequestedEmail: jest.fn().mockResolvedValue({ skipped: true }) } as never,
+        {
+          sendComplianceApprovedEmail: jest.fn().mockResolvedValue({ skipped: true }),
+          sendComplianceInfoRequestedEmail: jest.fn().mockResolvedValue({ skipped: true }),
+        } as never,
       ),
       scope,
     };
@@ -61,6 +63,7 @@ describe('ComplianceService getCase territory leftovers', () => {
         abn: null,
         homeRegionId: 'reg-vic',
         homeRegion: { code: 'VIC' },
+        referredByAdminUserId: 'admin-bde',
       },
       region: { code: 'VIC' },
       documents: [],
@@ -96,66 +99,54 @@ describe('ComplianceService getCase territory leftovers', () => {
               abn: null,
               homeRegionId: null,
               homeRegion: null,
+              referredByAdminUserId: null,
             },
           }),
         ),
       },
     };
-    const { service } = makeService(prisma, {
-      allowedTerritoryCodes: jest.fn().mockReturnValue(null),
-    });
+    const { service } = makeService(prisma);
     await expect(service.getCase(stateMaster, 'case-1')).rejects.toMatchObject({
       message: 'Case has no region — Super only',
     });
   });
 
-  it('Local BDE allowed via home-region territory match', async () => {
+  it('Local BDE allowed when company is in their book', async () => {
     const prisma = {
       isConnected: () => true,
       complianceCase: {
         findUnique: jest.fn().mockResolvedValue(openCase()),
       },
-      job: { findFirst: jest.fn().mockResolvedValue(null) },
-      localTerritory: {
-        findFirst: jest.fn().mockResolvedValue({ code: 'MEL', enabled: true }),
-      },
     };
-    const { service, scope } = makeService(prisma);
+    const { service } = makeService(prisma);
     const result = await service.getCase(localBde, 'case-1');
     expect(result).toMatchObject({
       id: 'case-1',
       abrAssist: null,
     });
-    expect(scope.assertTerritoryAccess).toHaveBeenCalledWith(localBde, 'MEL');
   });
 
-  it('Local BDE forbidden outside territory', async () => {
+  it('Local BDE forbidden outside book of business', async () => {
     const prisma = {
       isConnected: () => true,
       complianceCase: {
-        findUnique: jest.fn().mockResolvedValue(openCase()),
+        findUnique: jest.fn().mockResolvedValue(
+          openCase({
+            company: {
+              id: 'co-1',
+              type: CompanyType.CARRIER,
+              abn: null,
+              homeRegionId: 'reg-vic',
+              homeRegion: { code: 'VIC' },
+              referredByAdminUserId: 'other-local',
+            },
+          }),
+        ),
       },
-      job: { findFirst: jest.fn().mockResolvedValue(null) },
-      localTerritory: { findFirst: jest.fn().mockResolvedValue(null) },
     };
     const { service } = makeService(prisma);
     await expect(service.getCase(localBde, 'case-1')).rejects.toBeInstanceOf(
       ForbiddenException,
     );
-  });
-
-  it('Local BDE with empty territory scope forbidden', async () => {
-    const prisma = {
-      isConnected: () => true,
-      complianceCase: {
-        findUnique: jest.fn().mockResolvedValue(openCase()),
-      },
-    };
-    const { service } = makeService(prisma, {
-      allowedTerritoryCodes: jest.fn().mockReturnValue([]),
-    });
-    await expect(service.getCase(localBde, 'case-1')).rejects.toMatchObject({
-      message: 'Local BDE has no territory scope',
-    });
   });
 });

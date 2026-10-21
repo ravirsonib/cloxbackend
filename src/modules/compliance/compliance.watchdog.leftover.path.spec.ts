@@ -14,6 +14,7 @@ describe('ComplianceService.runExpiryWatchdog leftover edges', () => {
       prisma as never,
       audit as never,
       {} as never,
+      { assertLocalOwnsCompany: jest.fn(), complianceCaseBookFilter: jest.fn().mockImplementation((p) => (p.role === 'LOCAL_BDE' ? { company: { referredByAdminUserId: p.id } } : null)) } as never,
       { lookupAbn: jest.fn() } as never,
       { sendComplianceApprovedEmail: jest.fn().mockResolvedValue({ skipped: true }), sendComplianceInfoRequestedEmail: jest.fn().mockResolvedValue({ skipped: true }) } as never,
     );

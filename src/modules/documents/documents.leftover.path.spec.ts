@@ -19,6 +19,7 @@ import {
 } from '@nestjs/common';
 import { ComplianceDocStatus } from '@prisma/client';
 import type { AuthenticatedPrincipal } from '../../common/guards/jwt-auth.guard';
+import { AttributionService } from '../../common/services/attribution.service';
 import { DocumentsService } from './documents.service';
 
 const superAdmin: AuthenticatedPrincipal = {
@@ -62,11 +63,16 @@ describe('DocumentsService leftover ACL / storage paths', () => {
   }
 
   function makeService(prisma: Record<string, unknown>) {
+    const db = {
+      adminUser: { findUnique: jest.fn().mockResolvedValue(null) },
+      ...prisma,
+    };
     return new DocumentsService(
-      prisma as never,
+      db as never,
       { get: configGet } as never,
       audit as never,
       scope as never,
+      new AttributionService(db as never),
     );
   }
 
@@ -168,8 +174,7 @@ describe('DocumentsService leftover ACL / storage paths', () => {
     });
   });
 
-  it('Local BDE denied when no territory scope', async () => {
-    scope.allowedTerritoryCodes.mockReturnValue([]);
+  it('Local BDE denied when company not in book (HQ / other Local)', async () => {
     const prisma = {
       isConnected: () => true,
       complianceDocument: {
@@ -185,6 +190,7 @@ describe('DocumentsService leftover ACL / storage paths', () => {
           id: 'co-1',
           homeRegionId: 'reg-1',
           homeRegion: { code: 'VIC' },
+          referredByAdminUserId: null,
         }),
       },
     };
@@ -192,10 +198,12 @@ describe('DocumentsService leftover ACL / storage paths', () => {
     await expect(service.getMetadata(localBde, 'doc-1')).rejects.toBeInstanceOf(
       ForbiddenException,
     );
+    await expect(service.getMetadata(localBde, 'doc-1')).rejects.toThrow(
+      'Outside your book of business',
+    );
   });
 
-  it('Local BDE allowed via linked job origin territory', async () => {
-    scope.allowedTerritoryCodes.mockReturnValue(['MEL']);
+  it('Local BDE allowed when company referredBy self', async () => {
     const prisma = {
       isConnected: () => true,
       complianceDocument: {
@@ -217,51 +225,8 @@ describe('DocumentsService leftover ACL / storage paths', () => {
           id: 'co-1',
           homeRegionId: 'reg-1',
           homeRegion: { code: 'VIC' },
+          referredByAdminUserId: 'admin-bde',
         }),
-      },
-      job: {
-        findFirst: jest.fn().mockResolvedValue({
-          id: 'job-1',
-          originTerritory: { code: 'MEL' },
-        }),
-      },
-      localTerritory: { findFirst: jest.fn() },
-    };
-    const service = makeService(prisma);
-    await expect(service.getMetadata(localBde, 'doc-1')).resolves.toMatchObject({
-      id: 'doc-1',
-    });
-    expect(scope.assertTerritoryAccess).toHaveBeenCalledWith(localBde, 'MEL');
-  });
-
-  it('Local BDE falls back to home-region territory match', async () => {
-    scope.allowedTerritoryCodes.mockReturnValue(['MEL']);
-    const prisma = {
-      isConnected: () => true,
-      complianceDocument: {
-        findUnique: jest.fn().mockResolvedValue({
-          id: 'doc-1',
-          companyId: 'co-1',
-          docType: 'PUBLIC_LIABILITY',
-          status: ComplianceDocStatus.UPLOADED,
-          mimeType: 'application/pdf',
-          sizeBytes: 10,
-          originalFilename: 'a.pdf',
-          contentHash: 'abc',
-          expiresAt: null,
-          createdAt: new Date(),
-        }),
-      },
-      company: {
-        findUnique: jest.fn().mockResolvedValue({
-          id: 'co-1',
-          homeRegionId: 'reg-1',
-          homeRegion: { code: 'VIC' },
-        }),
-      },
-      job: { findFirst: jest.fn().mockResolvedValue(null) },
-      localTerritory: {
-        findFirst: jest.fn().mockResolvedValue({ code: 'MEL', enabled: true }),
       },
     };
     const service = makeService(prisma);
@@ -270,8 +235,7 @@ describe('DocumentsService leftover ACL / storage paths', () => {
     });
   });
 
-  it('Local BDE forbidden when no job and no territory match', async () => {
-    scope.allowedTerritoryCodes.mockReturnValue(['MEL']);
+  it('Local BDE forbidden when company belongs to other Local', async () => {
     const prisma = {
       isConnected: () => true,
       complianceDocument: {
@@ -287,10 +251,9 @@ describe('DocumentsService leftover ACL / storage paths', () => {
           id: 'co-1',
           homeRegionId: 'reg-1',
           homeRegion: { code: 'VIC' },
+          referredByAdminUserId: 'other-local',
         }),
       },
-      job: { findFirst: jest.fn().mockResolvedValue(null) },
-      localTerritory: { findFirst: jest.fn().mockResolvedValue(null) },
     };
     const service = makeService(prisma);
     await expect(service.getMetadata(localBde, 'doc-1')).rejects.toBeInstanceOf(

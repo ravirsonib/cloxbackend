@@ -41,6 +41,7 @@ describe('CarrierService crumb branch leftovers', () => {
       } as never,
       drivers as never,
       { sendRegistrationConfirmation: jest.fn().mockResolvedValue({ skipped: true }) } as never,
+      { resolveInviteForRegister: jest.fn().mockResolvedValue({ referredByAdminUserId: null, inviteId: null, prospectId: null, homeRegionId: null }), markInviteAccepted: jest.fn() } as never,
     );
   }
 

@@ -19,6 +19,7 @@ import {
   SettlementRecipientType,
   SurchargeKind,
   SurchargeStatus,
+  TripStatus,
   type Prisma,
 } from '@prisma/client';
 import type { AuthenticatedPrincipal } from '../../common/guards/jwt-auth.guard';
@@ -1441,9 +1442,20 @@ export class PaymentsService {
             status: true,
             pricingModel: true,
             estimateIncGstCents: true,
+            minVehicleClass: true,
           },
         },
         proposal: { select: { amountIncGstCents: true, etaMinutes: true } },
+        vehicle: {
+          select: { id: true, registration: true, vehicleClass: true, status: true },
+        },
+        driver: {
+          select: {
+            id: true,
+            status: true,
+            user: { select: { email: true, name: true } },
+          },
+        },
         trip: {
           include: {
             surcharges: {
@@ -1457,17 +1469,29 @@ export class PaymentsService {
       take: 50,
     });
 
-    return rows.map((a) => ({
-      id: a.id,
-      status: a.status,
-      lockedAt: a.lockedAt,
-      paidAndConfirmed: a.status === AssignmentStatus.LOCKED,
-      job: a.job,
-      amountIncGstCents: a.proposal.amountIncGstCents,
-      etaMinutes: a.proposal.etaMinutes,
-      tripBlockedUntilPaid: a.status !== AssignmentStatus.LOCKED,
-      exceptions: a.trip?.surcharges ?? [],
-    }));
+    return rows.map((a) => {
+      const tripActive =
+        !!a.trip &&
+        a.trip.status !== TripStatus.COMPLETED &&
+        a.trip.status !== TripStatus.CANCELLED;
+      return {
+        id: a.id,
+        status: a.status,
+        lockedAt: a.lockedAt,
+        paidAndConfirmed: a.status === AssignmentStatus.LOCKED,
+        job: a.job,
+        vehicle: a.vehicle,
+        driver: a.driver,
+        trip: a.trip
+          ? { id: a.trip.id, status: a.trip.status }
+          : null,
+        amountIncGstCents: a.proposal.amountIncGstCents,
+        etaMinutes: a.proposal.etaMinutes,
+        tripBlockedUntilPaid: a.status !== AssignmentStatus.LOCKED,
+        canReassign: a.status === AssignmentStatus.LOCKED && tripActive,
+        exceptions: a.trip?.surcharges ?? [],
+      };
+    });
   }
 
   async refundStub(principal: AuthenticatedPrincipal, jobId: string) {

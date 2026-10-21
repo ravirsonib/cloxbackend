@@ -7,6 +7,7 @@ jest.mock('fs/promises', () => ({
 import { createHash } from 'crypto';
 import { ComplianceDocStatus } from '@prisma/client';
 import type { AuthenticatedPrincipal } from '../../common/guards/jwt-auth.guard';
+import { AttributionService } from '../../common/services/attribution.service';
 import { DocumentsService } from './documents.service';
 
 const superAdmin: AuthenticatedPrincipal = {
@@ -51,11 +52,16 @@ describe('DocumentsService crumb branch leftovers', () => {
   }
 
   function makeService(prisma: Record<string, unknown>) {
+    const db = {
+      adminUser: { findUnique: jest.fn().mockResolvedValue(null) },
+      ...prisma,
+    };
     return new DocumentsService(
-      prisma as never,
+      db as never,
       { get: configGet } as never,
       audit as never,
       scope as never,
+      new AttributionService(db as never),
     );
   }
 
@@ -64,7 +70,7 @@ describe('DocumentsService crumb branch leftovers', () => {
     scope.allowedTerritoryCodes.mockReturnValue(null);
   });
 
-  it('LOCAL_BDE with null territory scope returns early', async () => {
+  it('LOCAL_BDE allowed for referred company document intent', async () => {
     const prisma = {
       isConnected: () => true,
       company: {
@@ -72,6 +78,7 @@ describe('DocumentsService crumb branch leftovers', () => {
           id: 'co-c',
           homeRegion: { code: 'VIC' },
           homeRegionId: 'reg-vic',
+          referredByAdminUserId: 'admin-bde',
         }),
       },
       complianceDocument: {
@@ -84,7 +91,6 @@ describe('DocumentsService crumb branch leftovers', () => {
         }),
       },
     };
-    scope.allowedTerritoryCodes.mockReturnValue(null);
     await makeService(prisma).createUploadIntent(localBde, {
       companyId: 'co-c',
       docType: 'PUBLIC_LIABILITY',

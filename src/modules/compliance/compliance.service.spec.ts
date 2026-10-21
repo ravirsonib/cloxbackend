@@ -8,6 +8,20 @@ describe('ComplianceService gates', () => {
   it('denies Local BDE approve via assertCanDecide path', async () => {
     const prisma = {
       isConnected: () => true,
+      complianceCase: {
+        findUnique: jest.fn().mockResolvedValue({
+          id: '00000000-0000-4000-8000-000000000099',
+          status: 'OPEN',
+          company: {
+            id: 'co-1',
+            homeRegionId: 'reg-1',
+            homeRegion: { code: 'VIC' },
+            referredByAdminUserId: 'local-1',
+          },
+          region: { code: 'VIC' },
+          documents: [],
+        }),
+      },
     };
     const audit = { recordPlatform: jest.fn() };
     const scope = {
@@ -21,8 +35,15 @@ describe('ComplianceService gates', () => {
       prisma as never,
       audit as never,
       scope as never,
+      {
+        assertLocalOwnsCompany: jest.fn(),
+        complianceCaseBookFilter: jest.fn().mockReturnValue(null),
+      } as never,
       abr,
-      { sendComplianceApprovedEmail: jest.fn().mockResolvedValue({ skipped: true }), sendComplianceInfoRequestedEmail: jest.fn().mockResolvedValue({ skipped: true }) } as never,
+      {
+        sendComplianceApprovedEmail: jest.fn().mockResolvedValue({ skipped: true }),
+        sendComplianceInfoRequestedEmail: jest.fn().mockResolvedValue({ skipped: true }),
+      } as never,
     );
 
     const local: AuthenticatedPrincipal = {

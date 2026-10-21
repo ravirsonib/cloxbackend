@@ -106,7 +106,16 @@ export class AuthService {
           },
         },
       });
-      if (admin?.active) {
+      const adminJwtOk =
+        admin &&
+        admin.status !== 'SUSPENDED' &&
+        admin.status !== 'REJECTED' &&
+        (admin.active ||
+          admin.status === 'ACTIVE' ||
+          admin.status === 'INVITED' ||
+          admin.status === 'PENDING_DOCS' ||
+          admin.status === 'PENDING_REVIEW');
+      if (adminJwtOk && admin) {
         return {
           kind: 'admin',
           id: admin.id,

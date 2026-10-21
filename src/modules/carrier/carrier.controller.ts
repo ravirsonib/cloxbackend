@@ -1,4 +1,14 @@
-import { Body, Controller, Get, Post, Put, UseGuards } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Delete,
+  Get,
+  Param,
+  ParseUUIDPipe,
+  Post,
+  Put,
+  UseGuards,
+} from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { Throttle, ThrottlerGuard } from '@nestjs/throttler';
 import {
@@ -10,7 +20,10 @@ import {
   carrierProfileSchema,
   carrierRegisterSchema,
   carrierSubmitVerificationSchema,
+  assignmentReassignSchema,
   carrierVehicleSchema,
+  fleetDisableReasonSchema,
+  type AssignmentReassignInput,
   type ProposalSubmitInput,
   type CarrierCapabilitiesInput,
   type CarrierDriverInviteInput,
@@ -19,6 +32,7 @@ import {
   type CarrierRegisterInput,
   type CarrierSubmitVerificationInput,
   type CarrierVehicleInput,
+  type FleetDisableReasonInput,
 } from '../../shared/types';
 import { CurrentPrincipal } from '../../common/decorators/current-admin.decorator';
 import { Roles } from '../../common/decorators/roles.decorator';
@@ -83,16 +97,86 @@ export class CarrierController {
     return this.carrierService.confirmConnect(principal);
   }
 
+  @Get('vehicles')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(AppRole.TRANSPORT_COMPANY)
+  @ApiOperation({ summary: 'List company fleet vehicles' })
+  listVehicles(@CurrentPrincipal() principal: AuthenticatedPrincipal) {
+    return this.carrierService.listVehicles(principal);
+  }
+
   @Post('vehicles')
   @ApiBearerAuth()
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(AppRole.TRANSPORT_COMPANY)
-  @ApiOperation({ summary: 'Add fleet vehicle' })
+  @ApiOperation({ summary: 'Add fleet vehicle (onboarding seed or post bid-eligible)' })
   addVehicle(
     @CurrentPrincipal() principal: AuthenticatedPrincipal,
     @Body(new ZodValidationPipe(carrierVehicleSchema)) body: CarrierVehicleInput,
   ) {
     return this.carrierService.addVehicle(principal, body);
+  }
+
+  @Post('vehicles/:id/disable')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(AppRole.TRANSPORT_COMPANY)
+  @ApiOperation({ summary: 'Disable (suspend) a vehicle with reason' })
+  disableVehicle(
+    @CurrentPrincipal() principal: AuthenticatedPrincipal,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body(new ZodValidationPipe(fleetDisableReasonSchema)) body: FleetDisableReasonInput,
+  ) {
+    return this.carrierService.disableVehicle(principal, id, body);
+  }
+
+  @Post('vehicles/:id/retire')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(AppRole.TRANSPORT_COMPANY)
+  @ApiOperation({ summary: 'Retire a vehicle with reason' })
+  retireVehicle(
+    @CurrentPrincipal() principal: AuthenticatedPrincipal,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body(new ZodValidationPipe(fleetDisableReasonSchema)) body: FleetDisableReasonInput,
+  ) {
+    return this.carrierService.retireVehicle(principal, id, body);
+  }
+
+  @Post('vehicles/:id/reactivate')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(AppRole.TRANSPORT_COMPANY)
+  @ApiOperation({ summary: 'Reactivate a disabled or retired vehicle' })
+  reactivateVehicle(
+    @CurrentPrincipal() principal: AuthenticatedPrincipal,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.carrierService.reactivateVehicle(principal, id);
+  }
+
+  @Delete('vehicles/:id')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(AppRole.TRANSPORT_COMPANY)
+  @ApiOperation({
+    summary: 'Permanently delete a never-assigned vehicle (unused fleet entry)',
+  })
+  deleteVehicle(
+    @CurrentPrincipal() principal: AuthenticatedPrincipal,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.carrierService.deleteVehicle(principal, id);
+  }
+
+  @Get('drivers')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(AppRole.TRANSPORT_COMPANY)
+  @ApiOperation({ summary: 'List company drivers' })
+  listDrivers(@CurrentPrincipal() principal: AuthenticatedPrincipal) {
+    return this.carrierService.listDrivers(principal);
   }
 
   @Post('drivers/invite')
@@ -105,6 +189,45 @@ export class CarrierController {
     @Body(new ZodValidationPipe(carrierDriverInviteSchema)) body: CarrierDriverInviteInput,
   ) {
     return this.carrierService.inviteDriver(principal, body);
+  }
+
+  @Post('drivers/:id/disable')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(AppRole.TRANSPORT_COMPANY)
+  @ApiOperation({ summary: 'Disable (suspend) a driver with reason' })
+  disableDriver(
+    @CurrentPrincipal() principal: AuthenticatedPrincipal,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body(new ZodValidationPipe(fleetDisableReasonSchema)) body: FleetDisableReasonInput,
+  ) {
+    return this.carrierService.disableDriver(principal, id, body);
+  }
+
+  @Post('drivers/:id/reactivate')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(AppRole.TRANSPORT_COMPANY)
+  @ApiOperation({ summary: 'Reactivate a disabled driver' })
+  reactivateDriver(
+    @CurrentPrincipal() principal: AuthenticatedPrincipal,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.carrierService.reactivateDriver(principal, id);
+  }
+
+  @Delete('drivers/:id')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(AppRole.TRANSPORT_COMPANY)
+  @ApiOperation({
+    summary: 'Permanently delete a never-assigned driver (cancel invite / unused profile)',
+  })
+  deleteDriver(
+    @CurrentPrincipal() principal: AuthenticatedPrincipal,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.carrierService.deleteDriver(principal, id);
   }
 
   @Post('drivers/invite/resend')
@@ -163,5 +286,18 @@ export class CarrierController {
     @Body(new ZodValidationPipe(proposalSubmitSchema)) body: ProposalSubmitInput,
   ) {
     return this.matchingService.submitProposal(principal, body);
+  }
+
+  @Post('assignments/:id/reassign')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(AppRole.TRANSPORT_COMPANY)
+  @ApiOperation({ summary: 'Reassign vehicle/driver on locked assignment with active trip' })
+  reassignAssignment(
+    @CurrentPrincipal() principal: AuthenticatedPrincipal,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body(new ZodValidationPipe(assignmentReassignSchema)) body: AssignmentReassignInput,
+  ) {
+    return this.carrierService.reassignAssignment(principal, id, body);
   }
 }

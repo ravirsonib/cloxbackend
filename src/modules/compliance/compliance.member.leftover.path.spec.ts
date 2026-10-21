@@ -59,6 +59,7 @@ describe('ComplianceService member/decide leftovers', () => {
       prisma as never,
       audit as never,
       scope as never,
+      { assertLocalOwnsCompany: jest.fn(), complianceCaseBookFilter: jest.fn().mockImplementation((p) => (p.role === 'LOCAL_BDE' ? { company: { referredByAdminUserId: p.id } } : null)) } as never,
       abr as never,
       { sendComplianceApprovedEmail: jest.fn().mockResolvedValue({ skipped: true }), sendComplianceInfoRequestedEmail: jest.fn().mockResolvedValue({ skipped: true }) } as never,
     );
@@ -129,7 +130,7 @@ describe('ComplianceService member/decide leftovers', () => {
     ).rejects.toThrow('Not a member of this company');
   });
 
-  it('assertAdminTerritoryForCompany blocks LOCAL_BDE without home region', async () => {
+  it('assertAdminTerritoryForCompany blocks LOCAL_BDE outside book of business', async () => {
     const prisma = {
       isConnected: () => true,
       company: {
@@ -137,18 +138,41 @@ describe('ComplianceService member/decide leftovers', () => {
           id: 'co-1',
           type: CompanyType.SENDER,
           homeRegion: { code: 'VIC' },
-          homeRegionId: null,
+          homeRegionId: 'reg-1',
+          referredByAdminUserId: 'other-local',
         }),
       },
-      job: { findFirst: jest.fn().mockResolvedValue(null) },
     };
+    const attribution = {
+      assertLocalOwnsCompany: jest.fn().mockImplementation(() => {
+        throw new ForbiddenException('Outside your book of business');
+      }),
+      complianceCaseBookFilter: jest.fn().mockReturnValue(null),
+    };
+    const service = new ComplianceService(
+      prisma as never,
+      audit as never,
+      {
+        assertAdmin: jest.fn(),
+        assertRegionAccess: jest.fn(),
+        assertTerritoryAccess: jest.fn(),
+        allowedRegionCodes: jest.fn().mockReturnValue(['VIC']),
+        allowedTerritoryCodes: jest.fn().mockReturnValue(['MEL']),
+      } as never,
+      attribution as never,
+      abr as never,
+      {
+        sendComplianceApprovedEmail: jest.fn().mockResolvedValue({ skipped: true }),
+        sendComplianceInfoRequestedEmail: jest.fn().mockResolvedValue({ skipped: true }),
+      } as never,
+    );
     await expect(
-      makeService(prisma).submit(localBde, {
+      service.submit(localBde, {
         companyId: 'co-1',
         caseType: ComplianceCaseType.SENDER_KYB,
         documentIds: ['d1'],
       } as never),
-    ).rejects.toThrow('Company has no territory assignment — Super/State only');
+    ).rejects.toThrow('Outside your book of business');
   });
 
   it('assertCanDecide rejects LOCAL_BDE on approve', async () => {
@@ -158,7 +182,13 @@ describe('ComplianceService member/decide leftovers', () => {
         findUnique: jest.fn().mockResolvedValue({
           id: 'case-1',
           status: 'SUBMITTED',
-          company: { homeRegion: { code: 'VIC' }, homeRegionId: 'reg-1' },
+          company: {
+            homeRegion: { code: 'VIC' },
+            homeRegionId: 'reg-1',
+            referredByAdminUserId: 'admin-bde',
+          },
+          region: { code: 'VIC' },
+          documents: [],
         }),
       },
     };

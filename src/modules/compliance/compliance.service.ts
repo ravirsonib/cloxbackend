@@ -7,18 +7,21 @@ import {
   ServiceUnavailableException,
 } from '@nestjs/common';
 import {
+  AdminUserStatus,
   CompanyStatus,
   CompanyType,
   ComplianceCaseStatus,
   ComplianceCaseType,
   ComplianceDocStatus,
   ComplianceDocType,
+  LeadStatus,
   PlatformRole,
   UserStatus,
   VehicleStatus,
   type Prisma,
 } from '@prisma/client';
 import type { AuthenticatedPrincipal } from '../../common/guards/jwt-auth.guard';
+import { AttributionService } from '../../common/services/attribution.service';
 import { ScopeService } from '../../common/services/scope.service';
 import {
   AdminRole,
@@ -46,6 +49,7 @@ export class ComplianceService {
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
     private readonly scope: ScopeService,
+    private readonly attribution: AttributionService,
     private readonly abr: AbrService,
     private readonly notifications: NotificationsService,
   ) {}
@@ -81,47 +85,19 @@ export class ComplianceService {
     return company;
   }
 
-  /** Local BDE: job origin territory or home-region territory intersection. */
+  /**
+   * Local BDE: book-of-business isolation (referredBy = self).
+   * Territory geography alone is not enough when multiple Locals share a territory.
+   */
   private async assertAdminTerritoryForCompany(
     principal: AuthenticatedPrincipal,
-    company: { id: string; homeRegionId: string | null },
+    company: { id: string; homeRegionId: string | null; referredByAdminUserId?: string | null },
   ) {
     if (principal.role !== AdminRole.LOCAL_BDE) return;
-    const allowed = this.scope.allowedTerritoryCodes(principal);
-    if (allowed === null) return;
-    if (allowed.length < 1) {
-      throw new ForbiddenException('Local BDE has no territory scope');
-    }
-
-    const linkedJob = await this.prisma.job.findFirst({
-      where: {
-        OR: [
-          { senderCompanyId: company.id },
-          { assignment: { carrierCompanyId: company.id } },
-        ],
-        originTerritory: { code: { in: allowed } },
-      },
-      include: { originTerritory: true },
+    // Prisma always selects this scalar; missing on partial mocks → treat as HQ (null).
+    this.attribution.assertLocalOwnsCompany(principal, {
+      referredByAdminUserId: company.referredByAdminUserId ?? null,
     });
-    if (linkedJob?.originTerritory?.code) {
-      this.scope.assertTerritoryAccess(principal, linkedJob.originTerritory.code);
-      return;
-    }
-
-    if (!company.homeRegionId) {
-      throw new ForbiddenException('Company has no territory assignment — Super/State only');
-    }
-    const territory = await this.prisma.localTerritory.findFirst({
-      where: {
-        regionId: company.homeRegionId,
-        code: { in: allowed },
-        enabled: true,
-      },
-    });
-    if (!territory) {
-      throw new ForbiddenException('Outside admin scope (territory)');
-    }
-    this.scope.assertTerritoryAccess(principal, territory.code);
   }
 
   private assertCanDecide(principal: AuthenticatedPrincipal) {
@@ -134,6 +110,21 @@ export class ComplianceService {
       principal.role !== AdminRole.STATE_MASTER
     ) {
       throw new ForbiddenException('Insufficient role for compliance decision');
+    }
+  }
+
+  /** Admin partner KYB: Super Admin only (G0-4 — State must not approve peers). */
+  private assertCanDecidePartnerKyb(
+    principal: AuthenticatedPrincipal,
+    caseType: ComplianceCaseType,
+  ) {
+    this.assertCanDecide(principal);
+    if (caseType === ComplianceCaseType.ADMIN_PARTNER_KYB) {
+      if (principal.role !== AdminRole.SUPER_ADMIN) {
+        throw new ForbiddenException(
+          'Only Super Admin may decide ADMIN_PARTNER_KYB cases',
+        );
+      }
     }
   }
 
@@ -303,46 +294,10 @@ export class ComplianceService {
       where.region = { code: { in: allowedRegions } };
     }
 
-    // Local BDE: only cases whose company is linked to their territory
-    // (job originTerritory or home-region territory membership).
-    const allowedTerritories = this.scope.allowedTerritoryCodes(principal);
-    if (allowedTerritories !== null) {
-      if (allowedTerritories.length < 1) {
-        return {
-          success: true,
-          data: [],
-          meta: { page: query.page, limit: query.pageSize, total: 0, totalPages: 1 },
-        };
-      }
-      where.AND = [
-        {
-          OR: [
-            {
-              company: {
-                jobsAsSender: {
-                  some: { originTerritory: { code: { in: allowedTerritories } } },
-                },
-              },
-            },
-            {
-              company: {
-                proposals: {
-                  some: {
-                    job: { originTerritory: { code: { in: allowedTerritories } } },
-                  },
-                },
-              },
-            },
-            {
-              company: {
-                homeRegion: {
-                  territories: { some: { code: { in: allowedTerritories }, enabled: true } },
-                },
-              },
-            },
-          ],
-        },
-      ];
+    // Local BDE: only cases for companies in their referred book (not territory-wide).
+    const bookFilter = this.attribution.complianceCaseBookFilter(principal);
+    if (bookFilter) {
+      where.AND = [...(Array.isArray(where.AND) ? where.AND : where.AND ? [where.AND] : []), bookFilter];
     }
 
     const skip = (query.page - 1) * query.pageSize;
@@ -410,9 +365,13 @@ export class ComplianceService {
     input: ComplianceDecisionInput,
   ) {
     this.ensureDatabase();
-    this.assertCanDecide(principal);
     const complianceCase = await this.loadCaseForAdmin(principal, caseId);
+    this.assertCanDecidePartnerKyb(principal, complianceCase.caseType);
     this.assertCaseActionable(complianceCase.status);
+
+    if (complianceCase.caseType === ComplianceCaseType.ADMIN_PARTNER_KYB) {
+      return this.approveAdminPartnerKyb(principal, caseId, complianceCase, input);
+    }
 
     const nextCompanyStatus =
       complianceCase.company.type === CompanyType.SENDER
@@ -467,6 +426,97 @@ export class ComplianceService {
       id: caseId,
       status: ComplianceCaseStatus.APPROVED,
       companyStatus: nextCompanyStatus,
+    };
+  }
+
+  private async approveAdminPartnerKyb(
+    principal: AuthenticatedPrincipal,
+    caseId: string,
+    complianceCase: {
+      companyId: string;
+      caseType: ComplianceCaseType;
+      company: { email: string | null; legalName: string; type: CompanyType };
+    },
+    input: ComplianceDecisionInput,
+  ) {
+    const partner = await this.prisma.adminUser.findFirst({
+      where: { companyId: complianceCase.companyId },
+    });
+    if (!partner) {
+      throw new BadRequestException('Admin partner user not linked to this company');
+    }
+
+    await this.prisma.$transaction(async (tx) => {
+      await tx.complianceCase.update({
+        where: { id: caseId },
+        data: {
+          status: ComplianceCaseStatus.APPROVED,
+          decisionNote: input.note,
+          decidedAt: new Date(),
+          decidedByAdminId: principal.id,
+        },
+      });
+      await tx.complianceDocument.updateMany({
+        where: { caseId },
+        data: { status: ComplianceDocStatus.APPROVED, reviewedAt: new Date() },
+      });
+      await tx.company.update({
+        where: { id: complianceCase.companyId },
+        data: { status: CompanyStatus.ACTIVE },
+      });
+      await tx.adminUser.update({
+        where: { id: partner.id },
+        data: {
+          status: AdminUserStatus.ACTIVE,
+          active: true,
+        },
+      });
+      if (partner.leadId) {
+        await tx.lead.update({
+          where: { id: partner.leadId },
+          data: { status: LeadStatus.PROVISIONED },
+        });
+      }
+    });
+
+    await this.audit.recordPlatform({
+      action: AuditAction.COMPLIANCE_APPROVED,
+      actorAdminId: principal.id,
+      entityType: 'ComplianceCase',
+      entityId: caseId,
+      metadata: {
+        nextCompanyStatus: CompanyStatus.ACTIVE,
+        note: input.note ?? null,
+        caseType: ComplianceCaseType.ADMIN_PARTNER_KYB,
+      },
+    });
+    await this.audit.recordPlatform({
+      action: AuditAction.ADMIN_PARTNER_ACTIVATED,
+      actorAdminId: principal.id,
+      entityType: 'AdminUser',
+      entityId: partner.id,
+      metadata: { caseId, role: partner.role, email: partner.email },
+    });
+
+    void this.notifications
+      .sendAdminProvisionedEmail({
+        to: partner.email,
+        role: partner.role,
+        name: partner.name,
+      })
+      .catch((error: unknown) => {
+        this.logger.error(
+          `Failed to send admin partner activation email for case ${caseId}`,
+          error instanceof Error ? error.stack : String(error),
+        );
+      });
+
+    return {
+      id: caseId,
+      status: ComplianceCaseStatus.APPROVED,
+      companyStatus: CompanyStatus.ACTIVE,
+      adminUserId: partner.id,
+      adminStatus: AdminUserStatus.ACTIVE,
     };
   }
 
@@ -545,9 +595,16 @@ export class ComplianceService {
     input: ComplianceDecisionInput,
   ) {
     this.ensureDatabase();
-    this.assertCanDecide(principal);
     const complianceCase = await this.loadCaseForAdmin(principal, caseId);
+    this.assertCanDecidePartnerKyb(principal, complianceCase.caseType);
     this.assertCaseActionable(complianceCase.status);
+
+    const partner =
+      complianceCase.caseType === ComplianceCaseType.ADMIN_PARTNER_KYB
+        ? await this.prisma.adminUser.findFirst({
+            where: { companyId: complianceCase.companyId },
+          })
+        : null;
 
     await this.prisma.$transaction(async (tx) => {
       await tx.complianceCase.update({
@@ -571,6 +628,25 @@ export class ComplianceService {
         where: { id: complianceCase.companyId },
         data: { status: CompanyStatus.REJECTED },
       });
+      if (partner) {
+        await tx.adminUser.update({
+          where: { id: partner.id },
+          data: {
+            status: AdminUserStatus.REJECTED,
+            active: false,
+          },
+        });
+        await tx.authSession.updateMany({
+          where: { adminUserId: partner.id, revokedAt: null },
+          data: { revokedAt: new Date() },
+        });
+        if (partner.leadId) {
+          await tx.lead.update({
+            where: { id: partner.leadId },
+            data: { status: LeadStatus.REJECTED },
+          });
+        }
+      }
     });
 
     await this.audit.recordPlatform({
@@ -578,7 +654,11 @@ export class ComplianceService {
       actorAdminId: principal.id,
       entityType: 'ComplianceCase',
       entityId: caseId,
-      metadata: { note: input.note ?? null },
+      metadata: {
+        note: input.note ?? null,
+        caseType: complianceCase.caseType,
+        adminUserId: partner?.id ?? null,
+      },
     });
 
     return { id: caseId, status: ComplianceCaseStatus.REJECTED, companyStatus: CompanyStatus.REJECTED };
@@ -590,9 +670,16 @@ export class ComplianceService {
     input: ComplianceDecisionInput,
   ) {
     this.ensureDatabase();
-    this.assertCanDecide(principal);
     const complianceCase = await this.loadCaseForAdmin(principal, caseId);
+    this.assertCanDecidePartnerKyb(principal, complianceCase.caseType);
     this.assertCaseActionable(complianceCase.status);
+
+    const partner =
+      complianceCase.caseType === ComplianceCaseType.ADMIN_PARTNER_KYB
+        ? await this.prisma.adminUser.findFirst({
+            where: { companyId: complianceCase.companyId },
+          })
+        : null;
 
     const infoRequestedAt = new Date();
     await this.prisma.$transaction(async (tx) => {
@@ -608,6 +695,21 @@ export class ComplianceService {
         where: { id: complianceCase.companyId },
         data: { status: CompanyStatus.INFO_REQUESTED },
       });
+      if (partner) {
+        await tx.adminUser.update({
+          where: { id: partner.id },
+          data: {
+            status: AdminUserStatus.PENDING_DOCS,
+            active: false,
+          },
+        });
+        if (partner.leadId) {
+          await tx.lead.update({
+            where: { id: partner.leadId },
+            data: { status: LeadStatus.KYB_PENDING },
+          });
+        }
+      }
     });
 
     await this.audit.recordPlatform({
@@ -615,24 +717,41 @@ export class ComplianceService {
       actorAdminId: principal.id,
       entityType: 'ComplianceCase',
       entityId: caseId,
-      metadata: { note: input.note ?? null },
+      metadata: { note: input.note ?? null, caseType: complianceCase.caseType },
     });
 
-    void this.notifyCompanyDecision({
-      kind: 'info_requested',
-      companyId: complianceCase.companyId,
-      companyEmail: complianceCase.company.email,
-      companyName: complianceCase.company.legalName,
-      companyType: complianceCase.company.type,
-      companyStatus: CompanyStatus.INFO_REQUESTED,
-      caseType: complianceCase.caseType,
-      decisionNote: input.note,
-    }).catch((error: unknown) => {
-      this.logger.error(
-        `Failed to send compliance info-requested email for case ${caseId}`,
-        error instanceof Error ? error.stack : String(error),
-      );
-    });
+    if (partner) {
+      void this.notifications
+        .sendAdminPartnerInfoRequestedEmail({
+          to: partner.email,
+          role: partner.role,
+          name: partner.name,
+          companyName: complianceCase.company.legalName,
+          decisionNote: input.note,
+        })
+        .catch((error: unknown) => {
+          this.logger.error(
+            `Failed to send admin partner info-requested email for case ${caseId}`,
+            error instanceof Error ? error.stack : String(error),
+          );
+        });
+    } else {
+      void this.notifyCompanyDecision({
+        kind: 'info_requested',
+        companyId: complianceCase.companyId,
+        companyEmail: complianceCase.company.email,
+        companyName: complianceCase.company.legalName,
+        companyType: complianceCase.company.type,
+        companyStatus: CompanyStatus.INFO_REQUESTED,
+        caseType: complianceCase.caseType,
+        decisionNote: input.note,
+      }).catch((error: unknown) => {
+        this.logger.error(
+          `Failed to send compliance info-requested email for case ${caseId}`,
+          error instanceof Error ? error.stack : String(error),
+        );
+      });
+    }
 
     return {
       id: caseId,

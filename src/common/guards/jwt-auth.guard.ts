@@ -8,12 +8,21 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
+import { AdminUserStatus } from '@prisma/client';
 import type { Request } from 'express';
 import type { AppEnv } from '../../config/env.validation';
 import type { AppRole } from '../../shared/types';
 import { PrismaService } from '../../prisma/prisma.service';
 
 export type PrincipalKind = 'admin' | 'user';
+
+/** Admin statuses allowed to hold a JWT (onboarding or full ops). */
+export const ADMIN_JWT_ELIGIBLE_STATUSES: readonly AdminUserStatus[] = [
+  AdminUserStatus.INVITED,
+  AdminUserStatus.PENDING_DOCS,
+  AdminUserStatus.PENDING_REVIEW,
+  AdminUserStatus.ACTIVE,
+];
 
 export type AuthenticatedPrincipal = {
   id: string;
@@ -25,6 +34,10 @@ export type AuthenticatedPrincipal = {
   regionCodes: string[];
   /** Local territory codes for Local BDE. */
   territoryCodes: string[];
+  /** AdminUser.status — used to gate ops vs partner onboarding. */
+  adminStatus?: AdminUserStatus;
+  /** Synced with status === ACTIVE for legacy checks. */
+  active?: boolean;
 };
 
 /** @deprecated Prefer AuthenticatedPrincipal — kept for Phase 0 admin controllers. */
@@ -94,7 +107,12 @@ export class JwtAuthGuard implements CanActivate {
             },
           },
         });
-        if (!admin || !admin.active) {
+        const jwtEligible =
+          admin &&
+          (admin.active || ADMIN_JWT_ELIGIBLE_STATUSES.includes(admin.status)) &&
+          admin.status !== AdminUserStatus.SUSPENDED &&
+          admin.status !== AdminUserStatus.REJECTED;
+        if (!admin || !jwtEligible) {
           throw new UnauthorizedException('Account disabled');
         }
         request.user = {
@@ -109,6 +127,8 @@ export class JwtAuthGuard implements CanActivate {
           territoryCodes: admin.scopes
             .map((s) => s.localTerritory?.code)
             .filter((code): code is string => Boolean(code)),
+          adminStatus: admin.status,
+          active: admin.active,
         };
         return true;
       }

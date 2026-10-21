@@ -58,6 +58,7 @@ describe('CarrierService register / connect / vehicle paths', () => {
       config as never,
       drivers as never,
       { sendRegistrationConfirmation: jest.fn().mockResolvedValue({ skipped: true }) } as never,
+      { resolveInviteForRegister: jest.fn().mockResolvedValue({ referredByAdminUserId: null, inviteId: null, prospectId: null, homeRegionId: null }), markInviteAccepted: jest.fn() } as never,
     );
   }
 
@@ -168,7 +169,7 @@ describe('CarrierService register / connect / vehicle paths', () => {
     expect(result.goNoGo.connectReady).toBe(true);
   });
 
-  it('addVehicle rejects when company not draft/info-requested', async () => {
+  it('addVehicle rejects when company is suspended', async () => {
     const prisma = {
       isConnected: () => true,
       user: {
@@ -177,7 +178,7 @@ describe('CarrierService register / connect / vehicle paths', () => {
           email: 'carrier@yopmail.com',
           name: null,
           phone: null,
-          company: carrierCompany({ status: CompanyStatus.BID_ELIGIBLE }),
+          company: carrierCompany({ status: CompanyStatus.SUSPENDED }),
         }),
       },
     };

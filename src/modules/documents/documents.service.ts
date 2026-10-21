@@ -11,7 +11,7 @@ import {
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { ComplianceDocStatus } from '@prisma/client';
+import { AdminUserStatus, CompanyType, ComplianceDocStatus } from '@prisma/client';
 import type { AppEnv } from '../../config/env.validation';
 import type { AuthenticatedPrincipal } from '../../common/guards/jwt-auth.guard';
 import {
@@ -21,6 +21,7 @@ import {
   type ConfirmDocumentInput,
   type CreateUploadIntentInput,
 } from '../../shared/types';
+import { AttributionService } from '../../common/services/attribution.service';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { ScopeService } from '../../common/services/scope.service';
@@ -32,6 +33,19 @@ const ALLOWED_MIME = new Set([
   'image/webp',
 ]);
 
+const ADMIN_PARTNER_DOC_TYPES: readonly string[] = [
+  ComplianceDocType.ABN_EXTRACT,
+  ComplianceDocType.GOVERNMENT_ID,
+  ComplianceDocType.MASTER_ADMIN_AGREEMENT,
+  ComplianceDocType.OTHER,
+];
+
+const PARTNER_ONBOARDING_STATUSES: readonly AdminUserStatus[] = [
+  AdminUserStatus.INVITED,
+  AdminUserStatus.PENDING_DOCS,
+  AdminUserStatus.PENDING_REVIEW,
+];
+
 @Injectable()
 export class DocumentsService {
   private readonly logger = new Logger(DocumentsService.name);
@@ -41,6 +55,7 @@ export class DocumentsService {
     private readonly config: ConfigService<AppEnv, true>,
     private readonly audit: AuditService,
     private readonly scope: ScopeService,
+    private readonly attribution: AttributionService,
   ) {}
 
   private ensureDatabase() {
@@ -75,6 +90,29 @@ export class DocumentsService {
     }
 
     if (principal.kind === 'admin') {
+      const self = await this.prisma.adminUser.findUnique({
+        where: { id: principal.id },
+        select: { id: true, companyId: true, status: true, role: true },
+      });
+      if (
+        self?.companyId === companyId &&
+        company.type === CompanyType.ADMIN_PARTNER &&
+        (self.role === AdminRole.STATE_MASTER || self.role === AdminRole.LOCAL_BDE) &&
+        PARTNER_ONBOARDING_STATUSES.includes(self.status)
+      ) {
+        return company;
+      }
+
+      if (
+        principal.adminStatus &&
+        principal.adminStatus !== AdminUserStatus.ACTIVE &&
+        (principal.role === AdminRole.STATE_MASTER || principal.role === AdminRole.LOCAL_BDE)
+      ) {
+        throw new ForbiddenException(
+          'Ops document access requires Super Admin approval',
+        );
+      }
+
       const regionCode = company.homeRegion?.code;
       if (regionCode) {
         this.scope.assertRegionAccess(principal, regionCode);
@@ -92,61 +130,44 @@ export class DocumentsService {
     return company;
   }
 
-  /** Local BDE must intersect company via job origin territory or home-region territory. */
-  private async assertAdminTerritoryForCompany(
+  /**
+   * Local BDE: book-of-business isolation (referredBy = self).
+   * Same territory alone is not enough when multiple Locals share a territory.
+   */
+  private assertAdminTerritoryForCompany(
     principal: AuthenticatedPrincipal,
-    company: { id: string; homeRegionId: string | null },
+    company: { referredByAdminUserId?: string | null },
   ) {
     if (principal.role !== AdminRole.LOCAL_BDE) return;
-    const allowed = this.scope.allowedTerritoryCodes(principal);
-    if (allowed === null) return;
-    if (allowed.length < 1) {
-      throw new ForbiddenException('Local BDE has no territory scope');
-    }
-
-    const linkedJob = await this.prisma.job.findFirst({
-      where: {
-        OR: [
-          { senderCompanyId: company.id },
-          { assignment: { carrierCompanyId: company.id } },
-        ],
-        originTerritory: { code: { in: allowed } },
-      },
-      include: { originTerritory: true },
+    this.attribution.assertLocalOwnsCompany(principal, {
+      referredByAdminUserId: company.referredByAdminUserId ?? null,
     });
-    if (linkedJob?.originTerritory?.code) {
-      this.scope.assertTerritoryAccess(principal, linkedJob.originTerritory.code);
-      return;
-    }
-
-    if (!company.homeRegionId) {
-      throw new ForbiddenException('Company has no territory assignment — Super/State only');
-    }
-    const territory = await this.prisma.localTerritory.findFirst({
-      where: {
-        regionId: company.homeRegionId,
-        code: { in: allowed },
-        enabled: true,
-      },
-    });
-    if (!territory) {
-      throw new ForbiddenException('Outside admin scope (territory)');
-    }
-    this.scope.assertTerritoryAccess(principal, territory.code);
   }
 
   /** Drivers may only upload their own licence docs — not company KYB packs. */
   private assertUploadRoleAllowed(
     principal: AuthenticatedPrincipal,
     input: { docType: string },
+    companyType?: CompanyType,
   ) {
-    if (principal.kind === 'admin') return;
+    if (principal.kind === 'admin') {
+      if (companyType === CompanyType.ADMIN_PARTNER) {
+        if (!ADMIN_PARTNER_DOC_TYPES.includes(input.docType)) {
+          throw new ForbiddenException(
+            'Admin partners may only upload KYB pack documents (ABN, ID, Master Admin Agreement)',
+          );
+        }
+      }
+      return;
+    }
     if (principal.role === 'DRIVER') {
       const allowed: string[] = [
         ComplianceDocType.DRIVER_LICENCE,
         ComplianceDocType.SELFIE,
         ComplianceDocType.GOVERNMENT_ID,
         ComplianceDocType.NHVR,
+        /** Evidence for trip exceptions (breakdown photo). */
+        ComplianceDocType.OTHER,
       ];
       if (!allowed.includes(input.docType)) {
         throw new ForbiddenException('Drivers cannot upload company KYB documents');
@@ -178,11 +199,19 @@ export class DocumentsService {
     }
   }
 
-  private assertDocActionAllowed(
+  private async assertDocActionAllowed(
     principal: AuthenticatedPrincipal,
-    doc: { docType: string; driverId?: string | null },
+    doc: { docType: string; driverId?: string | null; companyId?: string | null },
   ) {
-    this.assertUploadRoleAllowed(principal, { docType: doc.docType });
+    let companyType: CompanyType | undefined;
+    if (doc.companyId) {
+      const company = await this.prisma.company.findUnique({
+        where: { id: doc.companyId },
+        select: { type: true },
+      });
+      companyType = company?.type;
+    }
+    this.assertUploadRoleAllowed(principal, { docType: doc.docType }, companyType);
   }
 
   private async resolveLinkedIds(
@@ -244,8 +273,8 @@ export class DocumentsService {
       throw new BadRequestException('File exceeds 10MB limit');
     }
 
-    await this.assertCompanyAccess(principal, input.companyId);
-    this.assertUploadRoleAllowed(principal, input);
+    const company = await this.assertCompanyAccess(principal, input.companyId);
+    this.assertUploadRoleAllowed(principal, input, company.type);
     const linked = await this.resolveLinkedIds(principal, input);
 
     const documentId = randomUUID();
@@ -320,7 +349,7 @@ export class DocumentsService {
     }
 
     await this.assertCompanyAccess(principal, doc.companyId);
-    this.assertDocActionAllowed(principal, doc);
+    await this.assertDocActionAllowed(principal, doc);
     await this.assertDriverOwnsDoc(principal, doc);
 
     if (doc.mimeType && file.mimetype !== doc.mimeType) {
@@ -378,7 +407,7 @@ export class DocumentsService {
       throw new NotFoundException('Document not found');
     }
     await this.assertCompanyAccess(principal, doc.companyId);
-    this.assertDocActionAllowed(principal, doc);
+    await this.assertDocActionAllowed(principal, doc);
     await this.assertDriverOwnsDoc(principal, doc);
 
     if (doc.status !== ComplianceDocStatus.UPLOADED) {
@@ -419,7 +448,7 @@ export class DocumentsService {
       throw new NotFoundException('Document not found');
     }
     await this.assertCompanyAccess(principal, doc.companyId);
-    this.assertDocActionAllowed(principal, doc);
+    await this.assertDocActionAllowed(principal, doc);
     await this.assertDriverOwnsDoc(principal, doc);
     return {
       id: doc.id,
@@ -451,7 +480,7 @@ export class DocumentsService {
       throw new NotFoundException('Document not found');
     }
     await this.assertCompanyAccess(principal, doc.companyId);
-    this.assertDocActionAllowed(principal, doc);
+    await this.assertDocActionAllowed(principal, doc);
     await this.assertDriverOwnsDoc(principal, doc);
 
     if (doc.status === ComplianceDocStatus.UPLOAD_PENDING) {

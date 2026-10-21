@@ -25,6 +25,7 @@ describe('DocumentsService confirm success + getMetadata', () => {
       { get: () => 'v1' } as never,
       audit as never,
       scope as never,
+    { assertLocalOwnsCompany: jest.fn() } as never,
     );
   }
 
@@ -191,6 +192,7 @@ describe('DocumentsService confirm success + getMetadata', () => {
       { get: (key: string) => (key === 'STORAGE_LOCAL_DIR' ? root : 'v1') } as never,
       audit as never,
       scope as never,
+    { assertLocalOwnsCompany: jest.fn() } as never,
     );
     try {
       const file = await service.getContent(carrier, 'doc-1');

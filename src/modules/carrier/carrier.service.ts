@@ -9,6 +9,7 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import {
+  AssignmentStatus,
   CompanyStatus,
   CompanyType,
   ComplianceCaseStatus,
@@ -17,11 +18,13 @@ import {
   ComplianceDocType,
   DriverStatus,
   PlatformRole,
+  TripStatus,
   UserStatus,
   VehicleStatus,
 } from '@prisma/client';
 import type { AppEnv } from '../../config/env.validation';
 import type { AuthenticatedPrincipal } from '../../common/guards/jwt-auth.guard';
+import { AttributionService } from '../../common/services/attribution.service';
 import {
   AuditAction,
   type CarrierCapabilitiesInput,
@@ -30,11 +33,17 @@ import {
   type CarrierProfileInput,
   type CarrierRegisterInput,
   type CarrierSubmitVerificationInput,
+  type AssignmentReassignInput,
   type CarrierVehicleInput,
+  type FleetDisableReasonInput,
 } from '../../shared/types';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { DriverService } from '../driver/driver.service';
+import {
+  isVehicleClassAdequate,
+  licenceCoversVehicleClass,
+} from '../jobs/job-pricing.util';
 import { NotificationsService } from '../notifications/notifications.service';
 import { StripeService } from '../payments/stripe.service';
 
@@ -49,6 +58,7 @@ export class CarrierService {
     private readonly config: ConfigService<AppEnv, true>,
     private readonly drivers: DriverService,
     private readonly notifications: NotificationsService,
+    private readonly attribution: AttributionService,
   ) {}
 
   private ensureDatabase() {
@@ -172,7 +182,12 @@ export class CarrierService {
     if (existing) {
       throw new ConflictException('Email already registered');
     }
+    const resolved = await this.attribution.resolveInviteForRegister(
+      input.inviteToken,
+      CompanyType.CARRIER,
+    );
     const vic = await this.prisma.region.findUnique({ where: { code: 'VIC' } });
+    const homeRegionId = resolved.homeRegionId ?? vic?.id ?? null;
     const company = await this.prisma.company.create({
       data: {
         type: CompanyType.CARRIER,
@@ -180,8 +195,10 @@ export class CarrierService {
         legalName: input.name,
         email: input.email,
         phone: input.phone,
-        homeRegionId: vic?.id,
+        homeRegionId,
         serviceRegionCodes: vic ? ['VIC'] : [],
+        referredByAdminUserId: resolved.referredByAdminUserId,
+        referredAt: resolved.referredByAdminUserId ? new Date() : null,
       },
     });
     const user = await this.prisma.user.create({
@@ -194,12 +211,28 @@ export class CarrierService {
         companyId: company.id,
       },
     });
+    if (resolved.inviteId) {
+      await this.attribution.markInviteAccepted(resolved.inviteId, company.id);
+      await this.audit.recordPlatform({
+        action: AuditAction.COMPANY_INVITE_ACCEPTED,
+        actorUserId: user.id,
+        entityType: 'CompanyInvite',
+        entityId: resolved.inviteId,
+        metadata: {
+          companyId: company.id,
+          referredByAdminUserId: resolved.referredByAdminUserId,
+        },
+      });
+    }
     await this.audit.recordPlatform({
       action: AuditAction.CARRIER_REGISTERED,
       actorUserId: user.id,
       entityType: 'Company',
       entityId: company.id,
-      metadata: { email: user.email },
+      metadata: {
+        email: user.email,
+        referredByAdminUserId: resolved.referredByAdminUserId,
+      },
     });
 
     void this.notifications
@@ -394,16 +427,165 @@ export class CarrierService {
     return this.getOnboarding(principal);
   }
 
+  /** Fleet may grow after bid-eligible; blocked only when suspended/rejected. */
+  private assertCanManageFleet(company: { status: CompanyStatus }) {
+    if (
+      company.status === CompanyStatus.SUSPENDED ||
+      company.status === CompanyStatus.REJECTED
+    ) {
+      throw new BadRequestException(
+        'Cannot manage fleet while company is suspended or rejected',
+      );
+    }
+  }
+
+  async listVehicles(principal: AuthenticatedPrincipal) {
+    this.ensureDatabase();
+    const user = await this.requireCarrier(principal);
+    const company = user.company!;
+    const items = await this.prisma.vehicle.findMany({
+      where: { companyId: company.id },
+      orderBy: { createdAt: 'desc' },
+      select: {
+        id: true,
+        status: true,
+        label: true,
+        registration: true,
+        vehicleClass: true,
+        tareKg: true,
+        gvmKg: true,
+        gcmKg: true,
+        disabledAt: true,
+        disabledReason: true,
+        disabledNote: true,
+        createdAt: true,
+        updatedAt: true,
+      },
+    });
+
+    const vehicleIds = items.map((v) => v.id);
+    const rwcDocs = await this.prisma.complianceDocument.findMany({
+      where: {
+        docType: ComplianceDocType.RWC,
+        OR: [
+          { vehicleId: { in: vehicleIds } },
+          { companyId: company.id, vehicleId: null },
+        ],
+      },
+      orderBy: [{ updatedAt: 'desc' }],
+      select: {
+        id: true,
+        vehicleId: true,
+        companyId: true,
+        status: true,
+        expiresAt: true,
+      },
+    });
+
+    const byVehicle = new Map<string, (typeof rwcDocs)[number]>();
+    let companyRwc: (typeof rwcDocs)[number] | null = null;
+    for (const doc of rwcDocs) {
+      if (doc.vehicleId) {
+        if (!byVehicle.has(doc.vehicleId)) byVehicle.set(doc.vehicleId, doc);
+      } else if (!companyRwc) {
+        companyRwc = doc;
+      }
+    }
+
+    return {
+      items: items.map((v) => ({
+        ...v,
+        compliance: {
+          rwc: this.summarizeRwcDoc(byVehicle.get(v.id) ?? companyRwc),
+        },
+      })),
+    };
+  }
+
+  /** FLT-01: RWC expiry pill for fleet rows (per-vehicle doc preferred over company-level). */
+  private summarizeRwcDoc(
+    doc:
+      | {
+          id: string;
+          status: ComplianceDocStatus;
+          expiresAt: Date | null;
+        }
+      | null
+      | undefined,
+  ) {
+    if (!doc) {
+      return {
+        state: 'MISSING' as const,
+        expiresAt: null as string | null,
+        documentId: null as string | null,
+        documentStatus: null as string | null,
+      };
+    }
+    const now = Date.now();
+    const expiresMs = doc.expiresAt?.getTime() ?? null;
+    const warnMs = 30 * 24 * 60 * 60 * 1000;
+    let state: 'OK' | 'EXPIRING' | 'EXPIRED' | 'PENDING' | 'MISSING' = 'OK';
+    if (
+      doc.status === ComplianceDocStatus.EXPIRED ||
+      (expiresMs != null && expiresMs <= now)
+    ) {
+      state = 'EXPIRED';
+    } else if (
+      doc.status === ComplianceDocStatus.UPLOAD_PENDING ||
+      doc.status === ComplianceDocStatus.UPLOADED ||
+      doc.status === ComplianceDocStatus.UNDER_REVIEW
+    ) {
+      state = 'PENDING';
+    } else if (expiresMs != null && expiresMs - now <= warnMs) {
+      state = 'EXPIRING';
+    } else if (doc.status === ComplianceDocStatus.APPROVED) {
+      state = 'OK';
+    } else {
+      state = 'PENDING';
+    }
+    return {
+      state,
+      expiresAt: doc.expiresAt?.toISOString() ?? null,
+      documentId: doc.id,
+      documentStatus: doc.status,
+    };
+  }
+
+  async listDrivers(principal: AuthenticatedPrincipal) {
+    this.ensureDatabase();
+    const user = await this.requireCarrier(principal);
+    const company = user.company!;
+    const rows = await this.prisma.driver.findMany({
+      where: { companyId: company.id },
+      orderBy: { createdAt: 'desc' },
+      include: {
+        user: { select: { id: true, email: true, name: true, phone: true, status: true } },
+      },
+    });
+    return {
+      items: rows.map((d) => ({
+        id: d.id,
+        status: d.status,
+        licenceNo: d.licenceNo,
+        licenceClass: d.licenceClass,
+        licenceExpiry: d.licenceExpiry,
+        inviteAcceptedAt: d.inviteAcceptedAt,
+        inviteExpiresAt: d.inviteExpiresAt,
+        disabledAt: d.disabledAt,
+        disabledReason: d.disabledReason,
+        disabledNote: d.disabledNote,
+        createdAt: d.createdAt,
+        updatedAt: d.updatedAt,
+        user: d.user,
+      })),
+    };
+  }
+
   async addVehicle(principal: AuthenticatedPrincipal, input: CarrierVehicleInput) {
     this.ensureDatabase();
     const user = await this.requireCarrier(principal);
     const company = user.company!;
-    if (
-      company.status !== CompanyStatus.DRAFT &&
-      company.status !== CompanyStatus.INFO_REQUESTED
-    ) {
-      throw new BadRequestException('Fleet editable only in draft or info-requested');
-    }
+    this.assertCanManageFleet(company);
     const vehicle = await this.prisma.vehicle.create({
       data: {
         companyId: company.id,
@@ -423,6 +605,614 @@ export class CarrierService {
       entityId: vehicle.id,
     });
     return this.getOnboarding(principal);
+  }
+
+  private async assertNotLastActiveVehicle(companyId: string, vehicleId: string) {
+    const activeCount = await this.prisma.vehicle.count({
+      where: { companyId, status: VehicleStatus.ACTIVE },
+    });
+    const target = await this.prisma.vehicle.findFirst({
+      where: { id: vehicleId, companyId },
+      select: { status: true },
+    });
+    if (target?.status === VehicleStatus.ACTIVE && activeCount <= 1) {
+      throw new BadRequestException(
+        'Cannot disable or retire the last active vehicle while the company remains bid-eligible. Add another active vehicle first.',
+      );
+    }
+  }
+
+  private async assertNotLastActiveDriver(companyId: string, driverId: string) {
+    const activeCount = await this.prisma.driver.count({
+      where: { companyId, status: DriverStatus.ACTIVE },
+    });
+    const target = await this.prisma.driver.findFirst({
+      where: { id: driverId, companyId },
+      select: { status: true },
+    });
+    if (target?.status === DriverStatus.ACTIVE && activeCount <= 1) {
+      throw new BadRequestException(
+        'Cannot disable the last active driver while the company remains bid-eligible. Invite or reactivate another driver first.',
+      );
+    }
+  }
+
+  private async assertVehicleNotOnActiveTrip(companyId: string, vehicleId: string) {
+    const busy = await this.prisma.assignment.findFirst({
+      where: {
+        carrierCompanyId: companyId,
+        vehicleId,
+        status: AssignmentStatus.LOCKED,
+        trip: { status: { notIn: [TripStatus.COMPLETED, TripStatus.CANCELLED] } },
+      },
+      select: { id: true },
+    });
+    if (busy) {
+      throw new BadRequestException(
+        'Vehicle is on an active trip — reassign the trip before disabling or retiring',
+      );
+    }
+  }
+
+  private async assertDriverNotOnActiveTrip(companyId: string, driverId: string) {
+    const busy = await this.prisma.assignment.findFirst({
+      where: {
+        carrierCompanyId: companyId,
+        driverId,
+        status: AssignmentStatus.LOCKED,
+        trip: { status: { notIn: [TripStatus.COMPLETED, TripStatus.CANCELLED] } },
+      },
+      select: { id: true },
+    });
+    if (busy) {
+      throw new BadRequestException(
+        'Driver is on an active trip — reassign the trip before disabling',
+      );
+    }
+  }
+
+  private shouldEnforceLastAssetGuard(status: CompanyStatus) {
+    return (
+      status === CompanyStatus.BID_ELIGIBLE ||
+      status === CompanyStatus.ACTIVE ||
+      status === CompanyStatus.PENDING_FLEET_READINESS
+    );
+  }
+
+  async disableVehicle(
+    principal: AuthenticatedPrincipal,
+    vehicleId: string,
+    input: FleetDisableReasonInput,
+  ) {
+    this.ensureDatabase();
+    const user = await this.requireCarrier(principal);
+    const company = user.company!;
+    this.assertCanManageFleet(company);
+
+    const vehicle = await this.prisma.vehicle.findFirst({
+      where: { id: vehicleId, companyId: company.id },
+    });
+    if (!vehicle) throw new NotFoundException('Vehicle not found');
+    if (vehicle.status === VehicleStatus.SUSPENDED || vehicle.status === VehicleStatus.RETIRED) {
+      throw new BadRequestException('Vehicle is already disabled or retired');
+    }
+
+    await this.assertVehicleNotOnActiveTrip(company.id, vehicleId);
+    if (this.shouldEnforceLastAssetGuard(company.status)) {
+      await this.assertNotLastActiveVehicle(company.id, vehicleId);
+    }
+
+    const reason = input.reason.trim();
+    const note = input.note?.trim() || null;
+    const now = new Date();
+    const updated = await this.prisma.vehicle.update({
+      where: { id: vehicleId },
+      data: {
+        status: VehicleStatus.SUSPENDED,
+        disabledAt: now,
+        disabledReason: reason,
+        disabledNote: note,
+      },
+    });
+
+    await this.audit.recordPlatform({
+      action: AuditAction.CARRIER_VEHICLE_DISABLED,
+      actorUserId: user.id,
+      entityType: 'Vehicle',
+      entityId: vehicleId,
+      metadata: { reason, note, previousStatus: vehicle.status },
+    });
+
+    return updated;
+  }
+
+  async retireVehicle(
+    principal: AuthenticatedPrincipal,
+    vehicleId: string,
+    input: FleetDisableReasonInput,
+  ) {
+    this.ensureDatabase();
+    const user = await this.requireCarrier(principal);
+    const company = user.company!;
+    this.assertCanManageFleet(company);
+
+    const vehicle = await this.prisma.vehicle.findFirst({
+      where: { id: vehicleId, companyId: company.id },
+    });
+    if (!vehicle) throw new NotFoundException('Vehicle not found');
+    if (vehicle.status === VehicleStatus.RETIRED) {
+      throw new BadRequestException('Vehicle is already retired');
+    }
+
+    await this.assertVehicleNotOnActiveTrip(company.id, vehicleId);
+    if (this.shouldEnforceLastAssetGuard(company.status)) {
+      await this.assertNotLastActiveVehicle(company.id, vehicleId);
+    }
+
+    const reason = input.reason.trim();
+    const note = input.note?.trim() || null;
+    const now = new Date();
+    const updated = await this.prisma.vehicle.update({
+      where: { id: vehicleId },
+      data: {
+        status: VehicleStatus.RETIRED,
+        disabledAt: now,
+        disabledReason: reason,
+        disabledNote: note,
+      },
+    });
+
+    await this.audit.recordPlatform({
+      action: AuditAction.CARRIER_VEHICLE_RETIRED,
+      actorUserId: user.id,
+      entityType: 'Vehicle',
+      entityId: vehicleId,
+      metadata: { reason, note, previousStatus: vehicle.status },
+    });
+
+    return updated;
+  }
+
+  async reactivateVehicle(principal: AuthenticatedPrincipal, vehicleId: string) {
+    this.ensureDatabase();
+    const user = await this.requireCarrier(principal);
+    const company = user.company!;
+    this.assertCanManageFleet(company);
+
+    const vehicle = await this.prisma.vehicle.findFirst({
+      where: { id: vehicleId, companyId: company.id },
+    });
+    if (!vehicle) throw new NotFoundException('Vehicle not found');
+    if (
+      vehicle.status !== VehicleStatus.SUSPENDED &&
+      vehicle.status !== VehicleStatus.RETIRED
+    ) {
+      throw new BadRequestException('Vehicle is not disabled or retired');
+    }
+
+    const updated = await this.prisma.vehicle.update({
+      where: { id: vehicleId },
+      data: {
+        status: VehicleStatus.ACTIVE,
+        disabledAt: null,
+        disabledReason: null,
+        disabledNote: null,
+      },
+    });
+
+    await this.audit.recordPlatform({
+      action: AuditAction.CARRIER_VEHICLE_REACTIVATED,
+      actorUserId: user.id,
+      entityType: 'Vehicle',
+      entityId: vehicleId,
+      metadata: { previousStatus: vehicle.status },
+    });
+
+    return updated;
+  }
+
+  /**
+   * Permanently remove a vehicle that was never used on marketplace records.
+   * Vehicles with proposals/assignments must be disabled or retired instead.
+   */
+  async deleteVehicle(principal: AuthenticatedPrincipal, vehicleId: string) {
+    this.ensureDatabase();
+    const user = await this.requireCarrier(principal);
+    const company = user.company!;
+    this.assertCanManageFleet(company);
+
+    const vehicle = await this.prisma.vehicle.findFirst({
+      where: { id: vehicleId, companyId: company.id },
+      include: {
+        _count: { select: { assignments: true, proposals: true } },
+      },
+    });
+    if (!vehicle) throw new NotFoundException('Vehicle not found');
+
+    if (vehicle._count.assignments > 0 || vehicle._count.proposals > 0) {
+      throw new BadRequestException({
+        message:
+          'Vehicle has bid or assignment history and cannot be deleted. Disable or retire it instead.',
+        code: 'VEHICLE_HAS_HISTORY',
+      });
+    }
+
+    await this.assertVehicleNotOnActiveTrip(company.id, vehicleId);
+    if (
+      vehicle.status === VehicleStatus.ACTIVE &&
+      this.shouldEnforceLastAssetGuard(company.status)
+    ) {
+      await this.assertNotLastActiveVehicle(company.id, vehicleId);
+    }
+
+    await this.prisma.vehicle.delete({ where: { id: vehicleId } });
+
+    await this.audit.recordPlatform({
+      action: AuditAction.CARRIER_VEHICLE_DELETED,
+      actorUserId: user.id,
+      entityType: 'Vehicle',
+      entityId: vehicleId,
+      metadata: {
+        previousStatus: vehicle.status,
+        registration: vehicle.registration,
+        label: vehicle.label,
+        vehicleClass: vehicle.vehicleClass,
+      },
+    });
+
+    return { ok: true as const, id: vehicleId };
+  }
+
+  async disableDriver(
+    principal: AuthenticatedPrincipal,
+    driverId: string,
+    input: FleetDisableReasonInput,
+  ) {
+    this.ensureDatabase();
+    const user = await this.requireCarrier(principal);
+    const company = user.company!;
+    this.assertCanManageFleet(company);
+
+    const driver = await this.prisma.driver.findFirst({
+      where: { id: driverId, companyId: company.id },
+      include: { user: { select: { id: true, status: true } } },
+    });
+    if (!driver) throw new NotFoundException('Driver not found');
+    if (
+      driver.status === DriverStatus.SUSPENDED ||
+      driver.status === DriverStatus.DISABLED
+    ) {
+      throw new BadRequestException('Driver is already disabled');
+    }
+
+    await this.assertDriverNotOnActiveTrip(company.id, driverId);
+    if (this.shouldEnforceLastAssetGuard(company.status)) {
+      await this.assertNotLastActiveDriver(company.id, driverId);
+    }
+
+    const reason = input.reason.trim();
+    const note = input.note?.trim() || null;
+    const now = new Date();
+
+    await this.prisma.$transaction(async (tx) => {
+      await tx.driver.update({
+        where: { id: driverId },
+        data: {
+          status: DriverStatus.SUSPENDED,
+          disabledAt: now,
+          disabledReason: reason,
+          disabledNote: note,
+        },
+      });
+      if (
+        driver.user.status === UserStatus.ACTIVE ||
+        driver.user.status === UserStatus.PENDING
+      ) {
+        await tx.user.update({
+          where: { id: driver.userId },
+          data: { status: UserStatus.SUSPENDED },
+        });
+        await tx.authSession.updateMany({
+          where: { userId: driver.userId, revokedAt: null },
+          data: { revokedAt: now },
+        });
+      }
+    });
+
+    await this.audit.recordPlatform({
+      action: AuditAction.CARRIER_DRIVER_DISABLED,
+      actorUserId: user.id,
+      entityType: 'Driver',
+      entityId: driverId,
+      metadata: { reason, note, previousStatus: driver.status },
+    });
+
+    return this.listDrivers(principal).then((res) =>
+      res.items.find((d) => d.id === driverId),
+    );
+  }
+
+  async reactivateDriver(principal: AuthenticatedPrincipal, driverId: string) {
+    this.ensureDatabase();
+    const user = await this.requireCarrier(principal);
+    const company = user.company!;
+    this.assertCanManageFleet(company);
+
+    const driver = await this.prisma.driver.findFirst({
+      where: { id: driverId, companyId: company.id },
+    });
+    if (!driver) throw new NotFoundException('Driver not found');
+    if (
+      driver.status !== DriverStatus.SUSPENDED &&
+      driver.status !== DriverStatus.DISABLED
+    ) {
+      throw new BadRequestException('Driver is not disabled');
+    }
+
+    const nextDriverStatus = driver.inviteAcceptedAt
+      ? DriverStatus.ACTIVE
+      : DriverStatus.INVITED;
+    const nextUserStatus = driver.inviteAcceptedAt
+      ? UserStatus.ACTIVE
+      : UserStatus.PENDING;
+
+    await this.prisma.$transaction(async (tx) => {
+      await tx.driver.update({
+        where: { id: driverId },
+        data: {
+          status: nextDriverStatus,
+          disabledAt: null,
+          disabledReason: null,
+          disabledNote: null,
+        },
+      });
+      await tx.user.update({
+        where: { id: driver.userId },
+        data: { status: nextUserStatus },
+      });
+    });
+
+    await this.audit.recordPlatform({
+      action: AuditAction.CARRIER_DRIVER_REACTIVATED,
+      actorUserId: user.id,
+      entityType: 'Driver',
+      entityId: driverId,
+      metadata: { previousStatus: driver.status, restoredStatus: nextDriverStatus },
+    });
+
+    return this.listDrivers(principal).then((res) =>
+      res.items.find((d) => d.id === driverId),
+    );
+  }
+
+  /**
+   * Permanently remove a driver who was never used on marketplace records.
+   * Used to cancel outstanding invites or clean never-assigned profiles.
+   * Drivers with proposals/assignments must be disabled instead.
+   */
+  async deleteDriver(principal: AuthenticatedPrincipal, driverId: string) {
+    this.ensureDatabase();
+    const user = await this.requireCarrier(principal);
+    const company = user.company!;
+    this.assertCanManageFleet(company);
+
+    const driver = await this.prisma.driver.findFirst({
+      where: { id: driverId, companyId: company.id },
+      include: {
+        user: { select: { id: true, email: true, name: true } },
+        _count: { select: { assignments: true, proposals: true } },
+      },
+    });
+    if (!driver) throw new NotFoundException('Driver not found');
+
+    if (driver._count.assignments > 0 || driver._count.proposals > 0) {
+      throw new BadRequestException({
+        message:
+          'Driver has bid or assignment history and cannot be deleted. Disable the driver instead.',
+        code: 'DRIVER_HAS_HISTORY',
+      });
+    }
+
+    await this.assertDriverNotOnActiveTrip(company.id, driverId);
+    if (
+      driver.status === DriverStatus.ACTIVE &&
+      this.shouldEnforceLastAssetGuard(company.status)
+    ) {
+      await this.assertNotLastActiveDriver(company.id, driverId);
+    }
+
+    await this.prisma.$transaction(async (tx) => {
+      await tx.driver.delete({ where: { id: driverId } });
+      await tx.user.delete({ where: { id: driver.userId } });
+    });
+
+    await this.audit.recordPlatform({
+      action: AuditAction.CARRIER_DRIVER_DELETED,
+      actorUserId: user.id,
+      entityType: 'Driver',
+      entityId: driverId,
+      metadata: {
+        previousStatus: driver.status,
+        email: driver.user.email,
+        name: driver.user.name,
+        inviteAccepted: !!driver.inviteAcceptedAt,
+      },
+    });
+
+    return { ok: true as const, id: driverId };
+  }
+
+  /**
+   * Reassign vehicle/driver on a locked assignment with an in-progress trip.
+   * When the driver changes, safety gate is reset so the new driver re-runs NHVR.
+   */
+  async reassignAssignment(
+    principal: AuthenticatedPrincipal,
+    assignmentId: string,
+    input: AssignmentReassignInput,
+  ) {
+    this.ensureDatabase();
+    const user = await this.requireCarrier(principal);
+    const company = user.company!;
+    this.assertCanManageFleet(company);
+
+    const assignment = await this.prisma.assignment.findFirst({
+      where: { id: assignmentId, carrierCompanyId: company.id },
+      include: {
+        job: { select: { id: true, minVehicleClass: true, title: true } },
+        trip: { select: { id: true, status: true } },
+        vehicle: { select: { id: true, registration: true } },
+        driver: { select: { id: true, user: { select: { email: true, name: true } } } },
+      },
+    });
+    if (!assignment) throw new NotFoundException('Assignment not found');
+    if (assignment.status !== AssignmentStatus.LOCKED) {
+      throw new BadRequestException('Only locked (paid) assignments can be reassigned');
+    }
+    if (
+      !assignment.trip ||
+      assignment.trip.status === TripStatus.COMPLETED ||
+      assignment.trip.status === TripStatus.CANCELLED
+    ) {
+      throw new BadRequestException('No active trip to reassign');
+    }
+
+    const vehicle = await this.prisma.vehicle.findFirst({
+      where: {
+        id: input.vehicleId,
+        companyId: company.id,
+        status: VehicleStatus.ACTIVE,
+      },
+    });
+    if (!vehicle) {
+      throw new BadRequestException({
+        message: 'Active vehicle required',
+        code: 'VEHICLE_NOT_ACTIVE',
+      });
+    }
+    if (!isVehicleClassAdequate(vehicle.vehicleClass, assignment.job.minVehicleClass)) {
+      throw new BadRequestException({
+        message: `Vehicle class ${vehicle.vehicleClass} undersized for min ${assignment.job.minVehicleClass}`,
+        code: 'VEHICLE_CLASS_UNDERSIZE',
+      });
+    }
+
+    const driver = await this.prisma.driver.findFirst({
+      where: {
+        id: input.driverId,
+        companyId: company.id,
+        status: DriverStatus.ACTIVE,
+      },
+    });
+    if (!driver) throw new BadRequestException('Active driver required');
+    if (!driver.licenceExpiry || driver.licenceExpiry <= new Date()) {
+      throw new BadRequestException({
+        message: 'Driver licence expired or missing expiry',
+        code: 'LICENCE_EXPIRED',
+      });
+    }
+    if (!driver.nhvrAcknowledgedAt) {
+      throw new BadRequestException({
+        message: 'Driver NHVR acknowledgement required',
+        code: 'NHVR_REQUIRED',
+      });
+    }
+    if (!licenceCoversVehicleClass(driver.licenceClass, vehicle.vehicleClass)) {
+      throw new BadRequestException({
+        message: `Driver licence ${driver.licenceClass ?? 'none'} does not cover vehicle class ${vehicle.vehicleClass}`,
+        code: 'LICENCE_CLASS_MISMATCH',
+      });
+    }
+
+    const previousVehicleId = assignment.vehicleId;
+    const previousDriverId = assignment.driverId;
+    if (previousVehicleId === vehicle.id && previousDriverId === driver.id) {
+      throw new BadRequestException('Select a different vehicle or driver');
+    }
+    const driverChanged = previousDriverId !== driver.id;
+    const reason = input.reason.trim();
+    const note = input.note?.trim() || null;
+
+    const updated = await this.prisma.$transaction(async (tx) => {
+      const next = await tx.assignment.update({
+        where: { id: assignmentId },
+        data: {
+          vehicleId: vehicle.id,
+          driverId: driver.id,
+        },
+        include: {
+          vehicle: {
+            select: { id: true, registration: true, vehicleClass: true, status: true },
+          },
+          driver: {
+            select: {
+              id: true,
+              status: true,
+              user: { select: { email: true, name: true } },
+            },
+          },
+          trip: { select: { id: true, status: true } },
+          job: {
+            select: {
+              id: true,
+              title: true,
+              status: true,
+              minVehicleClass: true,
+            },
+          },
+        },
+      });
+
+      if (driverChanged && assignment.trip) {
+        await tx.trip.update({
+          where: { id: assignment.trip.id },
+          data: {
+            status: TripStatus.PENDING_GATES,
+            safetyPassedAt: null,
+            safetyFailedAt: null,
+            safetyNotes: `[REASSIGN] ${reason}`,
+            startedAt: null,
+          },
+        });
+      }
+
+      return next;
+    });
+
+    await this.audit.recordPlatform({
+      action: AuditAction.ASSIGNMENT_REASSIGNED,
+      actorUserId: user.id,
+      entityType: 'Assignment',
+      entityId: assignmentId,
+      metadata: {
+        reason,
+        note,
+        previousVehicleId,
+        previousDriverId,
+        vehicleId: vehicle.id,
+        driverId: driver.id,
+        driverChanged,
+        tripId: assignment.trip.id,
+        safetyReset: driverChanged,
+      },
+    });
+
+    return {
+      id: updated.id,
+      status: updated.status,
+      vehicleId: updated.vehicleId,
+      driverId: updated.driverId,
+      vehicle: updated.vehicle,
+      driver: updated.driver,
+      trip: updated.trip
+        ? {
+            id: updated.trip.id,
+            status: driverChanged ? TripStatus.PENDING_GATES : updated.trip.status,
+          }
+        : null,
+      job: updated.job,
+      safetyReset: driverChanged,
+    };
   }
 
   async inviteDriver(principal: AuthenticatedPrincipal, input: CarrierDriverInviteInput) {

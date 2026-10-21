@@ -51,6 +51,13 @@ export const envSchema = z.object({
   ABR_GUID: z.string().optional(),
   /** Expiry watchdog interval ms (default 1h). Set 0 to disable. */
   COMPLIANCE_WATCHDOG_MS: z.coerce.number().int().nonnegative().default(3_600_000),
+  /**
+   * Pre-trip exception auto-escalate after this many ms without carrier action (default 5 min).
+   * Set 0 to disable auto-escalate.
+   */
+  EXCEPTION_ESCALATION_MS: z.coerce.number().int().nonnegative().default(300_000),
+  /** How often to scan for pre-trip escalation (default 60s). Set 0 to disable the timer. */
+  EXCEPTION_WATCHDOG_MS: z.coerce.number().int().nonnegative().default(60_000),
   /** Stripe secret — optional in local; when missing, payment uses mock mode. */
   STRIPE_SECRET_KEY: z.string().optional(),
   /** Force mock Stripe even if key present (local QA). */

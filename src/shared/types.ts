@@ -85,6 +85,11 @@ export const AuditAction = {
   AUTH_STEP_UP_REQUESTED: 'auth.step_up_requested',
   AUTH_STEP_UP_VERIFIED: 'auth.step_up_verified',
   ADMIN_PROVISIONED: 'admin.provisioned',
+  ADMIN_INVITED: 'admin.invited',
+  ADMIN_INVITE_RESENT: 'admin.invite_resent',
+  ADMIN_INVITE_ACCEPTED: 'admin.invite_accepted',
+  ADMIN_PARTNER_SUBMITTED: 'admin.partner_submitted',
+  ADMIN_PARTNER_ACTIVATED: 'admin.partner_activated',
   ADMIN_SCOPE_CHANGED: 'admin.scope_changed',
   DOC_UPLOAD_INTENT: 'document.upload_intent',
   DOC_UPLOADED: 'document.uploaded',
@@ -98,6 +103,12 @@ export const AuditAction = {
   COMPANY_SUSPENDED: 'company.suspended',
   COMPANY_REACTIVATED: 'company.reactivated',
   COMPANY_DELETED: 'company.deleted',
+  COMPANY_INVITE_SENT: 'company.invite_sent',
+  COMPANY_INVITE_RESENT: 'company.invite_resent',
+  COMPANY_INVITE_ACCEPTED: 'company.invite_accepted',
+  COMPANY_REFERRER_REASSIGNED: 'company.referrer_reassigned',
+  PROSPECT_CREATED: 'prospect.created',
+  PROSPECT_UPDATED: 'prospect.updated',
   SENDER_REGISTERED: 'sender.registered',
   SENDER_PROFILE_UPDATED: 'sender.profile_updated',
   SENDER_PAYMENT_SETUP: 'sender.payment_setup',
@@ -108,8 +119,15 @@ export const AuditAction = {
   CARRIER_CONNECT_SETUP: 'carrier.connect_setup',
   CARRIER_CONNECT_READY: 'carrier.connect_ready',
   CARRIER_VEHICLE_ADDED: 'carrier.vehicle_added',
+  CARRIER_VEHICLE_DISABLED: 'carrier.vehicle_disabled',
+  CARRIER_VEHICLE_RETIRED: 'carrier.vehicle_retired',
+  CARRIER_VEHICLE_REACTIVATED: 'carrier.vehicle_reactivated',
+  CARRIER_VEHICLE_DELETED: 'carrier.vehicle_deleted',
   CARRIER_DRIVER_INVITED: 'carrier.driver_invited',
   CARRIER_DRIVER_INVITE_RESENT: 'carrier.driver_invite_resent',
+  CARRIER_DRIVER_DISABLED: 'carrier.driver_disabled',
+  CARRIER_DRIVER_REACTIVATED: 'carrier.driver_reactivated',
+  CARRIER_DRIVER_DELETED: 'carrier.driver_deleted',
   CARRIER_CAPABILITIES_UPDATED: 'carrier.capabilities_updated',
   CARRIER_ACTIVATED: 'carrier.activated',
   DRIVER_INVITE_ACCEPTED: 'driver.invite_accepted',
@@ -126,6 +144,14 @@ export const AuditAction = {
   PAYMENT_SUCCEEDED: 'payment.succeeded',
   PAYMENT_FAILED: 'payment.failed',
   ASSIGNMENT_LOCKED: 'assignment.locked',
+  ASSIGNMENT_REASSIGNED: 'assignment.reassigned',
+  EXCEPTION_OPENED: 'exception.opened',
+  EXCEPTION_NOTIFIED: 'exception.notified',
+  EXCEPTION_REASSIGNED: 'exception.reassigned',
+  EXCEPTION_ESCALATED: 'exception.escalated',
+  EXCEPTION_RELEASED: 'exception.released',
+  EXCEPTION_RESOLVED: 'exception.resolved',
+  EXCEPTION_PERFORMANCE_STUB: 'exception.performance_stub',
   REFUND_STUB: 'payment.refund_stub',
   TRIP_CREATED: 'trip.created',
   TRIP_SAFETY_PASSED: 'trip.safety_passed',
@@ -434,32 +460,72 @@ export const logoutSchema = z.object({
 
 export type LogoutInput = z.infer<typeof logoutSchema>;
 
-export const provisionAdminSchema = z.object({
-  email: emailField,
-  name: z.string().trim().min(1).max(120).optional(),
-  role: z.enum([AdminRole.STATE_MASTER, AdminRole.LOCAL_BDE]),
-  regionCode: z
-    .string()
-    .trim()
-    .toUpperCase()
-    .regex(/^[A-Z]{2,3}$/),
-  territoryCode: z
-    .string()
-    .trim()
-    .toUpperCase()
-    .max(32)
-    .optional(),
-}).superRefine((value, ctx) => {
-  if (value.role === AdminRole.LOCAL_BDE && !value.territoryCode) {
-    ctx.addIssue({
-      code: 'custom',
-      path: ['territoryCode'],
-      message: 'territoryCode is required for LOCAL_BDE',
-    });
-  }
-});
+/** Super invites State Master / Local BDE (replaces instant-active provision). */
+export const inviteAdminSchema = z
+  .object({
+    email: emailField,
+    name: z.string().trim().min(1).max(120).optional(),
+    phone: phoneField.optional(),
+    role: z.enum([AdminRole.STATE_MASTER, AdminRole.LOCAL_BDE]),
+    regionCode: z
+      .string()
+      .trim()
+      .toUpperCase()
+      .regex(/^[A-Z]{2,3}$/),
+    territoryCode: z
+      .string()
+      .trim()
+      .toUpperCase()
+      .max(32)
+      .optional(),
+    leadId: z.string().uuid().optional(),
+    companyName: z.string().trim().min(2).max(200).optional(),
+  })
+  .superRefine((value, ctx) => {
+    if (value.role === AdminRole.LOCAL_BDE && !value.territoryCode) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['territoryCode'],
+        message: 'territoryCode is required for LOCAL_BDE',
+      });
+    }
+  });
 
-export type ProvisionAdminInput = z.infer<typeof provisionAdminSchema>;
+export type InviteAdminInput = z.infer<typeof inviteAdminSchema>;
+
+/** @deprecated Use inviteAdminSchema — kept as alias for API compatibility. */
+export const provisionAdminSchema = inviteAdminSchema;
+export type ProvisionAdminInput = InviteAdminInput;
+
+export const resendAdminInviteSchema = z.object({
+  email: emailField,
+});
+export type ResendAdminInviteInput = z.infer<typeof resendAdminInviteSchema>;
+
+export const adminAcceptInviteSchema = z.object({
+  token: z.string().trim().min(16).max(200),
+});
+export type AdminAcceptInviteInput = z.infer<typeof adminAcceptInviteSchema>;
+
+export const partnerOnboardingUpdateSchema = z.object({
+  name: z.string().trim().min(2).max(120).optional(),
+  phone: phoneField.optional(),
+  companyName: z.string().trim().min(2).max(200).optional(),
+  abn: abnField.optional(),
+  acn: z.string().trim().max(20).optional(),
+  corporateAddress: z.string().trim().min(5).max(500).optional(),
+  networkExperience: z.string().trim().min(10).max(4000).optional(),
+  executionStrategy: z.string().trim().min(10).max(4000).optional(),
+});
+export type PartnerOnboardingUpdateInput = z.infer<typeof partnerOnboardingUpdateSchema>;
+
+export const partnerOnboardingSubmitSchema = z.object({
+  documentIds: z.array(z.string().uuid()).min(1).max(20),
+  declarationAccuracy: z.literal(true),
+  declarationNda: z.literal(true),
+  declarationNonCompete: z.literal(true),
+});
+export type PartnerOnboardingSubmitInput = z.infer<typeof partnerOnboardingSubmitSchema>;
 
 export const stepUpVerifySchema = z.object({
   code: z.string().trim().regex(/^\d{4,8}$/),
@@ -574,6 +640,7 @@ export const ComplianceDocType = {
   CARGO_INSURANCE: 'CARGO_INSURANCE',
   INSURANCE: 'INSURANCE',
   NHVR: 'NHVR',
+  MASTER_ADMIN_AGREEMENT: 'MASTER_ADMIN_AGREEMENT',
   OTHER: 'OTHER',
 } as const;
 
@@ -592,6 +659,7 @@ export const createUploadIntentSchema = z.object({
     ComplianceDocType.CARGO_INSURANCE,
     ComplianceDocType.INSURANCE,
     ComplianceDocType.NHVR,
+    ComplianceDocType.MASTER_ADMIN_AGREEMENT,
     ComplianceDocType.OTHER,
   ]),
   vehicleId: z.string().uuid().optional(),
@@ -615,7 +683,7 @@ export type ConfirmDocumentInput = z.infer<typeof confirmDocumentSchema>;
 
 export const submitComplianceSchema = z.object({
   companyId: z.string().uuid(),
-  caseType: z.enum(['SENDER_KYB', 'SENDER_KYC', 'CARRIER_KYB']),
+  caseType: z.enum(['SENDER_KYB', 'SENDER_KYC', 'CARRIER_KYB', 'ADMIN_PARTNER_KYB']),
   documentIds: z.array(z.string().uuid()).min(1).max(50),
 });
 
@@ -627,7 +695,7 @@ export const complianceCaseListQuerySchema = z.object({
   status: z
     .enum(['OPEN', 'INFO_REQUESTED', 'ESCALATED', 'APPROVED', 'REJECTED', 'CLOSED'])
     .optional(),
-  caseType: z.enum(['SENDER_KYB', 'SENDER_KYC', 'CARRIER_KYB']).optional(),
+  caseType: z.enum(['SENDER_KYB', 'SENDER_KYC', 'CARRIER_KYB', 'ADMIN_PARTNER_KYB']).optional(),
   regionCode: z.string().trim().toUpperCase().max(3).optional(),
 });
 
@@ -654,6 +722,8 @@ export const senderRegisterSchema = z.object({
   name: z.string().trim().min(2).max(120),
   phone: z.string().trim().min(8).max(32).optional(),
   acceptedTerms: acceptedTrue,
+  /** Local BDE company invite token — invalid/expired → HQ (no referrer). */
+  inviteToken: z.string().trim().min(16).max(200).optional(),
 });
 
 export type SenderRegisterInput = z.infer<typeof senderRegisterSchema>;
@@ -709,9 +779,76 @@ export const carrierRegisterSchema = z.object({
   name: z.string().trim().min(2).max(120),
   phone: z.string().trim().min(8).max(32).optional(),
   acceptedTerms: acceptedTrue,
+  /** Local BDE company invite token — invalid/expired → HQ (no referrer). */
+  inviteToken: z.string().trim().min(16).max(200).optional(),
 });
 
 export type CarrierRegisterInput = z.infer<typeof carrierRegisterSchema>;
+
+export const ProspectStage = {
+  LEAD: 'LEAD',
+  CONTACTED: 'CONTACTED',
+  INVITED: 'INVITED',
+  ONBOARDING: 'ONBOARDING',
+  WON: 'WON',
+  LOST: 'LOST',
+} as const;
+export type ProspectStage = (typeof ProspectStage)[keyof typeof ProspectStage];
+
+export const createCompanyInviteSchema = z.object({
+  companyType: z.enum(['SENDER', 'CARRIER']),
+  email: emailField,
+  legalNameHint: z.string().trim().min(2).max(200).optional(),
+  prospectId: z.string().uuid().optional(),
+});
+export type CreateCompanyInviteInput = z.infer<typeof createCompanyInviteSchema>;
+
+export const growthMyCompaniesQuerySchema = z.object({
+  type: z.enum(['SENDER', 'CARRIER']).optional(),
+  page: z.coerce.number().int().min(1).default(1),
+  pageSize: z.coerce.number().int().min(1).max(100).default(20),
+  q: z.string().trim().max(120).optional(),
+});
+export type GrowthMyCompaniesQuery = z.infer<typeof growthMyCompaniesQuerySchema>;
+
+export const createProspectSchema = z.object({
+  companyType: z.enum(['SENDER', 'CARRIER']),
+  legalName: z.string().trim().min(2).max(200),
+  contactName: z.string().trim().min(1).max(120).optional(),
+  email: emailField.optional(),
+  phone: phoneField.optional(),
+  notes: z.string().trim().max(4000).optional(),
+  stage: z
+    .enum(['LEAD', 'CONTACTED', 'INVITED', 'ONBOARDING', 'WON', 'LOST'])
+    .optional()
+    .default('LEAD'),
+});
+export type CreateProspectInput = z.infer<typeof createProspectSchema>;
+
+export const updateProspectSchema = z.object({
+  legalName: z.string().trim().min(2).max(200).optional(),
+  contactName: z.string().trim().min(1).max(120).nullable().optional(),
+  email: emailField.nullable().optional(),
+  phone: phoneField.nullable().optional(),
+  notes: z.string().trim().max(4000).nullable().optional(),
+  stage: z.enum(['LEAD', 'CONTACTED', 'INVITED', 'ONBOARDING', 'WON', 'LOST']).optional(),
+});
+export type UpdateProspectInput = z.infer<typeof updateProspectSchema>;
+
+export const prospectListQuerySchema = z.object({
+  stage: z.enum(['LEAD', 'CONTACTED', 'INVITED', 'ONBOARDING', 'WON', 'LOST']).optional(),
+  companyType: z.enum(['SENDER', 'CARRIER']).optional(),
+  page: z.coerce.number().int().min(1).default(1),
+  pageSize: z.coerce.number().int().min(1).max(100).default(20),
+  q: z.string().trim().max(120).optional(),
+});
+export type ProspectListQuery = z.infer<typeof prospectListQuerySchema>;
+
+export const reassignCompanyReferrerSchema = z.object({
+  /** Target ACTIVE Local BDE, or null to clear → HQ */
+  adminUserId: z.string().uuid().nullable(),
+});
+export type ReassignCompanyReferrerInput = z.infer<typeof reassignCompanyReferrerSchema>;
 
 export const carrierProfileSchema = z.object({
   legalName: z.string().trim().min(2).max(200),
@@ -748,6 +885,86 @@ export const carrierVehicleSchema = z.object({
 });
 
 export type CarrierVehicleInput = z.infer<typeof carrierVehicleSchema>;
+
+/** Carrier disable / retire vehicle or driver — reason shown in ops + audit. */
+export const fleetDisableReasonSchema = z.object({
+  reason: z.string().trim().min(3).max(500),
+  note: z.string().trim().max(2000).optional(),
+});
+export type FleetDisableReasonInput = z.infer<typeof fleetDisableReasonSchema>;
+
+/** Carrier reassigns vehicle/driver on an active assignment (breakdown / continue). */
+export const assignmentReassignSchema = z.object({
+  vehicleId: z.string().uuid(),
+  driverId: z.string().uuid(),
+  reason: z.string().trim().min(3).max(500),
+  note: z.string().trim().max(2000).optional(),
+});
+export type AssignmentReassignInput = z.infer<typeof assignmentReassignSchema>;
+
+export const TripExceptionKind = {
+  DRIVER_UNAVAILABLE: 'DRIVER_UNAVAILABLE',
+  VEHICLE_BREAKDOWN: 'VEHICLE_BREAKDOWN',
+  ACCIDENT: 'ACCIDENT',
+  TRAFFIC: 'TRAFFIC',
+  OTHER: 'OTHER',
+} as const;
+export type TripExceptionKind = (typeof TripExceptionKind)[keyof typeof TripExceptionKind];
+
+/** Driver opens sick-call / breakdown exception on a trip. */
+export const tripExceptionOpenSchema = z
+  .object({
+    tripId: z.string().uuid(),
+    kind: z.enum([
+      'DRIVER_UNAVAILABLE',
+      'VEHICLE_BREAKDOWN',
+      'ACCIDENT',
+      'TRAFFIC',
+      'OTHER',
+    ]),
+    reasonCode: z.string().trim().min(2).max(80).optional(),
+    note: z.string().trim().min(3).max(2000),
+    gpsLat: z.number().min(-90).max(90).optional(),
+    gpsLng: z.number().min(-180).max(180).optional(),
+    photoDocumentId: z.string().uuid().optional(),
+  })
+  .superRefine((value, ctx) => {
+    if (value.kind === 'VEHICLE_BREAKDOWN' && !value.photoDocumentId) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Photo evidence is required for vehicle breakdown',
+        path: ['photoDocumentId'],
+      });
+    }
+  });
+export type TripExceptionOpenInput = z.infer<typeof tripExceptionOpenSchema>;
+
+/** Carrier resolves exception via intra-fleet reassign. */
+export const tripExceptionReassignSchema = z.object({
+  vehicleId: z.string().uuid(),
+  driverId: z.string().uuid(),
+  note: z.string().trim().max(2000).optional(),
+});
+export type TripExceptionReassignInput = z.infer<typeof tripExceptionReassignSchema>;
+
+/** Carrier: repair & continue (no crew swap). */
+export const tripExceptionContinueSchema = z.object({
+  note: z.string().trim().min(3).max(2000),
+  etaNote: z.string().trim().max(500).optional(),
+});
+export type TripExceptionContinueInput = z.infer<typeof tripExceptionContinueSchema>;
+
+/** Carrier (or system): escalate to Ops — never silent. */
+export const tripExceptionEscalateSchema = z.object({
+  note: z.string().trim().min(3).max(2000).optional(),
+});
+export type TripExceptionEscalateInput = z.infer<typeof tripExceptionEscalateSchema>;
+
+/** Carrier: explicit marketplace release / cancel path (never silent; M10 Stripe stub). */
+export const tripExceptionReleaseSchema = z.object({
+  note: z.string().trim().min(3).max(2000),
+});
+export type TripExceptionReleaseInput = z.infer<typeof tripExceptionReleaseSchema>;
 
 export const carrierDriverInviteSchema = z.object({
   email: emailField,

@@ -37,6 +37,7 @@ describe('SenderService crumb branch leftovers', () => {
       stripe as never,
       { get: () => publishable } as never,
       { sendRegistrationConfirmation: jest.fn().mockResolvedValue({ skipped: true }) } as never,
+      { resolveInviteForRegister: jest.fn().mockResolvedValue({ referredByAdminUserId: null, inviteId: null, prospectId: null, homeRegionId: null }), markInviteAccepted: jest.fn() } as never,
     );
   }
 
@@ -165,7 +166,8 @@ describe('SenderService crumb branch leftovers', () => {
       invoiceState: 'VIC',
       invoicePostcode: '3000',
       gstRegistered: false,
-    } as never);
+    } as never,
+    );
     expect(prisma.company.update).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({ abn: null }),

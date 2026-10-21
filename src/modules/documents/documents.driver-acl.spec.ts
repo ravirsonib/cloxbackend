@@ -45,6 +45,7 @@ describe('DocumentsService driver ownership (D2)', () => {
         assertRegionAccess: jest.fn(),
         allowedTerritoryCodes: jest.fn().mockReturnValue(null),
       } as never,
+    { assertLocalOwnsCompany: jest.fn() } as never,
     );
 
     await expect(service.getMetadata(driver, 'doc-1')).rejects.toBeInstanceOf(
