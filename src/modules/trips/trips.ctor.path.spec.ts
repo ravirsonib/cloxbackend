@@ -2,6 +2,7 @@ import { Test } from '@nestjs/testing';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
+import { NotificationsService } from '../notifications/notifications.service';
 import { PaymentsService } from '../payments/payments.service';
 import { TripsService } from './trips.service';
 
@@ -14,6 +15,14 @@ describe('TripsService constructor leftover', () => {
         { provide: AuditService, useValue: { recordPlatform: jest.fn() } },
         { provide: ConfigService, useValue: { get: () => undefined } },
         { provide: PaymentsService, useValue: {} },
+        {
+          provide: NotificationsService,
+          useValue: {
+            notifyTripApproaching: jest.fn(),
+            notifyTripAtDropoff: jest.fn(),
+            notifyPodFinalized: jest.fn(),
+          },
+        },
       ],
     }).compile();
 

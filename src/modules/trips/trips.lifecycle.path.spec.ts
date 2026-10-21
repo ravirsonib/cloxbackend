@@ -73,10 +73,15 @@ describe('TripsService lifecycle paths', () => {
 
   function makeService(prisma: Record<string, unknown>) {
     return new TripsService(
-      prisma as never,
+prisma as never,
       audit as never,
       { get: () => undefined } as never,
       payments as never,
+      {
+        notifyTripApproaching: jest.fn().mockResolvedValue({ sentTo: [], results: [] }),
+        notifyTripAtDropoff: jest.fn().mockResolvedValue({ sentTo: [], results: [] }),
+        notifyPodFinalized: jest.fn().mockResolvedValue({ sentTo: [], results: [] }),
+      } as never,
     );
   }
 

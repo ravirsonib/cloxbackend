@@ -162,6 +162,14 @@ export const AuditAction = {
   TRIP_LOCATION: 'trip.location',
   TRIP_GEOFENCE_ENTER: 'trip.geofence_enter',
   TRIP_GEOFENCE_EXIT: 'trip.geofence_exit',
+  TRIP_APPROACHING_NOTIFIED: 'trip.approaching_notified',
+  TRIP_AT_DROPOFF_NOTIFIED: 'trip.at_dropoff_notified',
+  POD_SIGNED_ON_SOG: 'pod.signed_on_sog',
+  POD_FINALIZED: 'pod.finalized',
+  POD_PDF_GENERATED: 'pod.pdf_generated',
+  TRIP_BREAKDOWN_PDF_GENERATED: 'trip.breakdown_pdf_generated',
+  TAX_INVOICE_GENERATED: 'invoice.tax_generated',
+  RUN_SHEET_GENERATED: 'trip.run_sheet_generated',
   TRIP_COMPLETED: 'trip.completed',
   SURCHARGE_CREATED: 'surcharge.created',
   SURCHARGE_PAID: 'surcharge.paid',
@@ -1164,4 +1172,35 @@ export const tripLocationSchema = z.object({
 });
 
 export type TripLocationInput = z.infer<typeof tripLocationSchema>;
+
+/** M10 — optional stopId; defaults to next unfinished DROPOFF */
+export const tripNotifyApproachingSchema = z.object({
+  jobStopId: z.string().uuid().optional(),
+});
+
+export type TripNotifyApproachingInput = z.infer<typeof tripNotifyApproachingSchema>;
+
+export const tripPodSignatureSchema = z.object({
+  jobStopId: z.string().uuid(),
+  signerName: z.string().trim().min(2).max(120),
+  /// data:image/png;base64,... or raw base64 PNG
+  signatureDataUrl: z.string().min(32).max(2_000_000),
+  receiverPresentAttested: z.boolean(),
+});
+
+export type TripPodSignatureInput = z.infer<typeof tripPodSignatureSchema>;
+
+export const tripPodPhotoSchema = z.object({
+  jobStopId: z.string().uuid(),
+  /// data:image/jpeg|png;base64,... 
+  photoDataUrl: z.string().min(32).max(4_000_000),
+});
+
+export type TripPodPhotoInput = z.infer<typeof tripPodPhotoSchema>;
+
+export const tripPodFinalizeSchema = z.object({
+  jobStopId: z.string().uuid(),
+});
+
+export type TripPodFinalizeInput = z.infer<typeof tripPodFinalizeSchema>;
 

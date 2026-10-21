@@ -5,11 +5,19 @@ import {
   tripBreakSchema,
   tripLocationSchema,
   tripMassCheckSchema,
+  tripNotifyApproachingSchema,
+  tripPodFinalizeSchema,
+  tripPodPhotoSchema,
+  tripPodSignatureSchema,
   tripSafetyCheckSchema,
   tripStartSchema,
   type TripBreakInput,
   type TripLocationInput,
   type TripMassCheckInput,
+  type TripNotifyApproachingInput,
+  type TripPodFinalizeInput,
+  type TripPodPhotoInput,
+  type TripPodSignatureInput,
   type TripSafetyCheckInput,
   type TripStartInput,
 } from '../../shared/types';
@@ -28,7 +36,7 @@ export class TripsController {
   @Get('_status')
   @ApiOperation({ summary: 'Trips module status (M8/M9)' })
   status() {
-    return { module: 'trips', status: 'ready', milestone: 'M9' };
+    return { module: 'trips', status: 'ready', milestone: 'M10' };
   }
 
   @Get('mine')
@@ -63,6 +71,18 @@ export class TripsController {
     @Body(new ZodValidationPipe(tripStartSchema)) body: TripStartInput,
   ) {
     return this.trips.startByJobId(principal, jobId, body);
+  }
+
+  @Get(':tripId/pod')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(AppRole.DRIVER, AppRole.SENDER, AppRole.TRANSPORT_COMPANY)
+  @ApiOperation({ summary: 'M10 — POD status + document keys (scoped)' })
+  getPod(
+    @CurrentPrincipal() principal: AuthenticatedPrincipal,
+    @Param('tripId') tripId: string,
+  ) {
+    return this.trips.getTripPod(principal, tripId);
   }
 
   @Get(':tripId')
@@ -140,5 +160,57 @@ export class TripsController {
     @Body(new ZodValidationPipe(tripLocationSchema)) body: TripLocationInput,
   ) {
     return this.trips.postLocation(principal, tripId, body);
+  }
+
+  @Post(':tripId/notify-approaching')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(AppRole.DRIVER)
+  @ApiOperation({ summary: 'M10 — driver early notify (sender + receiver email)' })
+  notifyApproaching(
+    @CurrentPrincipal() principal: AuthenticatedPrincipal,
+    @Param('tripId') tripId: string,
+    @Body(new ZodValidationPipe(tripNotifyApproachingSchema)) body: TripNotifyApproachingInput,
+  ) {
+    return this.trips.notifyApproaching(principal, tripId, body);
+  }
+
+  @Post(':tripId/pod/signature')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(AppRole.DRIVER)
+  @ApiOperation({ summary: 'M10 — receiver signs on driver SOG' })
+  podSignature(
+    @CurrentPrincipal() principal: AuthenticatedPrincipal,
+    @Param('tripId') tripId: string,
+    @Body(new ZodValidationPipe(tripPodSignatureSchema)) body: TripPodSignatureInput,
+  ) {
+    return this.trips.submitPodSignature(principal, tripId, body);
+  }
+
+  @Post(':tripId/pod/photos')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(AppRole.DRIVER)
+  @ApiOperation({ summary: 'M10 — attach goods photo for POD' })
+  podPhoto(
+    @CurrentPrincipal() principal: AuthenticatedPrincipal,
+    @Param('tripId') tripId: string,
+    @Body(new ZodValidationPipe(tripPodPhotoSchema)) body: TripPodPhotoInput,
+  ) {
+    return this.trips.addPodPhoto(principal, tripId, body);
+  }
+
+  @Post(':tripId/pod/finalize')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(AppRole.DRIVER)
+  @ApiOperation({ summary: 'M10 — finalize POD after SOG signature + photos' })
+  podFinalize(
+    @CurrentPrincipal() principal: AuthenticatedPrincipal,
+    @Param('tripId') tripId: string,
+    @Body(new ZodValidationPipe(tripPodFinalizeSchema)) body: TripPodFinalizeInput,
+  ) {
+    return this.trips.finalizePod(principal, tripId, body);
   }
 }

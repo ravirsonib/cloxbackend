@@ -26,6 +26,7 @@ describe('ExceptionsService.open', () => {
     notifyTripExceptionReassigned: jest.fn().mockResolvedValue([]),
     notifyTripExceptionContinued: jest.fn().mockResolvedValue([]),
     notifyTripExceptionEscalated: jest.fn().mockResolvedValue({ opsNotified: true }),
+    notifyBreakdownReport: jest.fn().mockResolvedValue({ sentTo: [], results: [] }),
   };
   const carrier = { reassignAssignment: jest.fn() };
 
@@ -33,6 +34,7 @@ describe('ExceptionsService.open', () => {
     get: (key: string) => {
       if (key === 'EXCEPTION_ESCALATION_MS') return 300_000;
       if (key === 'NOTIFY_EMAIL') return 'ops@yopmail.com';
+      if (key === 'STORAGE_LOCAL_DIR') return '.data/uploads-test';
       return undefined;
     },
   };
@@ -122,6 +124,10 @@ describe('ExceptionsService.open', () => {
       tripException: {
         findFirst: jest.fn().mockResolvedValue(null),
         create: jest.fn().mockResolvedValue(created),
+        update: jest.fn().mockResolvedValue({
+          ...created,
+          breakdownPdfStorageKey: 'trips/trip-1/ex-1/breakdown-pdf.pdf',
+        }),
       },
       driver: { update: jest.fn() },
       $transaction: jest.fn(async (fn: (tx: unknown) => Promise<unknown>) =>
@@ -312,7 +318,13 @@ describe('ExceptionsService.open', () => {
           },
         }),
       },
-      tripException: { findFirst: jest.fn().mockResolvedValue(null) },
+      tripException: {
+        findFirst: jest.fn().mockResolvedValue(null),
+        update: jest.fn().mockResolvedValue({
+          ...created,
+          breakdownPdfStorageKey: 'trips/trip-1/ex-2/breakdown-pdf.pdf',
+        }),
+      },
       complianceDocument: {
         findFirst: jest.fn().mockResolvedValue({
           id: '22222222-2222-2222-2222-222222222222',
@@ -344,6 +356,7 @@ describe('ExceptionsService.open', () => {
       data: { status: TripStatus.BREAKDOWN },
     });
     expect(driverUpdate).not.toHaveBeenCalled();
+    expect(notifications.notifyBreakdownReport).toHaveBeenCalled();
     expect(DriverStatus.SUSPENDED).toBeDefined();
   });
 });

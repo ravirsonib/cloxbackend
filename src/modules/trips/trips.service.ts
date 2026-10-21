@@ -10,6 +10,7 @@ import {
 import { ConfigService } from '@nestjs/config';
 import {
   AssignmentStatus,
+  JobPricingModel,
   JobStatus,
   SurchargeKind,
   SurchargeStatus,
@@ -23,15 +24,21 @@ import {
   type TripBreakInput,
   type TripLocationInput,
   type TripMassCheckInput,
+  type TripNotifyApproachingInput,
+  type TripPodFinalizeInput,
+  type TripPodPhotoInput,
+  type TripPodSignatureInput,
   type TripSafetyCheckInput,
   type TripStartInput,
 } from '../../shared/types';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
+import { NotificationsService } from '../notifications/notifications.service';
 import { PaymentsService } from '../payments/payments.service';
 import {
   DEFAULT_GEOFENCE_POLICY,
   freeWaitMs,
+  haversineMeters,
   isInsideRadius,
   massSurchargeIncGstCents,
   parseGeofencePolicy,
@@ -39,6 +46,14 @@ import {
   waitingSurchargeIncGstCents,
   type GeofencePolicy,
 } from './geofence.util';
+import { buildBrandedPdf } from './branded-pdf.util';
+import {
+  formatAudCents,
+  parseDataUrl,
+  writeTripArtifact,
+} from './pod-artifacts.util';
+import { readFile } from 'fs/promises';
+import { join } from 'path';
 
 @Injectable()
 export class TripsService {
@@ -48,6 +63,7 @@ export class TripsService {
     private readonly config: ConfigService<AppEnv, true>,
     @Inject(forwardRef(() => PaymentsService))
     private readonly payments: PaymentsService,
+    private readonly notifications: NotificationsService,
   ) {}
 
   private ensureDatabase() {
@@ -91,6 +107,16 @@ export class TripsService {
       freeWaitEndsAt: Date | null;
       waitOverageMinutes: number;
       arrivalRecorded: boolean;
+      approachingNotifiedAt?: Date | null;
+      approachingSource?: string | null;
+      atDropoffNotifiedAt?: Date | null;
+      podStatus?: string;
+      signedAt?: Date | null;
+      signerName?: string | null;
+      receiverPresentAttested?: boolean;
+      goodsPhotoRefs?: unknown;
+      podFinalizedAt?: Date | null;
+      podPackageStorageKey?: string | null;
       jobStop?: {
         sequence: number;
         stopType: string;
@@ -111,6 +137,16 @@ export class TripsService {
       freeWaitEndsAt: p.freeWaitEndsAt,
       waitOverageMinutes: p.waitOverageMinutes,
       arrivalRecorded: p.arrivalRecorded,
+      approachingNotifiedAt: p.approachingNotifiedAt ?? null,
+      approachingSource: p.approachingSource ?? null,
+      atDropoffNotifiedAt: p.atDropoffNotifiedAt ?? null,
+      podStatus: p.podStatus ?? 'PENDING',
+      signedAt: p.signedAt ?? null,
+      signerName: p.signerName ?? null,
+      receiverPresentAttested: Boolean(p.receiverPresentAttested),
+      goodsPhotoCount: Array.isArray(p.goodsPhotoRefs) ? p.goodsPhotoRefs.length : 0,
+      podFinalizedAt: p.podFinalizedAt ?? null,
+      podPackageStorageKey: p.podPackageStorageKey ?? null,
       stop: p.jobStop
         ? {
             sequence: p.jobStop.sequence,
@@ -233,6 +269,9 @@ export class TripsService {
     breakStartedAt: Date | null;
     startedAt: Date | null;
     completedAt: Date | null;
+    podStorageKey?: string | null;
+    taxInvoiceStorageKey?: string | null;
+    runSheetStorageKey?: string | null;
     job?: {
       title: string | null;
       status: JobStatus;
@@ -241,6 +280,7 @@ export class TripsService {
       deadWeightKg: number | null;
       chargeableWeightKg: number | null;
       stops?: Array<{
+        id?: string;
         sequence: number;
         stopType: string;
         suburb: string | null;
@@ -327,6 +367,9 @@ export class TripsService {
       breakStartedAt: trip.breakStartedAt,
       startedAt: trip.startedAt,
       completedAt: trip.completedAt,
+      podStorageKey: trip.podStorageKey ?? null,
+      taxInvoiceStorageKey: trip.taxInvoiceStorageKey ?? null,
+      runSheetStorageKey: trip.runSheetStorageKey ?? null,
       gates,
       siteAccess: trip.job
         ? {
@@ -341,6 +384,7 @@ export class TripsService {
             deadWeightKg: trip.job.deadWeightKg,
             chargeableWeightKg: trip.job.chargeableWeightKg,
             stops: (trip.job.stops ?? []).map((s) => ({
+              id: s.id,
               sequence: s.sequence,
               stopType: s.stopType,
               suburb: s.suburb,
@@ -395,6 +439,81 @@ export class TripsService {
       take: 30,
     });
     return trips.map((t) => this.mapTrip(t));
+  }
+
+  /** M10 — scoped POD package status for driver / sender / carrier. */
+  async getTripPod(principal: AuthenticatedPrincipal, tripId: string) {
+    this.ensureDatabase();
+    const trip = await this.prisma.trip.findUnique({
+      where: { id: tripId },
+      include: {
+        job: {
+          include: {
+            stops: { orderBy: { sequence: 'asc' } },
+            senderCompany: { select: { id: true } },
+          },
+        },
+        stopProgress: true,
+        assignment: {
+          select: {
+            carrierCompanyId: true,
+            driverId: true,
+            driver: { select: { userId: true } },
+          },
+        },
+      },
+    });
+    if (!trip) throw new NotFoundException('Trip not found');
+
+    if (principal.kind === 'user' && principal.role === 'DRIVER') {
+      const user = await this.requireDriver(principal);
+      if (trip.assignment?.driverId !== user.driver!.id) {
+        throw new ForbiddenException();
+      }
+    } else if (principal.kind === 'user' && principal.role === 'SENDER') {
+      const user = await this.prisma.user.findUnique({ where: { id: principal.id } });
+      if (!user?.companyId || user.companyId !== trip.job.senderCompanyId) {
+        throw new ForbiddenException();
+      }
+    } else if (principal.kind === 'user' && principal.role === 'TRANSPORT_COMPANY') {
+      const user = await this.prisma.user.findUnique({ where: { id: principal.id } });
+      if (!user?.companyId || user.companyId !== trip.assignment?.carrierCompanyId) {
+        throw new ForbiddenException();
+      }
+    } else if (principal.kind !== 'admin') {
+      throw new ForbiddenException();
+    }
+
+    const byStop = new Map(trip.stopProgress.map((p) => [p.jobStopId, p]));
+    const dropoffs = trip.job.stops
+      .filter((s) => s.stopType === 'DROPOFF')
+      .map((s) => {
+        const p = byStop.get(s.id);
+        return {
+          jobStopId: s.id,
+          sequence: s.sequence,
+          suburb: s.suburb,
+          podStatus: p?.podStatus ?? 'PENDING',
+          signedAt: p?.signedAt ?? null,
+          signerName: p?.signerName ?? null,
+          podFinalizedAt: p?.podFinalizedAt ?? null,
+          podPackageStorageKey: p?.podPackageStorageKey ?? null,
+          signaturePdfStorageKey: p?.signaturePdfStorageKey ?? null,
+          goodsPhotoCount: Array.isArray(p?.goodsPhotoRefs)
+            ? (p!.goodsPhotoRefs as string[]).length
+            : 0,
+        };
+      });
+
+    return {
+      tripId: trip.id,
+      jobId: trip.jobId,
+      tripStatus: trip.status,
+      podStorageKey: trip.podStorageKey,
+      taxInvoiceStorageKey: trip.taxInvoiceStorageKey,
+      runSheetStorageKey: trip.runSheetStorageKey,
+      dropoffs,
+    };
   }
 
   async getDriverTrip(principal: AuthenticatedPrincipal, tripId: string) {
@@ -848,6 +967,11 @@ export class TripsService {
             where: { id: trip.id },
             data: { status: TripStatus.AT_DROPOFF },
           });
+          try {
+            await this.notifyAtDropoffIfNeeded(trip.id, activeStop.id, actorUserId);
+          } catch {
+            // Never block geofence progress on notify/mail failures
+          }
         }
         await this.audit.recordPlatform({
           action: AuditAction.TRIP_GEOFENCE_ENTER,
@@ -954,7 +1078,7 @@ export class TripsService {
     };
   }
 
-  /** Mark trip/job/assignment COMPLETED when every stop has arrived and exited. */
+  /** Mark trip/job/assignment COMPLETED when geofence + POD + surcharges clear. */
   private async completeTripIfReady(tripId: string, actorUserId?: string) {
     const trip = await this.prisma.trip.findUnique({
       where: { id: tripId },
@@ -974,6 +1098,12 @@ export class TripsService {
       return Boolean(p?.arrivalRecorded && p.exitedAt);
     });
     if (!allDone) return;
+
+    // M10 — every DROPOFF must have finalized driver-SOG POD
+    const dropoffsReady = trip.job.stops
+      .filter((s) => s.stopType === 'DROPOFF')
+      .every((s) => byStop.get(s.id)?.podStatus === 'FINALIZED');
+    if (!dropoffsReady) return;
 
     // Attempt to settle deferred WAITING before completion (chargeNow was false during dwell).
     const pendingWaiting = trip.surcharges.filter(
@@ -1027,6 +1157,370 @@ export class TripsService {
       entityId: trip.id,
       metadata: { jobId: trip.jobId },
     });
+
+    try {
+      await this.generateCompletionDocuments(trip.id, actorUserId);
+    } catch {
+      // Completion must not roll back if PDF/email fails.
+    }
+  }
+
+  /** M10 Phase D — tax invoice + hourly run sheet after COMPLETED. */
+  private async generateCompletionDocuments(tripId: string, actorUserId?: string) {
+    const trip = await this.prisma.trip.findUnique({
+      where: { id: tripId },
+      include: {
+        job: {
+          include: {
+            stops: { orderBy: { sequence: 'asc' } },
+            senderCompany: {
+              select: {
+                legalName: true,
+                tradingName: true,
+                abn: true,
+                email: true,
+                invoiceLegalName: true,
+                invoiceAddressLine1: true,
+                invoiceSuburb: true,
+                invoiceState: true,
+                invoicePostcode: true,
+                users: {
+                  where: { role: 'SENDER', status: 'ACTIVE' },
+                  select: { email: true },
+                  take: 10,
+                },
+              },
+            },
+          },
+        },
+        stopProgress: true,
+        surcharges: true,
+        assignment: {
+          include: {
+            proposal: true,
+            vehicle: { select: { registration: true, label: true } },
+            driver: { include: { user: { select: { name: true, email: true } } } },
+            carrierCompany: {
+              select: {
+                legalName: true,
+                tradingName: true,
+                abn: true,
+                email: true,
+                users: {
+                  where: { role: 'TRANSPORT_COMPANY', status: 'ACTIVE' },
+                  select: { email: true },
+                  take: 10,
+                },
+              },
+            },
+          },
+        },
+      },
+    });
+    if (!trip || trip.status !== TripStatus.COMPLETED) return;
+    if (trip.taxInvoiceStorageKey) return;
+
+    const proposal = trip.assignment?.proposal;
+    const surchargeInc = trip.surcharges
+      .filter((s) => s.status === SurchargeStatus.PAID)
+      .reduce((sum, s) => sum + s.amountIncGstCents, 0);
+    const surchargeEx = trip.surcharges
+      .filter((s) => s.status === SurchargeStatus.PAID)
+      .reduce((sum, s) => sum + s.amountExGstCents, 0);
+    const surchargeGst = trip.surcharges
+      .filter((s) => s.status === SurchargeStatus.PAID)
+      .reduce((sum, s) => sum + s.amountGstCents, 0);
+    const baseEx = proposal?.amountExGstCents ?? trip.job.estimateExGstCents ?? 0;
+    const baseGst = proposal?.amountGstCents ?? trip.job.estimateGstCents ?? 0;
+    const baseInc = proposal?.amountIncGstCents ?? trip.job.estimateIncGstCents ?? 0;
+    const totalEx = baseEx + surchargeEx;
+    const totalGst = baseGst + surchargeGst;
+    const totalInc = baseInc + surchargeInc;
+
+    const sender = trip.job.senderCompany;
+    const carrier = trip.assignment?.carrierCompany;
+    const driverName =
+      trip.assignment?.driver?.user?.name ||
+      trip.assignment?.driver?.user?.email ||
+      '—';
+    const billTo =
+      sender?.invoiceLegalName ||
+      sender?.tradingName ||
+      sender?.legalName ||
+      'Sender';
+    const billAddress = [
+      sender?.invoiceAddressLine1,
+      [sender?.invoiceSuburb, sender?.invoiceState, sender?.invoicePostcode]
+        .filter(Boolean)
+        .join(' '),
+    ]
+      .filter(Boolean)
+      .join(', ');
+
+    const invoiceRef = `INV-${trip.jobId.slice(0, 8).toUpperCase()}`;
+    const completedDate = (trip.completedAt ?? new Date()).toISOString().slice(0, 10);
+    const invoicePdf = await buildBrandedPdf({
+      documentTitle: 'Tax Invoice',
+      subtitle: `${invoiceRef} · ${completedDate}`,
+      sections: [
+        {
+          title: 'Invoice summary',
+          rows: [
+            { label: 'Invoice ref', value: invoiceRef },
+            { label: 'Job', value: trip.job.title || trip.jobId },
+            { label: 'Date', value: completedDate },
+            { label: 'Pricing model', value: trip.job.pricingModel },
+          ],
+        },
+        {
+          title: 'Bill to',
+          rows: [
+            { label: 'Name', value: billTo },
+            { label: 'Address', value: billAddress || '—' },
+            { label: 'Sender ABN', value: sender?.abn || '—' },
+          ],
+        },
+        {
+          title: 'Supplier',
+          rows: [
+            {
+              label: 'Carrier',
+              value: carrier?.legalName || carrier?.tradingName || 'Carrier',
+            },
+            { label: 'Carrier ABN', value: carrier?.abn || '—' },
+            { label: 'Driver', value: driverName },
+            {
+              label: 'Vehicle',
+              value: trip.assignment?.vehicle?.registration || '—',
+            },
+          ],
+        },
+        {
+          title: 'Amounts (AUD)',
+          rows: [
+            { label: 'Freight (ex GST)', value: formatAudCents(baseEx) },
+            { label: 'Freight GST', value: formatAudCents(baseGst) },
+            { label: 'Freight (inc GST)', value: formatAudCents(baseInc) },
+            {
+              label: 'Paid surcharges (ex GST)',
+              value: formatAudCents(surchargeEx),
+            },
+            {
+              label: 'Paid surcharges GST',
+              value: formatAudCents(surchargeGst),
+            },
+            { label: 'Total ex GST', value: formatAudCents(totalEx) },
+            { label: 'Total GST', value: formatAudCents(totalGst) },
+            { label: 'Total inc GST', value: formatAudCents(totalInc) },
+          ],
+        },
+        {
+          title: 'Notes',
+          paragraphs: [
+            'This is a system-generated tax invoice summary from CLOX. Retain for your records.',
+          ],
+        },
+      ],
+    });
+    const invoiceArtifact = await writeTripArtifact({
+      rootDir: this.storageRoot(),
+      tripId: trip.id,
+      stopId: '_trip',
+      kind: 'invoice-pdf',
+      ext: 'pdf',
+      buffer: invoicePdf,
+    });
+
+    let runSheetKey: string | null = null;
+    let runSheetPdf: Buffer | null = null;
+    if (trip.job.pricingModel === JobPricingModel.HOURLY) {
+      const byStop = new Map(trip.stopProgress.map((p) => [p.jobStopId, p]));
+      const tableRows = trip.job.stops.map((stop, index) => {
+        const p = byStop.get(stop.id);
+        const arrive = p?.enteredAt
+          ? p.enteredAt.toISOString().replace('T', ' ').slice(0, 16)
+          : '—';
+        const depart = p?.exitedAt
+          ? p.exitedAt.toISOString().replace('T', ' ').slice(0, 16)
+          : '—';
+        const dwell =
+          p?.waitOverageMinutes != null ? `${p.waitOverageMinutes}m` : '—';
+        const addr = [stop.suburb, stop.state].filter(Boolean).join(', ') || '—';
+        return [
+          String(index + 1),
+          stop.stopType,
+          addr,
+          arrive,
+          depart,
+          dwell,
+        ];
+      });
+      const firstArrive = trip.job.stops
+        .map((s) => byStop.get(s.id)?.enteredAt)
+        .find((d): d is Date => Boolean(d));
+      const lastArrive = [...trip.job.stops]
+        .reverse()
+        .map((s) => byStop.get(s.id)?.enteredAt)
+        .find((d): d is Date => Boolean(d));
+      let actualHours: number | null = null;
+      if (firstArrive && lastArrive) {
+        actualHours = Math.max(
+          0,
+          (lastArrive.getTime() - firstArrive.getTime()) / (1000 * 60 * 60),
+        );
+      }
+      const billedHours = Math.max(4, trip.job.billableHours ?? actualHours ?? 4);
+      const floorNote =
+        actualHours != null && actualHours < 4
+          ? `Total time: ${actualHours.toFixed(2)}h · Billed: 4.0 hours (minimum engagement).`
+          : `Billed hours: ${billedHours.toFixed(1)} (4.0 hour floor applies).`;
+
+      const signer =
+        trip.stopProgress.find((p) => p.signerName)?.signerName ?? '—';
+      runSheetPdf = await buildBrandedPdf({
+        documentTitle: 'Hourly Run Sheet',
+        subtitle: `Job ${trip.jobId.slice(0, 8)} · ${completedDate}`,
+        sections: [
+          {
+            title: 'Trip header',
+            rows: [
+              { label: 'Job ID', value: trip.jobId },
+              { label: 'Date', value: completedDate },
+              { label: 'Driver', value: driverName },
+              {
+                label: 'Transport company',
+                value: carrier?.legalName || '—',
+              },
+              { label: 'ABN', value: carrier?.abn || '—' },
+              {
+                label: 'Vehicle rego',
+                value: trip.assignment?.vehicle?.registration || '—',
+              },
+              { label: 'Pattern', value: trip.job.hourlyPattern || '—' },
+              {
+                label: 'Route distance (planned)',
+                value: `${trip.job.routeDistanceKm ?? '—'} km`,
+              },
+              {
+                label: 'Site access',
+                value: `${trip.job.siteManeuverability || '—'} / ${trip.job.siteFacility || '—'}`,
+              },
+            ],
+          },
+          {
+            title: 'Stops',
+            table: {
+              headers: ['#', 'Type', 'Suburb', 'Arrival', 'Departure', 'Wait'],
+              rows: tableRows,
+            },
+            paragraphs: [
+              'Odometer: not captured (manual input pending).',
+            ],
+          },
+          {
+            title: 'Fatigue / break log',
+            rows: [
+              {
+                label: 'Break at completion',
+                value: trip.onBreak ? 'yes' : 'no',
+              },
+              {
+                label: 'Break started',
+                value: trip.breakStartedAt?.toISOString() ?? '—',
+              },
+              { label: 'Billing note', value: floorNote },
+              { label: 'Final receiver (SOG)', value: signer },
+            ],
+          },
+        ],
+      });
+      const runSheetArtifact = await writeTripArtifact({
+        rootDir: this.storageRoot(),
+        tripId: trip.id,
+        stopId: '_trip',
+        kind: 'run-sheet-pdf',
+        ext: 'pdf',
+        buffer: runSheetPdf,
+      });
+      runSheetKey = runSheetArtifact.storageKey;
+    }
+
+    await this.prisma.trip.update({
+      where: { id: trip.id },
+      data: {
+        taxInvoiceStorageKey: invoiceArtifact.storageKey,
+        ...(runSheetKey ? { runSheetStorageKey: runSheetKey } : {}),
+      },
+    });
+
+    await this.audit.recordPlatform({
+      action: AuditAction.TAX_INVOICE_GENERATED,
+      actorUserId,
+      entityType: 'Trip',
+      entityId: trip.id,
+      metadata: { taxInvoiceStorageKey: invoiceArtifact.storageKey },
+    });
+    if (runSheetKey) {
+      await this.audit.recordPlatform({
+        action: AuditAction.RUN_SHEET_GENERATED,
+        actorUserId,
+        entityType: 'Trip',
+        entityId: trip.id,
+        metadata: { runSheetStorageKey: runSheetKey },
+      });
+    }
+
+    const senderEmails = [
+      ...(sender?.users.map((u) => u.email) ?? []),
+      ...(sender?.email ? [sender.email] : []),
+    ];
+    const carrierEmails = [
+      ...(carrier?.users.map((u) => u.email) ?? []),
+      ...(carrier?.email ? [carrier.email] : []),
+    ];
+    const receiverEmail = trip.job.receiverEmail ?? null;
+
+    const attachments: Array<{
+      filename: string;
+      content: Buffer;
+      contentType: string;
+    }> = [
+      {
+        filename: `CLOX-tax-invoice-${invoiceRef}.pdf`,
+        content: invoicePdf,
+        contentType: 'application/pdf',
+      },
+    ];
+    if (runSheetPdf) {
+      attachments.push({
+        filename: `CLOX-run-sheet-${trip.jobId.slice(0, 8)}.pdf`,
+        content: runSheetPdf,
+        contentType: 'application/pdf',
+      });
+    }
+    if (trip.podStorageKey) {
+      try {
+        const podBuf = await readFile(join(this.storageRoot(), trip.podStorageKey));
+        attachments.push({
+          filename: `CLOX-POD-${trip.jobId.slice(0, 8)}.pdf`,
+          content: podBuf,
+          contentType: 'application/pdf',
+        });
+      } catch {
+        // POD already emailed at finalize; skip if file missing.
+      }
+    }
+
+    await this.notifications.notifyTripCompletionDocuments({
+      senderEmails,
+      carrierEmails,
+      receiverEmail,
+      jobId: trip.jobId,
+      jobTitle: trip.job.title,
+      hasRunSheet: Boolean(runSheetKey),
+      totalIncGstCents: totalInc,
+      attachments,
+    });
   }
 
   async postLocation(
@@ -1068,6 +1562,16 @@ export class TripsService {
       user.id,
     );
 
+    try {
+      await this.maybeAutoNotifyApproaching(
+        trip.id,
+        { lat: input.lat, lng: input.lng },
+        user.id,
+      );
+    } catch {
+      // Auto ETA notify must never fail location ingest.
+    }
+
     return {
       id: sample.id,
       recordedAt: sample.recordedAt,
@@ -1106,6 +1610,8 @@ export class TripsService {
         tripStatus: trip.status,
         stopsProgress: this.mapStopProgress(trip.stopProgress),
         surcharges: this.mapSurcharges(trip.surcharges),
+        taxInvoiceStorageKey: trip.taxInvoiceStorageKey,
+        runSheetStorageKey: trip.runSheetStorageKey,
       };
     }
 
@@ -1141,6 +1647,569 @@ export class TripsService {
         : null,
       stopsProgress: this.mapStopProgress(trip.stopProgress),
       surcharges: this.mapSurcharges(trip.surcharges),
+      taxInvoiceStorageKey: trip.taxInvoiceStorageKey,
+      runSheetStorageKey: trip.runSheetStorageKey,
     };
+  }
+
+  private storageRoot(): string {
+    return this.config.get('STORAGE_LOCAL_DIR', { infer: true }) || '.data/uploads';
+  }
+
+  private async resolveNotifyParties(tripId: string, jobStopId: string) {
+    const trip = await this.prisma.trip.findUnique({
+      where: { id: tripId },
+      include: {
+        job: {
+          include: {
+            stops: true,
+            senderCompany: {
+              include: {
+                users: {
+                  where: { role: 'SENDER', status: 'ACTIVE' },
+                  select: { email: true },
+                  take: 10,
+                },
+              },
+            },
+          },
+        },
+        assignment: {
+          include: {
+            carrierCompany: {
+              include: {
+                users: {
+                  where: { role: 'TRANSPORT_COMPANY', status: 'ACTIVE' },
+                  select: { email: true },
+                  take: 10,
+                },
+              },
+            },
+          },
+        },
+      },
+    });
+    if (!trip) throw new NotFoundException('Trip not found');
+    const stop = trip.job.stops.find((s) => s.id === jobStopId);
+    if (!stop) throw new NotFoundException('Stop not found');
+
+    const senderEmails = [
+      ...(trip.job.senderCompany.email ? [trip.job.senderCompany.email] : []),
+      ...trip.job.senderCompany.users.map((u) => u.email),
+    ];
+    const carrierEmails = [
+      ...(trip.assignment.carrierCompany.email
+        ? [trip.assignment.carrierCompany.email]
+        : []),
+      ...trip.assignment.carrierCompany.users.map((u) => u.email),
+    ];
+    const receiverEmail = stop.receiverEmail || trip.job.receiverEmail || null;
+    const dropAddress = [stop.addressLine, stop.suburb, stop.state, stop.postcode]
+      .filter(Boolean)
+      .join(', ');
+
+    return {
+      trip,
+      stop,
+      senderEmails,
+      carrierEmails,
+      receiverEmail,
+      dropSuburb: stop.suburb,
+      dropAddress: dropAddress || null,
+      jobTitle: trip.job.title,
+      jobId: trip.jobId,
+    };
+  }
+
+  private async ensureStopProgress(tripId: string, jobStopId: string) {
+    const existing = await this.prisma.tripStopProgress.findUnique({
+      where: { tripId_jobStopId: { tripId, jobStopId } },
+    });
+    if (existing) return existing;
+    return this.prisma.tripStopProgress.create({
+      data: { tripId, jobStopId, podStatus: 'PENDING' },
+    });
+  }
+
+  private async notifyAtDropoffIfNeeded(
+    tripId: string,
+    jobStopId: string,
+    actorUserId?: string,
+  ) {
+    const progress = await this.ensureStopProgress(tripId, jobStopId);
+    if (progress.atDropoffNotifiedAt) return;
+
+    const parties = await this.resolveNotifyParties(tripId, jobStopId);
+    await this.notifications.notifyTripAtDropoff({
+      senderEmails: parties.senderEmails,
+      carrierEmails: parties.carrierEmails,
+      receiverEmail: parties.receiverEmail,
+      jobId: parties.jobId,
+      jobTitle: parties.jobTitle,
+      dropSuburb: parties.dropSuburb,
+      dropAddress: parties.dropAddress,
+    });
+
+    await this.prisma.tripStopProgress.update({
+      where: { id: progress.id },
+      data: {
+        atDropoffNotifiedAt: new Date(),
+        podStatus:
+          progress.podStatus === 'PENDING' ? 'AWAITING_SIGNATURE' : progress.podStatus,
+      },
+    });
+
+    await this.audit.recordPlatform({
+      action: AuditAction.TRIP_AT_DROPOFF_NOTIFIED,
+      actorUserId,
+      entityType: 'Trip',
+      entityId: tripId,
+      metadata: { jobStopId },
+    });
+  }
+
+  /**
+   * M10 Phase E — if haversine ETA to next unfinished dropoff is in the
+   * configured window and driver has not already notified, send ETA_AUTO email.
+   */
+  private async maybeAutoNotifyApproaching(
+    tripId: string,
+    point: { lat: number; lng: number },
+    actorUserId?: string,
+  ) {
+    const maxEta = this.config.get('APPROACHING_ETA_MAX_MINUTES', { infer: true });
+    if (!maxEta || maxEta <= 0) return;
+    const minEta = this.config.get('APPROACHING_ETA_MIN_MINUTES', { infer: true }) ?? 15;
+    const speedKmh = this.config.get('APPROACHING_ETA_SPEED_KMH', { infer: true }) ?? 40;
+
+    const trip = await this.prisma.trip.findUnique({
+      where: { id: tripId },
+      include: {
+        job: { include: { stops: { orderBy: { sequence: 'asc' } } } },
+        stopProgress: true,
+      },
+    });
+    if (!trip?.startedAt || trip.onBreak) return;
+    if (
+      trip.status !== TripStatus.IN_TRANSIT &&
+      trip.status !== TripStatus.EN_ROUTE_PICKUP
+    ) {
+      return;
+    }
+
+    const progressByStop = new Map(trip.stopProgress.map((p) => [p.jobStopId, p]));
+    const targetStop = trip.job.stops.find((s) => {
+      if (s.stopType !== 'DROPOFF') return false;
+      const p = progressByStop.get(s.id);
+      if (p?.approachingNotifiedAt) return false;
+      if (p?.enteredAt || p?.exitedAt) return false;
+      if (s.lat == null || s.lng == null) return false;
+      return true;
+    });
+    if (!targetStop) return;
+
+    const stopLat =
+      typeof targetStop.lat === 'number' ? targetStop.lat : Number(targetStop.lat);
+    const stopLng =
+      typeof targetStop.lng === 'number' ? targetStop.lng : Number(targetStop.lng);
+    if (!Number.isFinite(stopLat) || !Number.isFinite(stopLng)) return;
+
+    const meters = haversineMeters(point.lat, point.lng, stopLat, stopLng);
+    const etaMinutes = ((meters / 1000) / speedKmh) * 60;
+    if (etaMinutes < minEta || etaMinutes > maxEta) return;
+
+    await this.recordApproachingNotify({
+      tripId: trip.id,
+      jobStopId: targetStop.id,
+      source: 'ETA_AUTO',
+      actorUserId,
+      etaLabel: `~${Math.round(etaMinutes)} min`,
+    });
+  }
+
+  private async recordApproachingNotify(params: {
+    tripId: string;
+    jobStopId: string;
+    source: 'DRIVER' | 'ETA_AUTO';
+    actorUserId?: string;
+    etaLabel: string | null;
+  }) {
+    const progress = await this.ensureStopProgress(params.tripId, params.jobStopId);
+    if (progress.approachingNotifiedAt) {
+      return { alreadySent: true as const };
+    }
+    if (progress.enteredAt) {
+      return { alreadyArrived: true as const };
+    }
+
+    const parties = await this.resolveNotifyParties(params.tripId, params.jobStopId);
+    const mail = await this.notifications.notifyTripApproaching({
+      senderEmails: parties.senderEmails,
+      receiverEmail: parties.receiverEmail,
+      jobId: parties.jobId,
+      jobTitle: parties.jobTitle,
+      dropSuburb: parties.dropSuburb,
+      dropAddress: parties.dropAddress,
+      etaLabel: params.etaLabel,
+      source: params.source,
+    });
+
+    await this.prisma.tripStopProgress.update({
+      where: { id: progress.id },
+      data: {
+        approachingNotifiedAt: new Date(),
+        approachingSource: params.source,
+      },
+    });
+
+    await this.audit.recordPlatform({
+      action: AuditAction.TRIP_APPROACHING_NOTIFIED,
+      actorUserId: params.actorUserId,
+      entityType: 'Trip',
+      entityId: params.tripId,
+      metadata: {
+        jobStopId: params.jobStopId,
+        source: params.source,
+        etaLabel: params.etaLabel,
+        sentTo: mail.sentTo,
+      },
+    });
+
+    return { alreadySent: false as const, sentTo: mail.sentTo };
+  }
+
+  async notifyApproaching(
+    principal: AuthenticatedPrincipal,
+    tripId: string,
+    input: TripNotifyApproachingInput,
+  ) {
+    this.ensureDatabase();
+    const user = await this.requireDriver(principal);
+    const trip = await this.loadTripForDriver(user.driver!.id, tripId);
+    if (!trip.startedAt) {
+      throw new BadRequestException('Trip must be started before notifying');
+    }
+    if (trip.status === TripStatus.COMPLETED || trip.status === TripStatus.CANCELLED) {
+      throw new BadRequestException('Trip is not active');
+    }
+
+    const stops = trip.job.stops ?? [];
+    let targetStop = input.jobStopId
+      ? stops.find((s) => s.id === input.jobStopId)
+      : undefined;
+    if (!targetStop) {
+      const progressByStop = new Map(trip.stopProgress.map((p) => [p.jobStopId, p]));
+      targetStop = stops.find((s) => {
+        if (s.stopType !== 'DROPOFF') return false;
+        const p = progressByStop.get(s.id);
+        if (p?.approachingNotifiedAt) return false;
+        if (p?.enteredAt && !p.exitedAt) return false;
+        if (p?.exitedAt) return false;
+        return true;
+      });
+    }
+    if (!targetStop || targetStop.stopType !== 'DROPOFF') {
+      throw new BadRequestException('No eligible dropoff stop to notify');
+    }
+
+    const progress = await this.ensureStopProgress(trip.id, targetStop.id);
+    if (progress.approachingNotifiedAt) {
+      throw new BadRequestException({
+        message: 'Approaching already notified for this stop',
+        code: 'APPROACHING_ALREADY_SENT',
+      });
+    }
+    if (progress.enteredAt) {
+      throw new BadRequestException('Already at or past this dropoff');
+    }
+
+    await this.recordApproachingNotify({
+      tripId: trip.id,
+      jobStopId: targetStop.id,
+      source: 'DRIVER',
+      actorUserId: user.id,
+      etaLabel: null,
+    });
+
+    return this.getDriverTrip(principal, tripId);
+  }
+
+  async submitPodSignature(
+    principal: AuthenticatedPrincipal,
+    tripId: string,
+    input: TripPodSignatureInput,
+  ) {
+    this.ensureDatabase();
+    if (!input.receiverPresentAttested) {
+      throw new BadRequestException('Receiver present attestation is required');
+    }
+    const user = await this.requireDriver(principal);
+    const trip = await this.loadTripForDriver(user.driver!.id, tripId);
+    if (!trip.startedAt) throw new BadRequestException('Trip not started');
+
+    const stop = (trip.job.stops ?? []).find((s) => s.id === input.jobStopId);
+    if (!stop || stop.stopType !== 'DROPOFF') {
+      throw new BadRequestException('Signature only applies to dropoff stops');
+    }
+
+    const progress = await this.ensureStopProgress(trip.id, stop.id);
+    if (progress.podStatus === 'FINALIZED') {
+      throw new BadRequestException('POD already finalized');
+    }
+
+    const { mime, buffer } = parseDataUrl(input.signatureDataUrl);
+    if (!mime.startsWith('image/')) {
+      throw new BadRequestException('Signature must be an image');
+    }
+    const ext = mime.includes('jpeg') || mime.includes('jpg') ? 'jpg' : 'png';
+    const artifact = await writeTripArtifact({
+      rootDir: this.storageRoot(),
+      tripId: trip.id,
+      stopId: stop.id,
+      kind: 'signature',
+      ext,
+      buffer,
+    });
+
+    const updated = await this.prisma.tripStopProgress.update({
+      where: { id: progress.id },
+      data: {
+        signedAt: new Date(),
+        signerName: input.signerName.trim(),
+        signatureStorageKey: artifact.storageKey,
+        signatureContentHash: artifact.contentHash,
+        receiverPresentAttested: true,
+        podStatus: 'SIGNED',
+      },
+    });
+
+    await this.audit.recordPlatform({
+      action: AuditAction.POD_SIGNED_ON_SOG,
+      actorUserId: user.id,
+      entityType: 'Trip',
+      entityId: trip.id,
+      metadata: {
+        jobStopId: stop.id,
+        signerName: updated.signerName,
+        signatureStorageKey: artifact.storageKey,
+      },
+    });
+
+    return this.getDriverTrip(principal, tripId);
+  }
+
+  async addPodPhoto(
+    principal: AuthenticatedPrincipal,
+    tripId: string,
+    input: TripPodPhotoInput,
+  ) {
+    this.ensureDatabase();
+    const user = await this.requireDriver(principal);
+    const trip = await this.loadTripForDriver(user.driver!.id, tripId);
+    const stop = (trip.job.stops ?? []).find((s) => s.id === input.jobStopId);
+    if (!stop || stop.stopType !== 'DROPOFF') {
+      throw new BadRequestException('Photos only apply to dropoff stops');
+    }
+    const progress = await this.ensureStopProgress(trip.id, stop.id);
+    if (progress.podStatus === 'FINALIZED') {
+      throw new BadRequestException('POD already finalized');
+    }
+
+    const { mime, buffer } = parseDataUrl(input.photoDataUrl);
+    if (!mime.startsWith('image/')) {
+      throw new BadRequestException('Photo must be an image');
+    }
+    const ext = mime.includes('jpeg') || mime.includes('jpg') ? 'jpg' : 'png';
+    const artifact = await writeTripArtifact({
+      rootDir: this.storageRoot(),
+      tripId: trip.id,
+      stopId: stop.id,
+      kind: 'photo',
+      ext,
+      buffer,
+    });
+
+    const prev = Array.isArray(progress.goodsPhotoRefs)
+      ? (progress.goodsPhotoRefs as string[])
+      : [];
+    await this.prisma.tripStopProgress.update({
+      where: { id: progress.id },
+      data: { goodsPhotoRefs: [...prev, artifact.storageKey] },
+    });
+
+    return this.getDriverTrip(principal, tripId);
+  }
+
+  async finalizePod(
+    principal: AuthenticatedPrincipal,
+    tripId: string,
+    input: TripPodFinalizeInput,
+  ) {
+    this.ensureDatabase();
+    const user = await this.requireDriver(principal);
+    const trip = await this.loadTripForDriver(user.driver!.id, tripId);
+    const stop = (trip.job.stops ?? []).find((s) => s.id === input.jobStopId);
+    if (!stop || stop.stopType !== 'DROPOFF') {
+      throw new BadRequestException('Finalize only applies to dropoff stops');
+    }
+    const progress = await this.ensureStopProgress(trip.id, stop.id);
+    if (progress.podStatus === 'FINALIZED') {
+      return this.getDriverTrip(principal, tripId);
+    }
+    if (!progress.signedAt || !progress.signerName || !progress.signatureStorageKey) {
+      throw new BadRequestException('Receiver signature required on driver SOG');
+    }
+    if (!progress.receiverPresentAttested) {
+      throw new BadRequestException('Receiver present attestation required');
+    }
+    const photos = Array.isArray(progress.goodsPhotoRefs)
+      ? (progress.goodsPhotoRefs as string[])
+      : [];
+    if (photos.length < 1) {
+      throw new BadRequestException('At least one goods photo is required');
+    }
+
+    const parties = await this.resolveNotifyParties(trip.id, stop.id);
+    const signedAtIso = progress.signedAt.toISOString();
+    const signaturePdf = await buildBrandedPdf({
+      documentTitle: 'Signature receipt',
+      subtitle: `Job ${parties.jobTitle || parties.jobId}`,
+      sections: [
+        {
+          title: 'Delivery sign-on-glass',
+          rows: [
+            { label: 'Job', value: parties.jobTitle || parties.jobId },
+            { label: 'Drop suburb', value: parties.dropSuburb || '—' },
+            {
+              label: 'Drop address',
+              value: parties.dropAddress || '—',
+            },
+            { label: 'Signer', value: progress.signerName },
+            { label: 'Signed at', value: signedAtIso },
+            {
+              label: 'Capture method',
+              value: 'Driver SOG (receiver signed on driver device)',
+            },
+            {
+              label: 'Signature hash',
+              value: progress.signatureContentHash ?? '—',
+            },
+          ],
+          paragraphs: [
+            'Receiver signature was captured on the driver’s authenticated SOG session. No public magic-link was used.',
+          ],
+        },
+      ],
+    });
+    const signaturePdfArtifact = await writeTripArtifact({
+      rootDir: this.storageRoot(),
+      tripId: trip.id,
+      stopId: stop.id,
+      kind: 'signature-pdf',
+      ext: 'pdf',
+      buffer: signaturePdf,
+    });
+
+    const podPdf = await buildBrandedPdf({
+      documentTitle: 'Proof of Delivery',
+      subtitle: `Job ${parties.jobTitle || parties.jobId} · ${parties.dropSuburb || 'drop'}`,
+      sections: [
+        {
+          title: 'Delivery details',
+          rows: [
+            { label: 'Job', value: parties.jobTitle || parties.jobId },
+            {
+              label: 'Drop address',
+              value: parties.dropAddress || parties.dropSuburb || '—',
+            },
+            { label: 'Signer', value: progress.signerName },
+            { label: 'Signed at', value: signedAtIso },
+            { label: 'Goods photos', value: String(photos.length) },
+            { label: 'Finalized at', value: new Date().toISOString() },
+          ],
+        },
+        {
+          title: 'Evidence references',
+          paragraphs: [
+            ...photos.map((key, i) => `Photo ${i + 1}: ${key}`),
+            `Signature file: ${progress.signatureStorageKey}`,
+            `Signature receipt: ${signaturePdfArtifact.storageKey}`,
+          ],
+        },
+      ],
+    });
+    const podPdfArtifact = await writeTripArtifact({
+      rootDir: this.storageRoot(),
+      tripId: trip.id,
+      stopId: stop.id,
+      kind: 'pod-pdf',
+      ext: 'pdf',
+      buffer: podPdf,
+    });
+
+    await this.prisma.tripStopProgress.update({
+      where: { id: progress.id },
+      data: {
+        podStatus: 'FINALIZED',
+        podFinalizedAt: new Date(),
+        podPackageStorageKey: podPdfArtifact.storageKey,
+        signaturePdfStorageKey: signaturePdfArtifact.storageKey,
+      },
+    });
+
+    await this.prisma.trip.update({
+      where: { id: trip.id },
+      data: {
+        podStorageKey: podPdfArtifact.storageKey,
+        podCapturedAt: new Date(),
+      },
+    });
+
+    await this.audit.recordPlatform({
+      action: AuditAction.POD_FINALIZED,
+      actorUserId: user.id,
+      entityType: 'Trip',
+      entityId: trip.id,
+      metadata: {
+        jobStopId: stop.id,
+        podPackageStorageKey: podPdfArtifact.storageKey,
+        signaturePdfStorageKey: signaturePdfArtifact.storageKey,
+      },
+    });
+    await this.audit.recordPlatform({
+      action: AuditAction.POD_PDF_GENERATED,
+      actorUserId: user.id,
+      entityType: 'Trip',
+      entityId: trip.id,
+      metadata: {
+        jobStopId: stop.id,
+        podPackageStorageKey: podPdfArtifact.storageKey,
+      },
+    });
+
+    await this.notifications.notifyPodFinalized({
+      senderEmails: parties.senderEmails,
+      receiverEmail: parties.receiverEmail,
+      carrierEmails: parties.carrierEmails,
+      jobId: parties.jobId,
+      jobTitle: parties.jobTitle,
+      dropSuburb: parties.dropSuburb,
+      signerName: progress.signerName,
+      attachments: [
+        {
+          filename: `CLOX-POD-${parties.jobId.slice(0, 8)}.pdf`,
+          content: podPdf,
+          contentType: 'application/pdf',
+        },
+        {
+          filename: `CLOX-signature-${parties.jobId.slice(0, 8)}.pdf`,
+          content: signaturePdf,
+          contentType: 'application/pdf',
+        },
+      ],
+    });
+
+    await this.completeTripIfReady(trip.id, user.id);
+    return this.getDriverTrip(principal, tripId);
   }
 }

@@ -91,6 +91,10 @@ describe('ComplianceService decision gates', () => {
         allowedTerritoryCodes: jest.fn().mockReturnValue(null),
         assertTerritoryAccess: jest.fn(),
       } as never,
+      {
+        assertLocalOwnsCompany: jest.fn(),
+        complianceCaseBookFilter: jest.fn().mockReturnValue(null),
+      } as never,
       { lookupAbn: jest.fn() } as never,
       { sendComplianceApprovedEmail: jest.fn().mockResolvedValue({ skipped: true }), sendComplianceInfoRequestedEmail: jest.fn().mockResolvedValue({ skipped: true }) } as never,
     );

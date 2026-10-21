@@ -22,10 +22,15 @@ describe('TripsService geofence + tracking paths', () => {
     configGet: (key: string) => unknown = () => undefined,
   ) {
     return new TripsService(
-      prisma as never,
+prisma as never,
       audit as never,
       { get: configGet } as never,
       payments as never,
+      {
+        notifyTripApproaching: jest.fn().mockResolvedValue({ sentTo: [], results: [] }),
+        notifyTripAtDropoff: jest.fn().mockResolvedValue({ sentTo: [], results: [] }),
+        notifyPodFinalized: jest.fn().mockResolvedValue({ sentTo: [], results: [] }),
+      } as never,
     );
   }
 

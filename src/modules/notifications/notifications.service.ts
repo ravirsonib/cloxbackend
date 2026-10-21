@@ -91,6 +91,11 @@ export class NotificationsService {
     text: string;
     html?: string;
     cc?: string;
+    attachments?: Array<{
+      filename: string;
+      content: Buffer;
+      contentType?: string;
+    }>;
   }) {
     const transporter = this.getTransporter();
     if (!transporter) {
@@ -107,12 +112,19 @@ export class NotificationsService {
       subject: params.subject,
       text: params.text,
       html: params.html,
-      // Prevent clients treating inline parts oddly; we never attach images.
-      attachments: [],
+      attachments: (params.attachments ?? []).map((a) => ({
+        filename: a.filename,
+        content: a.content,
+        contentType: a.contentType ?? 'application/pdf',
+      })),
     });
 
     this.logger.log(
-      `Email sent to ${params.to}: ${params.subject} (${info.response ?? 'ok'})`,
+      `Email sent to ${params.to}: ${params.subject} (${info.response ?? 'ok'})${
+        params.attachments?.length
+          ? ` · ${params.attachments.length} attachment(s)`
+          : ''
+      }`,
     );
 
     return { skipped: false as const };
@@ -129,6 +141,11 @@ export class NotificationsService {
     nextSteps?: EmailNextStep[];
     cta?: { label: string; href: string };
     cc?: string;
+    attachments?: Array<{
+      filename: string;
+      content: Buffer;
+      contentType?: string;
+    }>;
   }) {
     const html = renderBrandedEmailHtml({
       eyebrow: params.eyebrow,
@@ -146,6 +163,7 @@ export class NotificationsService {
       subject: params.subject,
       text: params.text,
       html,
+      attachments: params.attachments,
     });
   }
 
@@ -1118,5 +1136,280 @@ export class NotificationsService {
       );
     }
     return results;
+  }
+
+  /** M10 — driver early notify / auto approaching */
+  async notifyTripApproaching(params: {
+    senderEmails: string[];
+    receiverEmail: string | null;
+    jobId: string;
+    jobTitle: string | null;
+    dropSuburb: string | null;
+    dropAddress: string | null;
+    etaLabel: string | null;
+    source: 'DRIVER' | 'ETA_AUTO';
+  }) {
+    const details: EmailDetailRow[] = [
+      { label: 'Job', value: params.jobTitle || params.jobId },
+      { label: 'Drop suburb', value: params.dropSuburb || '—' },
+      { label: 'Drop address', value: params.dropAddress || '—' },
+    ];
+    if (params.etaLabel) details.push({ label: 'ETA', value: params.etaLabel });
+    details.push({
+      label: 'Source',
+      value: params.source === 'DRIVER' ? 'Driver notified early' : 'System ETA alert',
+    });
+
+    const targets = new Set<string>();
+    for (const e of params.senderEmails) {
+      if (e?.includes('@')) targets.add(e.trim().toLowerCase());
+    }
+    if (params.receiverEmail?.includes('@')) {
+      targets.add(params.receiverEmail.trim().toLowerCase());
+    }
+
+    const results = [];
+    for (const to of targets) {
+      results.push(
+        await this.sendBranded({
+          to,
+          subject: 'CLOX — driver approaching delivery',
+          text: `Driver is approaching for job ${params.jobTitle || params.jobId} (${params.dropSuburb || 'drop'}).`,
+          eyebrow: 'Delivery update',
+          title: 'Driver approaching',
+          intro:
+            'The driver is on the way to the delivery site. Please prepare to receive the load. No action is required in the app for receivers.',
+          details,
+        }),
+      );
+    }
+    return { sentTo: [...targets], results };
+  }
+
+  /** M10 — first AT_DROPOFF (informational; no sign link) */
+  async notifyTripAtDropoff(params: {
+    senderEmails: string[];
+    carrierEmails: string[];
+    receiverEmail: string | null;
+    jobId: string;
+    jobTitle: string | null;
+    dropSuburb: string | null;
+    dropAddress: string | null;
+  }) {
+    const details: EmailDetailRow[] = [
+      { label: 'Job', value: params.jobTitle || params.jobId },
+      { label: 'Drop suburb', value: params.dropSuburb || '—' },
+      { label: 'Drop address', value: params.dropAddress || '—' },
+    ];
+
+    const targets = new Set<string>();
+    for (const e of [...params.senderEmails, ...params.carrierEmails]) {
+      if (e?.includes('@')) targets.add(e.trim().toLowerCase());
+    }
+    if (params.receiverEmail?.includes('@')) {
+      targets.add(params.receiverEmail.trim().toLowerCase());
+    }
+
+    const results = [];
+    for (const to of targets) {
+      results.push(
+        await this.sendBranded({
+          to,
+          subject: 'CLOX — driver at delivery site',
+          text: `Driver has arrived at the delivery site for job ${params.jobTitle || params.jobId}.`,
+          eyebrow: 'Delivery update',
+          title: 'Driver at delivery site',
+          intro:
+            'The driver has arrived at the drop-off location. The receiver will sign proof of delivery on the driver’s device (SOG).',
+          details,
+        }),
+      );
+    }
+    return { sentTo: [...targets], results };
+  }
+
+  /** M10 — POD finalized; POD PDF attached for sender / receiver / carrier */
+  async notifyPodFinalized(params: {
+    senderEmails: string[];
+    receiverEmail: string | null;
+    carrierEmails?: string[];
+    jobId: string;
+    jobTitle: string | null;
+    dropSuburb: string | null;
+    signerName: string;
+    attachments?: Array<{
+      filename: string;
+      content: Buffer;
+      contentType?: string;
+    }>;
+  }) {
+    const details: EmailDetailRow[] = [
+      { label: 'Job', value: params.jobTitle || params.jobId },
+      { label: 'Drop suburb', value: params.dropSuburb || '—' },
+      { label: 'Signed by', value: params.signerName },
+      {
+        label: 'Attachments',
+        value: params.attachments?.length
+          ? params.attachments.map((a) => a.filename).join(', ')
+          : 'None',
+      },
+    ];
+    const targets = new Set<string>();
+    for (const e of [...params.senderEmails, ...(params.carrierEmails ?? [])]) {
+      if (e?.includes('@')) targets.add(e.trim().toLowerCase());
+    }
+    if (params.receiverEmail?.includes('@')) {
+      targets.add(params.receiverEmail.trim().toLowerCase());
+    }
+    const results = [];
+    for (const to of targets) {
+      results.push(
+        await this.sendBranded({
+          to,
+          subject: 'CLOX — delivery completed (POD attached)',
+          text: [
+            `POD finalized for job ${params.jobTitle || params.jobId}, signed by ${params.signerName}.`,
+            params.attachments?.length
+              ? `Attached: ${params.attachments.map((a) => a.filename).join(', ')}`
+              : '',
+          ]
+            .filter(Boolean)
+            .join('\n'),
+          eyebrow: 'Proof of delivery',
+          title: 'Delivery completed',
+          intro:
+            'Proof of delivery has been captured on the driver’s SOG (signature + photos). The POD PDF is attached to this email.',
+          details,
+          cta: this.loginCta(),
+          attachments: params.attachments,
+        }),
+      );
+    }
+    return { sentTo: [...targets], results };
+  }
+
+  /**
+   * M10 — after trip COMPLETED: tax invoice (+ run sheet) + POD PDFs attached
+   * for sender, receiver, and carrier.
+   */
+  async notifyTripCompletionDocuments(params: {
+    senderEmails: string[];
+    carrierEmails: string[];
+    receiverEmail?: string | null;
+    jobId: string;
+    jobTitle: string | null;
+    hasRunSheet: boolean;
+    totalIncGstCents: number;
+    attachments?: Array<{
+      filename: string;
+      content: Buffer;
+      contentType?: string;
+    }>;
+  }) {
+    const docLabel = [
+      'Tax invoice',
+      params.hasRunSheet ? 'hourly run sheet' : null,
+      params.attachments?.some((a) => /pod/i.test(a.filename))
+        ? 'POD package'
+        : null,
+    ]
+      .filter(Boolean)
+      .join(' + ');
+    const details: EmailDetailRow[] = [
+      { label: 'Job', value: params.jobTitle || params.jobId },
+      {
+        label: 'Total (inc GST)',
+        value: `$${(params.totalIncGstCents / 100).toFixed(2)} AUD`,
+      },
+      { label: 'Documents', value: docLabel || 'Trip documents' },
+      {
+        label: 'Attachments',
+        value: params.attachments?.length
+          ? params.attachments.map((a) => a.filename).join(', ')
+          : 'None',
+      },
+    ];
+    const targets = new Set<string>();
+    for (const e of [...params.senderEmails, ...params.carrierEmails]) {
+      if (e?.includes('@')) targets.add(e.trim().toLowerCase());
+    }
+    if (params.receiverEmail?.includes('@')) {
+      targets.add(params.receiverEmail.trim().toLowerCase());
+    }
+    const results = [];
+    for (const to of targets) {
+      results.push(
+        await this.sendBranded({
+          to,
+          subject: 'CLOX — trip complete · documents attached',
+          text: [
+            `Trip completed for job ${params.jobTitle || params.jobId}.`,
+            `Documents attached: ${
+              params.attachments?.map((a) => a.filename).join(', ') || 'none'
+            }.`,
+          ].join('\n'),
+          eyebrow: 'Trip complete',
+          title: 'Trip documents attached',
+          intro:
+            'The trip is complete. Your tax invoice' +
+            (params.hasRunSheet ? ', hourly run sheet,' : '') +
+            ' and proof of delivery (where available) are attached as PDF files.',
+          details,
+          cta: this.loginCta(),
+          attachments: params.attachments,
+        }),
+      );
+    }
+    return { sentTo: [...targets], results };
+  }
+
+  /** M10 Phase D — breakdown / exception report PDF attached */
+  async notifyBreakdownReport(params: {
+    carrierEmails: string[];
+    senderEmail: string | null;
+    driverEmail: string | null;
+    jobId: string;
+    jobTitle: string | null;
+    kind: string;
+    exceptionId: string;
+    attachments?: Array<{
+      filename: string;
+      content: Buffer;
+      contentType?: string;
+    }>;
+  }) {
+    const details: EmailDetailRow[] = [
+      { label: 'Job', value: params.jobTitle || params.jobId },
+      { label: 'Exception', value: params.kind },
+      { label: 'Report id', value: params.exceptionId.slice(0, 8) },
+    ];
+    const targets = new Set<string>();
+    for (const e of params.carrierEmails) {
+      if (e?.includes('@')) targets.add(e.trim().toLowerCase());
+    }
+    if (params.senderEmail?.includes('@')) {
+      targets.add(params.senderEmail.trim().toLowerCase());
+    }
+    if (params.driverEmail?.includes('@')) {
+      targets.add(params.driverEmail.trim().toLowerCase());
+    }
+    const results = [];
+    for (const to of targets) {
+      results.push(
+        await this.sendBranded({
+          to,
+          subject: 'CLOX — trip exception report (PDF attached)',
+          text: `Exception report generated for job ${params.jobTitle || params.jobId} (${params.kind}). PDF attached.`,
+          eyebrow: 'Exception report',
+          title: 'Breakdown / exception report',
+          intro:
+            'A driver exception report PDF is attached. Review the report and take the next carrier action in CLOX.',
+          details,
+          cta: this.loginCta(),
+          attachments: params.attachments,
+        }),
+      );
+    }
+    return { sentTo: [...targets], results };
   }
 }

@@ -69,6 +69,14 @@ export const envSchema = z.object({
   GEOFENCE_RADIUS_METERS: z.coerce.number().positive().default(200),
   /** M9 DEV: override free-wait to N seconds for demo (0 = use policy minutes). */
   GEOFENCE_FREE_WAIT_SECONDS: z.coerce.number().int().nonnegative().default(30),
+  /**
+   * M10 Phase E — auto “approaching” when haversine ETA (min) is in [MIN, MAX].
+   * Set MAX to 0 to disable auto ETA notify.
+   */
+  APPROACHING_ETA_MIN_MINUTES: z.coerce.number().nonnegative().default(15),
+  APPROACHING_ETA_MAX_MINUTES: z.coerce.number().nonnegative().default(30),
+  /** Assumed average road speed for haversine ETA (km/h). */
+  APPROACHING_ETA_SPEED_KMH: z.coerce.number().positive().default(40),
 });
 
 export type AppEnv = z.infer<typeof envSchema>;

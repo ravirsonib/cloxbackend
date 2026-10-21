@@ -107,10 +107,15 @@ describe('TripsService geofence fully-done peer leftover', () => {
       }),
     };
     const service = new TripsService(
-      prisma as never,
+prisma as never,
       audit as never,
       { get: () => undefined } as never,
       { createSurcharge: jest.fn(), chargePendingSurchargesForTrip: jest.fn() } as never,
+      {
+        notifyTripApproaching: jest.fn().mockResolvedValue({ sentTo: [], results: [] }),
+        notifyTripAtDropoff: jest.fn().mockResolvedValue({ sentTo: [], results: [] }),
+        notifyPodFinalized: jest.fn().mockResolvedValue({ sentTo: [], results: [] }),
+      } as never,
     );
     await service.evaluateGeofence(
       'trip-1',

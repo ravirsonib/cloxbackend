@@ -17,10 +17,16 @@ describe('TripsService completeTripIfReady via geofence exit', () => {
 
   function makeService(prisma: Record<string, unknown>) {
     return new TripsService(
-      prisma as never,
+prisma as never,
       audit as never,
       { get: () => undefined } as never,
       payments as never,
+      {
+        notifyTripApproaching: jest.fn().mockResolvedValue({ sentTo: [], results: [] }),
+        notifyTripAtDropoff: jest.fn().mockResolvedValue({ sentTo: [], results: [] }),
+        notifyPodFinalized: jest.fn().mockResolvedValue({ sentTo: [], results: [] }),
+        notifyTripCompletionDocuments: jest.fn().mockResolvedValue({ sentTo: [], results: [] }),
+      } as never,
     );
   }
 
@@ -46,6 +52,7 @@ describe('TripsService completeTripIfReady via geofence exit', () => {
       insideCount: 2,
       currentlyInside: false,
       exitedAt: new Date('2026-01-01T13:00:00Z'),
+      podStatus: 'FINALIZED',
     };
 
     // evaluateGeofence first load
@@ -149,7 +156,12 @@ describe('TripsService completeTripIfReady via geofence exit', () => {
       waitOverageMinutes: 5,
       arrivalRecorded: true,
     };
-    const afterExit = { ...progress, currentlyInside: false, exitedAt: new Date() };
+    const afterExit = {
+      ...progress,
+      currentlyInside: false,
+      exitedAt: new Date(),
+      podStatus: 'FINALIZED',
+    };
     const tripLive = {
       id: 'trip-1',
       jobId: 'job-1',

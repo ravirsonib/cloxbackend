@@ -36,6 +36,8 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { CarrierService } from '../carrier/carrier.service';
 import { NotificationsService } from '../notifications/notifications.service';
+import { buildBrandedPdf } from '../trips/branded-pdf.util';
+import { writeTripArtifact } from '../trips/pod-artifacts.util';
 
 export type RescueCandidate = {
   vehicleId: string;
@@ -97,6 +99,7 @@ export class ExceptionsService {
     gpsLat: number | null;
     gpsLng: number | null;
     photoDocumentId: string | null;
+    breakdownPdfStorageKey?: string | null;
     openedAt: Date;
     escalatedAt: Date | null;
     resolvedAt: Date | null;
@@ -125,6 +128,7 @@ export class ExceptionsService {
       gpsLat: row.gpsLat,
       gpsLng: row.gpsLng,
       photoDocumentId: row.photoDocumentId,
+      breakdownPdfStorageKey: row.breakdownPdfStorageKey ?? null,
       openedAt: row.openedAt,
       escalatedAt: row.escalatedAt,
       resolvedAt: row.resolvedAt,
@@ -177,6 +181,7 @@ export class ExceptionsService {
       include: {
         assignment: {
           include: {
+            vehicle: { select: { registration: true, label: true } },
             carrierCompany: {
               select: {
                 id: true,
@@ -356,8 +361,25 @@ export class ExceptionsService {
       },
     });
 
+    let exceptionForMap: Parameters<ExceptionsService['mapException']>[0] = created;
+    try {
+      exceptionForMap = await this.generateBreakdownPdf({
+        exception: created,
+        actorUserId: user.id,
+        driverEmail: user.email,
+        driverName: user.name ?? user.email,
+        carrierLegalName: trip.assignment.carrierCompany.legalName,
+        vehicleRegistration: trip.assignment.vehicle?.registration ?? null,
+        jobTitle: trip.job.title,
+        carrierEmails,
+        senderEmail,
+      });
+    } catch {
+      // Opening the exception must not fail if PDF generation fails.
+    }
+
     let autoReassigned = false;
-    let exceptionRow = this.mapException(created);
+    let exceptionRow = this.mapException(exceptionForMap);
     if (phase === TripExceptionPhase.PRE_TRIP) {
       try {
         const rescue = await this.buildRescueCandidates({
@@ -906,6 +928,110 @@ export class ExceptionsService {
         company: r.company,
       })),
     };
+  }
+
+  /** M10 Phase D — breakdown / exception report PDF (all kinds; vehicle breakdown primary). */
+  private async generateBreakdownPdf(params: {
+    exception: Parameters<ExceptionsService['mapException']>[0];
+    actorUserId: string;
+    driverEmail: string;
+    driverName: string;
+    carrierLegalName: string;
+    vehicleRegistration: string | null;
+    jobTitle: string | null;
+    carrierEmails: string[];
+    senderEmail: string | null;
+  }): Promise<Parameters<ExceptionsService['mapException']>[0]> {
+    const { exception } = params;
+    if (exception.breakdownPdfStorageKey) {
+      return exception;
+    }
+    const tripId = exception.tripId ?? 'unlinked';
+    const pdf = await buildBrandedPdf({
+      documentTitle: 'Exception report',
+      subtitle: `${exception.kind} · ${exception.id.slice(0, 8)}`,
+      sections: [
+        {
+          title: 'Exception details',
+          rows: [
+            { label: 'Exception id', value: exception.id },
+            { label: 'Job', value: params.jobTitle || exception.jobId },
+            { label: 'Kind', value: exception.kind },
+            { label: 'Phase', value: exception.phase },
+            { label: 'Opened', value: exception.openedAt.toISOString() },
+            { label: 'Driver', value: params.driverName },
+            { label: 'Carrier', value: params.carrierLegalName },
+            {
+              label: 'Vehicle',
+              value: params.vehicleRegistration || '—',
+            },
+            { label: 'Reason code', value: exception.reasonCode || '—' },
+            {
+              label: 'GPS',
+              value:
+                exception.gpsLat != null && exception.gpsLng != null
+                  ? `${exception.gpsLat}, ${exception.gpsLng}`
+                  : '—',
+            },
+            {
+              label: 'Photo evidence',
+              value: exception.photoDocumentId || 'none',
+            },
+          ],
+        },
+        {
+          title: 'Driver note',
+          paragraphs: [exception.note || '—'],
+        },
+        {
+          title: 'Notes',
+          paragraphs: [
+            'Generated automatically when the driver opened the exception in CLOX Cab.',
+          ],
+        },
+      ],
+    });
+    const artifact = await writeTripArtifact({
+      rootDir: this.config.get('STORAGE_LOCAL_DIR', { infer: true }) || '.data/uploads',
+      tripId,
+      stopId: exception.id,
+      kind: 'breakdown-pdf',
+      ext: 'pdf',
+      buffer: pdf,
+    });
+
+    const updated = await this.prisma.tripException.update({
+      where: { id: exception.id },
+      data: { breakdownPdfStorageKey: artifact.storageKey },
+      include: this.detailInclude(),
+    });
+
+    await this.audit.recordPlatform({
+      action: AuditAction.TRIP_BREAKDOWN_PDF_GENERATED,
+      actorUserId: params.actorUserId,
+      entityType: 'TripException',
+      entityId: exception.id,
+      metadata: { breakdownPdfStorageKey: artifact.storageKey, kind: exception.kind },
+    });
+
+    await this.notifications.notifyBreakdownReport({
+      carrierEmails: params.carrierEmails,
+      senderEmail: params.senderEmail,
+      driverEmail: params.driverEmail,
+      jobId: exception.jobId,
+      jobTitle: params.jobTitle,
+      kind: exception.kind,
+      exceptionId: exception.id,
+      attachments: [
+        {
+          filename: `CLOX-exception-${exception.id.slice(0, 8)}.pdf`,
+          content: pdf,
+          contentType: 'application/pdf',
+        },
+      ],
+    });
+
+    return updated;
   }
 
   private async recordPerformanceStub(

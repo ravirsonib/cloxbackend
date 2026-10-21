@@ -826,6 +826,9 @@ model Trip {
   /// SOG POD metadata refs (blob keys) — evidence validation in M9/M10
   podStorageKey String?
   podCapturedAt DateTime?
+  /// M10 Phase D — completion documents
+  taxInvoiceStorageKey String?
+  runSheetStorageKey   String?
   createdAt    DateTime   @default(now())
   updatedAt    DateTime   @updatedAt
 
@@ -881,6 +884,8 @@ model TripException {
   gpsLat           Float?
   gpsLng           Float?
   photoDocumentId  String?
+  /// M10 Phase D — driver breakdown / exception report PDF
+  breakdownPdfStorageKey String?
   openedAt         DateTime            @default(now())
   escalatedAt      DateTime?
   resolvedAt       DateTime?
@@ -907,7 +912,7 @@ model TripLocationSample {
   @@index([tripId, recordedAt])
 }
 
-/// M9 — per-stop geofence / dwell progress (run-sheet prep for M10)
+/// M9 geofence/dwell + M10 notify / driver-SOG POD per stop
 model TripStopProgress {
   id               String    @id @default(uuid())
   tripId           String
@@ -923,6 +928,24 @@ model TripStopProgress {
   freeWaitEndsAt   DateTime?
   waitOverageMinutes Int     @default(0)
   arrivalRecorded  Boolean   @default(false)
+  /// M10 — approaching / at-dropoff notify (idempotent)
+  approachingNotifiedAt DateTime?
+  /// DRIVER | ETA_AUTO
+  approachingSource     String?
+  atDropoffNotifiedAt   DateTime?
+  /// M10 — driver-device SOG POD
+  /// PENDING | AWAITING_SIGNATURE | SIGNED | FINALIZED
+  podStatus             String    @default("PENDING")
+  signedAt              DateTime?
+  signerName            String?
+  signatureStorageKey   String?
+  signatureContentHash  String?
+  receiverPresentAttested Boolean @default(false)
+  /// JSON string array of storage keys / doc ids for goods photos
+  goodsPhotoRefs        Json?
+  podFinalizedAt        DateTime?
+  podPackageStorageKey  String?
+  signaturePdfStorageKey String?
   createdAt        DateTime  @default(now())
   updatedAt        DateTime  @updatedAt
 
@@ -931,6 +954,7 @@ model TripStopProgress {
   @@unique([tripId, jobStopId])
   @@index([tripId])
   @@index([jobStopId])
+  @@index([podStatus])
 }
 
 enum SurchargeKind {
