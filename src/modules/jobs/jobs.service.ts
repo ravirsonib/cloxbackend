@@ -161,7 +161,11 @@ export class JobsService {
       vehicle?: { vehicleClass: string | null; registration: string | null; label: string | null } | null;
       createdAt: Date;
     }>;
+    _count?: { proposals?: number };
   }) {
+    const openProposalCount =
+      job._count?.proposals ??
+      (job.proposals ?? []).filter((p) => p.status === ProposalStatus.SUBMITTED).length;
     return {
       id: job.id,
       status: job.status,
@@ -200,6 +204,7 @@ export class JobsService {
       },
       publishedAt: job.publishedAt,
       createdAt: job.createdAt,
+      openProposalCount,
       stops: (job.stops ?? []).map((s) => ({
         id: s.id,
         sequence: s.sequence,
@@ -246,7 +251,14 @@ export class JobsService {
     }
     const jobs = await this.prisma.job.findMany({
       where: { senderCompanyId: user.company.id },
-      include: { stops: { orderBy: { sequence: 'asc' } } },
+      include: {
+        stops: { orderBy: { sequence: 'asc' } },
+        _count: {
+          select: {
+            proposals: { where: { status: ProposalStatus.SUBMITTED } },
+          },
+        },
+      },
       orderBy: { createdAt: 'desc' },
       take: 50,
     });

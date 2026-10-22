@@ -6,6 +6,7 @@ import {
   ParseUUIDPipe,
   Post,
   Put,
+  Query,
   StreamableFile,
   UploadedFile,
   UseGuards,
@@ -17,8 +18,10 @@ import { memoryStorage } from 'multer';
 import {
   confirmDocumentSchema,
   createUploadIntentSchema,
+  listDocumentsQuerySchema,
   type ConfirmDocumentInput,
   type CreateUploadIntentInput,
+  type ListDocumentsQuery,
 } from '../../shared/types';
 import { CurrentPrincipal } from '../../common/decorators/current-admin.decorator';
 import { JwtAuthGuard, type AuthenticatedPrincipal } from '../../common/guards/jwt-auth.guard';
@@ -36,6 +39,17 @@ export class DocumentsController {
   @ApiOperation({ summary: 'Documents module status' })
   status() {
     return { module: 'documents', status: 'ready', milestone: 'M2' };
+  }
+
+  @Get()
+  @ApiOperation({
+    summary: 'List uploaded documents for a company (drivers: own docs; carrier: driver docs)',
+  })
+  list(
+    @CurrentPrincipal() principal: AuthenticatedPrincipal,
+    @Query(new ZodValidationPipe(listDocumentsQuerySchema)) query: ListDocumentsQuery,
+  ) {
+    return this.documentsService.listDocuments(principal, query);
   }
 
   @Post('upload-intent')

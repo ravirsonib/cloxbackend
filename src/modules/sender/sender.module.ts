@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { JwtModule } from '@nestjs/jwt';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../../common/guards/roles.guard';
+import { CompanyProfileModule } from '../../common/services/company-profile.module';
 import { AuditModule } from '../audit/audit.module';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { PaymentsModule } from '../payments/payments.module';
@@ -9,7 +10,13 @@ import { SenderController } from './sender.controller';
 import { SenderService } from './sender.service';
 
 @Module({
-  imports: [JwtModule.register({}), AuditModule, PaymentsModule, NotificationsModule],
+  imports: [
+    JwtModule.register({}),
+    AuditModule,
+    PaymentsModule,
+    NotificationsModule,
+    CompanyProfileModule,
+  ],
   controllers: [SenderController],
   providers: [SenderService, JwtAuthGuard, RolesGuard],
   exports: [SenderService],

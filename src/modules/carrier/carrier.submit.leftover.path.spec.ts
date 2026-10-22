@@ -21,7 +21,6 @@ const carrierPrincipal: AuthenticatedPrincipal = {
 const DOC_IDS = [
   '11111111-1111-4111-8111-111111111111',
   '22222222-2222-4222-8222-222222222222',
-  '33333333-3333-4333-8333-333333333333',
 ];
 
 function carrierCompany(overrides: Record<string, unknown> = {}) {
@@ -40,7 +39,7 @@ function carrierCompany(overrides: Record<string, unknown> = {}) {
     capabilities: [],
     serviceRegionCodes: ['VIC'],
     homeRegion: { code: 'VIC' },
-    vehicles: [{ status: 'ACTIVE' }],
+    vehicles: [{ id: 'veh-1', status: 'ACTIVE' }],
     drivers: [
       {
         status: 'ACTIVE',
@@ -53,7 +52,9 @@ function carrierCompany(overrides: Record<string, unknown> = {}) {
       },
     ],
     complianceCases: [],
-    complianceDocuments: [],
+    complianceDocuments: [
+      { docType: ComplianceDocType.RWC, vehicleId: 'veh-1' },
+    ],
     ...overrides,
   };
 }
@@ -170,15 +171,14 @@ describe('CarrierService submitVerification leftover gates', () => {
       complianceDocument: {
         findMany: jest.fn().mockResolvedValue([
           { id: DOC_IDS[0], docType: ComplianceDocType.PUBLIC_LIABILITY },
-          { id: DOC_IDS[1], docType: ComplianceDocType.CARGO_INSURANCE },
-          { id: DOC_IDS[2], docType: ComplianceDocType.GOVERNMENT_ID },
+          { id: DOC_IDS[1], docType: ComplianceDocType.GOVERNMENT_ID },
         ]),
       },
     };
     await expect(
       makeService(prisma).submitVerification(carrierPrincipal, { documentIds: DOC_IDS }),
     ).rejects.toMatchObject({
-      message: expect.stringMatching(/Missing required doc: RWC/),
+      message: expect.stringMatching(/Missing required doc: CARGO_INSURANCE/),
     });
   });
 
@@ -192,7 +192,6 @@ describe('CarrierService submitVerification leftover gates', () => {
         findMany: jest.fn().mockResolvedValue([
           { id: DOC_IDS[0], docType: ComplianceDocType.PUBLIC_LIABILITY },
           { id: DOC_IDS[1], docType: ComplianceDocType.CARGO_INSURANCE },
-          { id: DOC_IDS[2], docType: ComplianceDocType.RWC },
         ]),
       },
       complianceCase: {
@@ -232,23 +231,26 @@ describe('CarrierService submitVerification leftover gates', () => {
         findUnique: jest.fn().mockResolvedValue(userWith(company)),
       },
       complianceDocument: {
-        findMany: jest.fn().mockResolvedValue([
-          {
-            id: DOC_IDS[0],
-            docType: ComplianceDocType.PUBLIC_LIABILITY,
-            status: ComplianceDocStatus.UNDER_REVIEW,
-          },
-          {
-            id: DOC_IDS[1],
-            docType: ComplianceDocType.CARGO_INSURANCE,
-            status: ComplianceDocStatus.UNDER_REVIEW,
-          },
-          {
-            id: DOC_IDS[2],
-            docType: ComplianceDocType.RWC,
-            status: ComplianceDocStatus.UPLOADED,
-          },
-        ]),
+        findMany: jest.fn().mockImplementation(async (args: { where?: { docType?: string; id?: { in: string[] } } }) => {
+          if (args?.where?.docType === ComplianceDocType.RWC) {
+            return [{ id: 'rwc-veh-1', vehicleId: 'veh-1' }];
+          }
+          if (args?.where?.id?.in) {
+            return [
+              {
+                id: DOC_IDS[0],
+                docType: ComplianceDocType.PUBLIC_LIABILITY,
+                status: ComplianceDocStatus.UNDER_REVIEW,
+              },
+              {
+                id: DOC_IDS[1],
+                docType: ComplianceDocType.CARGO_INSURANCE,
+                status: ComplianceDocStatus.UNDER_REVIEW,
+              },
+            ];
+          }
+          return [];
+        }),
       },
       complianceCase: { findFirst: jest.fn().mockResolvedValue(infoCase) },
       $transaction: jest.fn().mockImplementation(async (fn: (t: unknown) => unknown) =>
@@ -262,13 +264,13 @@ describe('CarrierService submitVerification leftover gates', () => {
     expect(result).toMatchObject({
       company: expect.objectContaining({ id: 'co-c' }),
     });
-    expect(prisma.complianceDocument.findMany).toHaveBeenCalledWith(
+    expect(tx.complianceDocument.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: expect.objectContaining({
-          status: {
-            in: [ComplianceDocStatus.UPLOADED, ComplianceDocStatus.UNDER_REVIEW],
+        where: {
+          id: {
+            in: expect.arrayContaining([...DOC_IDS, 'rwc-veh-1']),
           },
-        }),
+        },
       }),
     );
     expect(tx.complianceCase.update).toHaveBeenCalledWith(

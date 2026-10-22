@@ -34,10 +34,12 @@ function carrierCompany(overrides: Record<string, unknown> = {}) {
     capabilities: [],
     serviceRegionCodes: ['VIC'],
     homeRegion: { code: 'VIC' },
-    vehicles: [{ status: 'ACTIVE' }],
+    vehicles: [{ id: 'veh-1', status: 'ACTIVE' }],
     drivers: [{ status: 'ACTIVE', user: { id: 'u', email: 'driver.clox@yopmail.com', name: 'D', phone: null } }],
     complianceCases: [],
-    complianceDocuments: [],
+    complianceDocuments: [
+      { docType: ComplianceDocType.RWC, vehicleId: 'veh-1' },
+    ],
     ...overrides,
   };
 }
@@ -230,11 +232,15 @@ describe('CarrierService profile / connect / submit leftover paths', () => {
     const docIds = [
       '11111111-1111-4111-8111-111111111111',
       '22222222-2222-4222-8222-222222222222',
-      '33333333-3333-4333-8333-333333333333',
     ];
     const company = carrierCompany({
       stripeConnectPayoutsEnabled: true,
       stripeConnectAccountId: 'acct_1',
+      complianceDocuments: [
+        { docType: ComplianceDocType.PUBLIC_LIABILITY },
+        { docType: ComplianceDocType.CARGO_INSURANCE },
+        { docType: ComplianceDocType.RWC, vehicleId: 'veh-1' },
+      ],
     });
     const prisma = {
       isConnected: () => true,
@@ -248,11 +254,26 @@ describe('CarrierService profile / connect / submit leftover paths', () => {
         }),
       },
       complianceDocument: {
-        findMany: jest.fn().mockResolvedValue([
-          { id: docIds[0], docType: ComplianceDocType.PUBLIC_LIABILITY, status: ComplianceDocStatus.UPLOADED },
-          { id: docIds[1], docType: ComplianceDocType.CARGO_INSURANCE, status: ComplianceDocStatus.UPLOADED },
-          { id: docIds[2], docType: ComplianceDocType.RWC, status: ComplianceDocStatus.UPLOADED },
-        ]),
+        findMany: jest.fn().mockImplementation(async (args: { where?: { docType?: string; id?: { in: string[] } } }) => {
+          if (args?.where?.docType === ComplianceDocType.RWC) {
+            return [{ id: 'rwc-veh-1', vehicleId: 'veh-1' }];
+          }
+          if (args?.where?.id?.in) {
+            return [
+              {
+                id: docIds[0],
+                docType: ComplianceDocType.PUBLIC_LIABILITY,
+                status: ComplianceDocStatus.UPLOADED,
+              },
+              {
+                id: docIds[1],
+                docType: ComplianceDocType.CARGO_INSURANCE,
+                status: ComplianceDocStatus.UPLOADED,
+              },
+            ];
+          }
+          return [];
+        }),
       },
       complianceCase: { findFirst: jest.fn().mockResolvedValue(null) },
       $transaction: jest.fn().mockImplementation(async (fn: (tx: unknown) => unknown) => {
@@ -274,7 +295,7 @@ describe('CarrierService profile / connect / submit leftover paths', () => {
       documentIds: docIds,
     });
     expect(result).toMatchObject({
-      step: 'documents',
+      step: 'submit',
       company: expect.objectContaining({
         id: 'co-c',
         stripeConnectPayoutsEnabled: true,
@@ -285,5 +306,6 @@ describe('CarrierService profile / connect / submit leftover paths', () => {
       }),
     });
     expect(audit.recordPlatform).toHaveBeenCalled();
+    expect(prisma.$transaction).toHaveBeenCalled();
   });
 });

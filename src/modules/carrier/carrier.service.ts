@@ -84,8 +84,16 @@ export class CarrierService {
             },
             complianceCases: { orderBy: { createdAt: 'desc' }, take: 3 },
             complianceDocuments: {
-              where: { status: { in: [ComplianceDocStatus.UPLOADED, ComplianceDocStatus.UNDER_REVIEW, ComplianceDocStatus.APPROVED] } },
-              take: 20,
+              where: {
+                status: {
+                  in: [
+                    ComplianceDocStatus.UPLOADED,
+                    ComplianceDocStatus.UNDER_REVIEW,
+                    ComplianceDocStatus.APPROVED,
+                  ],
+                },
+              },
+              take: 100,
             },
           },
         },
@@ -98,12 +106,29 @@ export class CarrierService {
   }
 
   private fleetReady(company: {
-    vehicles: Array<{ status: string }>;
+    vehicles: Array<{ id?: string; status: string }>;
     drivers: Array<{ status: string }>;
+    complianceDocuments?: Array<{ docType: ComplianceDocType; vehicleId?: string | null }>;
   }) {
-    const activeVehicles = company.vehicles.filter((v) => v.status === 'ACTIVE').length;
+    const activeVehicles = company.vehicles.filter((v) => v.status === 'ACTIVE');
     const activeDrivers = company.drivers.filter((d) => d.status === 'ACTIVE').length;
-    return activeVehicles >= 1 && activeDrivers >= 1;
+    if (activeVehicles.length < 1 || activeDrivers < 1) return false;
+    return this.activeVehiclesHaveRwc(company);
+  }
+
+  /** Every ACTIVE vehicle must have its own RWC (vehicleId set). Company-level RWC does not count. */
+  private activeVehiclesHaveRwc(company: {
+    vehicles: Array<{ id?: string; status: string }>;
+    complianceDocuments?: Array<{ docType: ComplianceDocType; vehicleId?: string | null }>;
+  }) {
+    const activeVehicles = company.vehicles.filter((v) => v.status === 'ACTIVE' && v.id);
+    if (activeVehicles.length < 1) return false;
+    const rwcVehicleIds = new Set(
+      (company.complianceDocuments ?? [])
+        .filter((d) => d.docType === ComplianceDocType.RWC && d.vehicleId)
+        .map((d) => d.vehicleId as string),
+    );
+    return activeVehicles.every((v) => rwcVehicleIds.has(v.id!));
   }
 
   private goNoGo(company: {
@@ -112,8 +137,9 @@ export class CarrierService {
     abn: string | null;
     capabilities: string[];
     serviceRegionCodes: string[];
-    vehicles: Array<{ status: string }>;
+    vehicles: Array<{ id?: string; status: string }>;
     drivers: Array<{ status: string }>;
+    complianceDocuments?: Array<{ docType: ComplianceDocType; vehicleId?: string | null }>;
   }) {
     const opsApproved = company.status === CompanyStatus.BID_ELIGIBLE;
     const connectOk = company.stripeConnectPayoutsEnabled;
@@ -137,9 +163,12 @@ export class CarrierService {
     stripeConnectAccountId: string | null;
     stripeConnectPayoutsEnabled: boolean;
     serviceRegionCodes: string[];
-    vehicles: Array<{ status: string }>;
+    vehicles: Array<{ id?: string; status: string }>;
     drivers: Array<{ status: string }>;
-    complianceDocuments: { docType: ComplianceDocType }[];
+    complianceDocuments: Array<{
+      docType: ComplianceDocType;
+      vehicleId?: string | null;
+    }>;
   }): string {
     if (company.status === CompanyStatus.REJECTED) return 'rejected';
     if (company.status === CompanyStatus.SUSPENDED) return 'suspended';
@@ -157,16 +186,19 @@ export class CarrierService {
     }
     if (!company.abn) return 'profile';
     const docs = new Set(company.complianceDocuments.map((d) => d.docType));
+    // Company KYB: insurance only. RWC is per-vehicle on the fleet step.
     if (
       !docs.has(ComplianceDocType.PUBLIC_LIABILITY) ||
-      !docs.has(ComplianceDocType.CARGO_INSURANCE) ||
-      !docs.has(ComplianceDocType.RWC)
+      !docs.has(ComplianceDocType.CARGO_INSURANCE)
     ) {
       return 'documents';
     }
     if (!company.stripeConnectPayoutsEnabled) return 'connect';
     // Align with fleetReady / submitForReview — DRAFT fleet does not unlock submit.
     if (company.vehicles.filter((v) => v.status === 'ACTIVE').length < 1) {
+      return 'vehicles';
+    }
+    if (!this.activeVehiclesHaveRwc(company)) {
       return 'vehicles';
     }
     if (company.drivers.filter((d) => d.status === 'ACTIVE').length < 1) {
@@ -280,16 +312,23 @@ export class CarrierService {
         capabilities: company.capabilities,
         serviceRegionCodes: company.serviceRegionCodes,
       },
-      vehicles: company.vehicles.map((v) => ({
-        id: v.id,
-        status: v.status,
-        label: v.label,
-        registration: v.registration,
-        vehicleClass: v.vehicleClass,
-        tareKg: v.tareKg,
-        gvmKg: v.gvmKg,
-        gcmKg: v.gcmKg,
-      })),
+      vehicles: company.vehicles.map((v) => {
+        const rwcDoc = company.complianceDocuments.find(
+          (d) => d.docType === ComplianceDocType.RWC && d.vehicleId === v.id,
+        );
+        return {
+          id: v.id,
+          status: v.status,
+          label: v.label,
+          registration: v.registration,
+          vehicleClass: v.vehicleClass,
+          tareKg: v.tareKg,
+          gvmKg: v.gvmKg,
+          gcmKg: v.gcmKg,
+          hasRwc: Boolean(rwcDoc),
+          rwcDocumentId: rwcDoc?.id ?? null,
+        };
+      }),
       drivers: company.drivers.map((d) => ({
         id: d.id,
         status: d.status,
@@ -312,6 +351,7 @@ export class CarrierService {
         id: d.id,
         docType: d.docType,
         status: d.status,
+        vehicleId: d.vehicleId ?? null,
       })),
     };
   }
@@ -439,10 +479,79 @@ export class CarrierService {
     }
   }
 
+  /**
+   * BID_ELIGIBLE carriers: orphan per-vehicle RWCs (caseId null) join/open CARRIER_FLEET_RWC
+   * so Ops can approve without re-upload.
+   */
+  private async reconcileOrphanVehicleRwcsForOps(company: {
+    id: string;
+    status: CompanyStatus;
+    homeRegionId: string | null;
+  }) {
+    if (company.status !== CompanyStatus.BID_ELIGIBLE) return;
+    const orphanRows = await this.prisma.complianceDocument.findMany({
+      where: {
+        companyId: company.id,
+        docType: ComplianceDocType.RWC,
+        vehicleId: { not: null },
+        caseId: null,
+        status: {
+          in: [ComplianceDocStatus.UPLOADED, ComplianceDocStatus.UNDER_REVIEW],
+        },
+      },
+      select: { id: true, status: true },
+    });
+    // Re-filter in memory so incomplete mocks / stale rows cannot open empty fleet cases.
+    const orphans = orphanRows.filter(
+      (d) =>
+        d.status === ComplianceDocStatus.UPLOADED ||
+        d.status === ComplianceDocStatus.UNDER_REVIEW,
+    );
+    if (orphans.length === 0) return;
+
+    let fleetCase = await this.prisma.complianceCase.findFirst({
+      where: {
+        companyId: company.id,
+        caseType: ComplianceCaseType.CARRIER_FLEET_RWC,
+        status: {
+          in: [
+            ComplianceCaseStatus.OPEN,
+            ComplianceCaseStatus.INFO_REQUESTED,
+            ComplianceCaseStatus.ESCALATED,
+          ],
+        },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+    if (!fleetCase) {
+      fleetCase = await this.prisma.complianceCase.create({
+        data: {
+          companyId: company.id,
+          caseType: ComplianceCaseType.CARRIER_FLEET_RWC,
+          status: ComplianceCaseStatus.OPEN,
+          regionId: company.homeRegionId,
+        },
+      });
+    } else if (fleetCase.status === ComplianceCaseStatus.INFO_REQUESTED) {
+      fleetCase = await this.prisma.complianceCase.update({
+        where: { id: fleetCase.id },
+        data: { status: ComplianceCaseStatus.OPEN, decisionNote: null },
+      });
+    }
+    await this.prisma.complianceDocument.updateMany({
+      where: { id: { in: orphans.map((d) => d.id) } },
+      data: {
+        caseId: fleetCase.id,
+        status: ComplianceDocStatus.UNDER_REVIEW,
+      },
+    });
+  }
+
   async listVehicles(principal: AuthenticatedPrincipal) {
     this.ensureDatabase();
     const user = await this.requireCarrier(principal);
     const company = user.company!;
+    await this.reconcileOrphanVehicleRwcsForOps(company);
     const items = await this.prisma.vehicle.findMany({
       where: { companyId: company.id },
       orderBy: { createdAt: 'desc' },
@@ -464,45 +573,99 @@ export class CarrierService {
     });
 
     const vehicleIds = items.map((v) => v.id);
-    const rwcDocs = await this.prisma.complianceDocument.findMany({
-      where: {
-        docType: ComplianceDocType.RWC,
-        OR: [
-          { vehicleId: { in: vehicleIds } },
-          { companyId: company.id, vehicleId: null },
-        ],
-      },
-      orderBy: [{ updatedAt: 'desc' }],
-      select: {
-        id: true,
-        vehicleId: true,
-        companyId: true,
-        status: true,
-        expiresAt: true,
-      },
-    });
+    // Per-vehicle RWC only — company-level (vehicleId null) docs do not satisfy fleetReady/canBid.
+    const rwcDocs =
+      vehicleIds.length === 0
+        ? []
+        : await this.prisma.complianceDocument.findMany({
+            where: {
+              docType: ComplianceDocType.RWC,
+              vehicleId: { in: vehicleIds },
+            },
+            orderBy: [{ updatedAt: 'desc' }],
+            select: {
+              id: true,
+              vehicleId: true,
+              companyId: true,
+              status: true,
+              expiresAt: true,
+            },
+          });
 
     const byVehicle = new Map<string, (typeof rwcDocs)[number]>();
-    let companyRwc: (typeof rwcDocs)[number] | null = null;
     for (const doc of rwcDocs) {
-      if (doc.vehicleId) {
-        if (!byVehicle.has(doc.vehicleId)) byVehicle.set(doc.vehicleId, doc);
-      } else if (!companyRwc) {
-        companyRwc = doc;
+      if (doc.vehicleId && !byVehicle.has(doc.vehicleId)) {
+        byVehicle.set(doc.vehicleId, doc);
+      }
+    }
+
+    const activeAssignments =
+      vehicleIds.length === 0
+        ? []
+        : await this.prisma.assignment.findMany({
+            where: {
+              carrierCompanyId: company.id,
+              vehicleId: { in: vehicleIds },
+              status: AssignmentStatus.LOCKED,
+              trip: {
+                status: {
+                  notIn: [TripStatus.COMPLETED, TripStatus.CANCELLED],
+                },
+              },
+            },
+            orderBy: { updatedAt: 'desc' },
+            include: {
+              trip: {
+                select: {
+                  id: true,
+                  status: true,
+                  onBreak: true,
+                  breakStartedAt: true,
+                },
+              },
+              job: { select: { id: true, title: true } },
+            },
+          });
+
+    const assignmentByVehicle = new Map<string, (typeof activeAssignments)[number]>();
+    for (const row of activeAssignments) {
+      if (row.vehicleId && !assignmentByVehicle.has(row.vehicleId)) {
+        assignmentByVehicle.set(row.vehicleId, row);
       }
     }
 
     return {
-      items: items.map((v) => ({
-        ...v,
-        compliance: {
-          rwc: this.summarizeRwcDoc(byVehicle.get(v.id) ?? companyRwc),
-        },
-      })),
+      items: items.map((v) => {
+        const active = assignmentByVehicle.get(v.id) ?? null;
+        const trip = active?.trip ?? null;
+        /** Operational label for UI — does not mutate VehicleStatus (asset lifecycle). */
+        const activityStatus = trip
+          ? trip.onBreak
+            ? 'ON_BREAK'
+            : trip.status
+          : null;
+        return {
+          ...v,
+          activityStatus,
+          currentTrip: trip
+            ? {
+                id: trip.id,
+                status: trip.status,
+                onBreak: trip.onBreak,
+                breakStartedAt: trip.breakStartedAt,
+                jobId: active!.job.id,
+                jobTitle: active!.job.title,
+              }
+            : null,
+          compliance: {
+            rwc: this.summarizeRwcDoc(byVehicle.get(v.id) ?? null),
+          },
+        };
+      }),
     };
   }
 
-  /** FLT-01: RWC expiry pill for fleet rows (per-vehicle doc preferred over company-level). */
+  /** FLT-01: RWC pill — uploaded/under review/approved all show OK; Ops approval is documentStatus. */
   private summarizeRwcDoc(
     doc:
       | {
@@ -530,16 +693,17 @@ export class CarrierService {
       (expiresMs != null && expiresMs <= now)
     ) {
       state = 'EXPIRED';
-    } else if (
-      doc.status === ComplianceDocStatus.UPLOAD_PENDING ||
-      doc.status === ComplianceDocStatus.UPLOADED ||
-      doc.status === ComplianceDocStatus.UNDER_REVIEW
-    ) {
+    } else if (doc.status === ComplianceDocStatus.UPLOAD_PENDING) {
       state = 'PENDING';
-    } else if (expiresMs != null && expiresMs - now <= warnMs) {
-      state = 'EXPIRING';
-    } else if (doc.status === ComplianceDocStatus.APPROVED) {
-      state = 'OK';
+    } else if (
+      doc.status === ComplianceDocStatus.UPLOADED ||
+      doc.status === ComplianceDocStatus.UNDER_REVIEW ||
+      doc.status === ComplianceDocStatus.APPROVED
+    ) {
+      state =
+        expiresMs != null && expiresMs - now <= warnMs ? 'EXPIRING' : 'OK';
+    } else if (doc.status === ComplianceDocStatus.REJECTED) {
+      state = 'MISSING';
     } else {
       state = 'PENDING';
     }
@@ -560,24 +724,68 @@ export class CarrierService {
       orderBy: { createdAt: 'desc' },
       include: {
         user: { select: { id: true, email: true, name: true, phone: true, status: true } },
+        assignments: {
+          where: {
+            status: AssignmentStatus.LOCKED,
+            trip: {
+              status: {
+                notIn: [TripStatus.COMPLETED, TripStatus.CANCELLED],
+              },
+            },
+          },
+          orderBy: { updatedAt: 'desc' },
+          take: 1,
+          include: {
+            trip: {
+              select: {
+                id: true,
+                status: true,
+                onBreak: true,
+                breakStartedAt: true,
+              },
+            },
+            job: { select: { id: true, title: true } },
+          },
+        },
       },
     });
     return {
-      items: rows.map((d) => ({
-        id: d.id,
-        status: d.status,
-        licenceNo: d.licenceNo,
-        licenceClass: d.licenceClass,
-        licenceExpiry: d.licenceExpiry,
-        inviteAcceptedAt: d.inviteAcceptedAt,
-        inviteExpiresAt: d.inviteExpiresAt,
-        disabledAt: d.disabledAt,
-        disabledReason: d.disabledReason,
-        disabledNote: d.disabledNote,
-        createdAt: d.createdAt,
-        updatedAt: d.updatedAt,
-        user: d.user,
-      })),
+      items: rows.map((d) => {
+        const active = d.assignments[0] ?? null;
+        const trip = active?.trip ?? null;
+        /** Operational label for UI — does not mutate DriverStatus (account lifecycle). */
+        const activityStatus = trip
+          ? trip.onBreak
+            ? 'ON_BREAK'
+            : trip.status
+          : null;
+        return {
+          id: d.id,
+          status: d.status,
+          activityStatus,
+          currentTrip: trip
+            ? {
+                id: trip.id,
+                status: trip.status,
+                onBreak: trip.onBreak,
+                breakStartedAt: trip.breakStartedAt,
+                jobId: active!.job.id,
+                jobTitle: active!.job.title,
+              }
+            : null,
+          licenceNo: d.licenceNo,
+          licenceClass: d.licenceClass,
+          licenceExpiry: d.licenceExpiry,
+          inviteAcceptedAt: d.inviteAcceptedAt,
+          inviteExpiresAt: d.inviteExpiresAt,
+          disabledAt: d.disabledAt,
+          disabledReason: d.disabledReason,
+          disabledNote: d.disabledNote,
+          createdAt: d.createdAt,
+          updatedAt: d.updatedAt,
+          user: d.user,
+        };
+      }),
     };
   }
 
@@ -1342,6 +1550,28 @@ export class CarrierService {
         throw new NotFoundException(`Unknown region ${code}`);
       }
     }
+    if (input.capabilities.includes('DG')) {
+      const dgDoc = await this.prisma.complianceDocument.findFirst({
+        where: {
+          companyId: company.id,
+          docType: ComplianceDocType.DG_LICENCE,
+          vehicleId: null,
+          status: {
+            in: [
+              ComplianceDocStatus.UPLOADED,
+              ComplianceDocStatus.UNDER_REVIEW,
+              ComplianceDocStatus.APPROVED,
+            ],
+          },
+        },
+        select: { id: true },
+      });
+      if (!dgDoc) {
+        throw new BadRequestException(
+          'Upload a dangerous goods licence (DG_LICENCE) before enabling Dangerous goods',
+        );
+      }
+    }
     await this.prisma.company.update({
       where: { id: company.id },
       data: {
@@ -1362,6 +1592,69 @@ export class CarrierService {
     return this.getOnboarding(principal);
   }
 
+  /**
+   * Latest eligible RWC per ACTIVE vehicle (+ optional company DG_LICENCE) to attach on KYB submit.
+   */
+  private async collectKybFleetAndCapabilityDocs(
+    company: {
+      id: string;
+      capabilities: string[];
+      vehicles: Array<{ id?: string; status: string }>;
+    },
+    allowedDocStatuses: ComplianceDocStatus[],
+  ) {
+    const activeVehicleIds = company.vehicles
+      .filter((v) => v.status === 'ACTIVE' && v.id)
+      .map((v) => v.id!);
+    if (activeVehicleIds.length < 1) {
+      throw new BadRequestException('Add at least one ACTIVE vehicle before submit');
+    }
+
+    const rwcRows = await this.prisma.complianceDocument.findMany({
+      where: {
+        companyId: company.id,
+        docType: ComplianceDocType.RWC,
+        vehicleId: { in: activeVehicleIds },
+        status: { in: allowedDocStatuses },
+      },
+      orderBy: { updatedAt: 'desc' },
+      select: { id: true, vehicleId: true },
+    });
+    const latestRwcByVehicle = new Map<string, string>();
+    for (const row of rwcRows) {
+      if (row.vehicleId && !latestRwcByVehicle.has(row.vehicleId)) {
+        latestRwcByVehicle.set(row.vehicleId, row.id);
+      }
+    }
+    const missingRwc = activeVehicleIds.filter((id) => !latestRwcByVehicle.has(id));
+    if (missingRwc.length > 0) {
+      throw new BadRequestException(
+        'Each ACTIVE vehicle must have a roadworthy certificate (RWC) uploaded for that vehicle',
+      );
+    }
+
+    const attachIds = [...latestRwcByVehicle.values()];
+    if (company.capabilities.includes('DG')) {
+      const dgDoc = await this.prisma.complianceDocument.findFirst({
+        where: {
+          companyId: company.id,
+          docType: ComplianceDocType.DG_LICENCE,
+          vehicleId: null,
+          status: { in: allowedDocStatuses },
+        },
+        orderBy: { updatedAt: 'desc' },
+        select: { id: true },
+      });
+      if (!dgDoc) {
+        throw new BadRequestException(
+          'Missing required doc: DG_LICENCE (required when Dangerous goods capability is set)',
+        );
+      }
+      attachIds.push(dgDoc.id);
+    }
+    return attachIds;
+  }
+
   async submitVerification(
     principal: AuthenticatedPrincipal,
     input: CarrierSubmitVerificationInput,
@@ -1377,7 +1670,12 @@ export class CarrierService {
     }
     if (!this.fleetReady(company)) {
       throw new BadRequestException(
-        'Add at least one ACTIVE vehicle and one ACTIVE driver before submit',
+        'Add at least one ACTIVE vehicle (each with a vehicle RWC) and one ACTIVE driver before submit',
+      );
+    }
+    if (!this.activeVehiclesHaveRwc(company)) {
+      throw new BadRequestException(
+        'Each ACTIVE vehicle must have a roadworthy certificate (RWC) uploaded for that vehicle',
       );
     }
     if (company.serviceRegionCodes.length < 1) {
@@ -1387,6 +1685,7 @@ export class CarrierService {
     const open = await this.prisma.complianceCase.findFirst({
       where: {
         companyId: company.id,
+        caseType: ComplianceCaseType.CARRIER_KYB,
         status: {
           in: [
             ComplianceCaseStatus.OPEN,
@@ -1427,12 +1726,17 @@ export class CarrierService {
     for (const required of [
       ComplianceDocType.PUBLIC_LIABILITY,
       ComplianceDocType.CARGO_INSURANCE,
-      ComplianceDocType.RWC,
     ]) {
       if (!types.has(required)) {
         throw new BadRequestException(`Missing required doc: ${required}`);
       }
     }
+
+    const fleetAndCapDocIds = await this.collectKybFleetAndCapabilityDocs(
+      company,
+      allowedDocStatuses,
+    );
+    const allDocumentIds = [...new Set([...input.documentIds, ...fleetAndCapDocIds])];
 
     const created = await this.prisma.$transaction(async (tx) => {
       let complianceCase = open;
@@ -1458,7 +1762,7 @@ export class CarrierService {
         });
       }
       await tx.complianceDocument.updateMany({
-        where: { id: { in: input.documentIds } },
+        where: { id: { in: allDocumentIds } },
         data: { caseId: complianceCase.id, status: ComplianceDocStatus.UNDER_REVIEW },
       });
       await tx.company.update({
@@ -1473,7 +1777,7 @@ export class CarrierService {
       actorUserId: user.id,
       entityType: 'ComplianceCase',
       entityId: created.id,
-      metadata: { caseType: 'CARRIER_KYB', documentIds: input.documentIds },
+      metadata: { caseType: 'CARRIER_KYB', documentIds: allDocumentIds },
     });
     return this.getOnboarding(principal);
   }

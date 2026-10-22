@@ -5,6 +5,7 @@ import { RolesGuard } from '../../common/guards/roles.guard';
 import { AuditModule } from '../audit/audit.module';
 import { CarrierModule } from '../carrier/carrier.module';
 import { JobsModule } from '../jobs/jobs.module';
+import { NotificationsModule } from '../notifications/notifications.module';
 import { MatchingController } from './matching.controller';
 import { MatchingService } from './matching.service';
 
@@ -12,6 +13,7 @@ import { MatchingService } from './matching.service';
   imports: [
     JwtModule.register({}),
     AuditModule,
+    NotificationsModule,
     forwardRef(() => CarrierModule),
     JobsModule,
   ],

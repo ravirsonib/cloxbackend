@@ -1,4 +1,13 @@
-import { Body, Controller, Get, Param, Post, UseGuards } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  Param,
+  ParseIntPipe,
+  Post,
+  StreamableFile,
+  UseGuards,
+} from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import {
   AppRole,
@@ -173,6 +182,41 @@ export class TripsController {
     @Body(new ZodValidationPipe(tripNotifyApproachingSchema)) body: TripNotifyApproachingInput,
   ) {
     return this.trips.notifyApproaching(principal, tripId, body);
+  }
+
+  @Get(':tripId/pod/artifacts/:jobStopId/signature')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(AppRole.DRIVER)
+  @ApiOperation({ summary: 'M10 — download POD signature image for preview' })
+  async podSignatureArtifact(
+    @CurrentPrincipal() principal: AuthenticatedPrincipal,
+    @Param('tripId') tripId: string,
+    @Param('jobStopId') jobStopId: string,
+  ) {
+    const file = await this.trips.getPodArtifact(principal, tripId, jobStopId, 'signature');
+    return new StreamableFile(file.stream, {
+      type: file.mimeType,
+      disposition: `inline; filename="${file.filename}"`,
+    });
+  }
+
+  @Get(':tripId/pod/artifacts/:jobStopId/photos/:index')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(AppRole.DRIVER)
+  @ApiOperation({ summary: 'M10 — download POD goods photo for preview' })
+  async podPhotoArtifact(
+    @CurrentPrincipal() principal: AuthenticatedPrincipal,
+    @Param('tripId') tripId: string,
+    @Param('jobStopId') jobStopId: string,
+    @Param('index', ParseIntPipe) index: number,
+  ) {
+    const file = await this.trips.getPodArtifact(principal, tripId, jobStopId, 'photo', index);
+    return new StreamableFile(file.stream, {
+      type: file.mimeType,
+      disposition: `inline; filename="${file.filename}"`,
+    });
   }
 
   @Post(':tripId/pod/signature')

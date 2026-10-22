@@ -848,6 +848,164 @@ export class NotificationsService {
     });
   }
 
+  /** Carrier submitted a bid — notify sender to review proposals on the job. */
+  async notifyProposalSubmitted(params: {
+    senderEmails: string[];
+    jobId: string;
+    jobTitle: string;
+    amountIncGstCents: number;
+    etaMinutes: number | null;
+  }) {
+    const amount = `$${(params.amountIncGstCents / 100).toFixed(2)}`;
+    const jobLabel = params.jobTitle || params.jobId.slice(0, 8);
+    const details: EmailDetailRow[] = [
+      { label: 'Job', value: jobLabel },
+      { label: 'Bid (inc GST)', value: amount },
+      ...(params.etaMinutes != null
+        ? [{ label: 'ETA', value: `${params.etaMinutes} minutes` }]
+        : []),
+      { label: 'Job ID', value: params.jobId },
+    ];
+    const nextPath = `/jobs/${params.jobId}`;
+    const emails = [...new Set(params.senderEmails.map((e) => e.trim()).filter(Boolean))];
+    const results = await Promise.all(
+      emails.map((to) =>
+        this.sendBranded({
+          to,
+          subject: `CLOX — new bid on ${jobLabel}`,
+          text: [
+            `A carrier submitted a bid on your job ${jobLabel}.`,
+            `Amount (inc GST): ${amount}`,
+            params.etaMinutes != null ? `ETA: ${params.etaMinutes} minutes` : undefined,
+            '',
+            `Review and accept: ${this.signInContinueUrl(to, nextPath)}`,
+          ]
+            .filter((line) => line !== undefined)
+            .join('\n'),
+          eyebrow: 'New bid',
+          title: 'A carrier bid on your job',
+          intro:
+            'A transport company submitted a proposal. Open the job to compare bids and accept one to start payment.',
+          details,
+          nextSteps: [
+            {
+              title: 'Review proposals',
+              body: 'Open the job detail page to see amount, ETA, and vehicle class for each bid.',
+            },
+            {
+              title: 'Accept & pay',
+              body: 'Accepting a bid starts payment. Once paid, the assignment locks for the carrier.',
+            },
+          ],
+          cta: {
+            label: 'Review bid →',
+            href: this.signInContinueUrl(to, nextPath),
+          },
+        }),
+      ),
+    );
+    return { results, notified: emails.length };
+  }
+
+  /**
+   * Sender paid & assignment locked — notify carrier (action) + assigned driver (new trip).
+   */
+  async notifyAssignmentLocked(params: {
+    carrierEmails: string[];
+    driverEmail: string | null;
+    jobId: string;
+    jobTitle: string;
+    amountIncGstCents: number;
+    vehicleLabel: string;
+    driverName: string;
+  }) {
+    const amount = `$${(params.amountIncGstCents / 100).toFixed(2)}`;
+    const jobLabel = params.jobTitle || params.jobId.slice(0, 8);
+    const details: EmailDetailRow[] = [
+      { label: 'Job', value: jobLabel },
+      { label: 'Paid (inc GST)', value: amount },
+      { label: 'Vehicle', value: params.vehicleLabel },
+      { label: 'Driver', value: params.driverName },
+      { label: 'Job ID', value: params.jobId },
+    ];
+
+    const carrierEmails = [
+      ...new Set(params.carrierEmails.map((e) => e.trim()).filter(Boolean)),
+    ];
+    const carrierResults = await Promise.all(
+      carrierEmails.map((to) =>
+        this.sendBranded({
+          to,
+          subject: `CLOX — bid accepted · ${jobLabel}`,
+          text: [
+            `Your bid was accepted and paid for job ${jobLabel}.`,
+            `Amount (inc GST): ${amount}`,
+            `Vehicle: ${params.vehicleLabel}`,
+            `Driver: ${params.driverName}`,
+            '',
+            `Open assignments: ${this.signInContinueUrl(to, '/assignments')}`,
+          ].join('\n'),
+          eyebrow: 'Bid won',
+          title: 'Your bid was accepted',
+          intro:
+            'The sender paid for this job. The assignment is locked. Confirm crew readiness and make sure the driver can start the trip.',
+          details,
+          nextSteps: [
+            {
+              title: 'Open assignments',
+              body: 'Review the locked assignment and reassign vehicle/driver only if needed before the trip starts.',
+            },
+            {
+              title: 'Driver trip',
+              body: 'The assigned driver can open My trips to complete safety checks and start.',
+            },
+          ],
+          cta: {
+            label: 'Open assignments →',
+            href: this.signInContinueUrl(to, '/assignments'),
+          },
+        }),
+      ),
+    );
+
+    let driverResult: { skipped: boolean } | null = null;
+    const driverTo = params.driverEmail?.trim();
+    if (driverTo) {
+      driverResult = await this.sendBranded({
+        to: driverTo,
+        subject: `CLOX — new trip · ${jobLabel}`,
+        text: [
+          `You have been assigned a new trip: ${jobLabel}.`,
+          `Vehicle: ${params.vehicleLabel}`,
+          '',
+          `Open My trips: ${this.signInContinueUrl(driverTo, '/trips')}`,
+        ].join('\n'),
+        eyebrow: 'New trip',
+        title: 'You have a new trip',
+        intro:
+          'Your carrier won this job and payment is confirmed. Open My trips to complete safety checks and start when ready.',
+        details: details.filter((d) => d.label !== 'Paid (inc GST)'),
+        nextSteps: [
+          {
+            title: 'Open My trips',
+            body: 'Complete pre-trip safety and mass declarations before starting.',
+          },
+        ],
+        cta: {
+          label: 'Open My trips →',
+          href: this.signInContinueUrl(driverTo, '/trips'),
+        },
+      });
+    }
+
+    return {
+      carrier: carrierResults,
+      driver: driverResult,
+      notifiedCarrier: carrierEmails.length,
+      notifiedDriver: Boolean(driverTo),
+    };
+  }
+
   /** Trip exception opened — notify carrier (action) + sender (delay) + driver confirm. */
   async notifyTripExceptionOpened(params: {
     driverEmail: string;
@@ -1261,10 +1419,17 @@ export class NotificationsService {
     if (params.receiverEmail?.includes('@')) {
       targets.add(params.receiverEmail.trim().toLowerCase());
     }
-    const results = [];
+    if (targets.size === 0) {
+      this.logger.warn(
+        `POD finalized email skipped — no sender/carrier/receiver addresses for job ${params.jobId}`,
+      );
+      return { sentTo: [] as string[], results: [] as Array<{ skipped: boolean }> };
+    }
+
+    const results: Array<{ skipped: boolean; to: string; error?: string }> = [];
     for (const to of targets) {
-      results.push(
-        await this.sendBranded({
+      try {
+        const result = await this.sendBranded({
           to,
           subject: 'CLOX — delivery completed (POD attached)',
           text: [
@@ -1282,9 +1447,17 @@ export class NotificationsService {
           details,
           cta: this.loginCta(),
           attachments: params.attachments,
-        }),
-      );
+        });
+        results.push({ ...result, to });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        this.logger.error(`POD finalized email failed for ${to}: ${message}`);
+        results.push({ skipped: true, to, error: message });
+      }
     }
+    this.logger.log(
+      `POD finalized emails: ${results.filter((r) => !r.skipped && !r.error).length}/${targets.size} delivered for job ${params.jobId}`,
+    );
     return { sentTo: [...targets], results };
   }
 

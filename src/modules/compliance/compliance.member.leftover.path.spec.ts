@@ -62,6 +62,7 @@ describe('ComplianceService member/decide leftovers', () => {
       { assertLocalOwnsCompany: jest.fn(), complianceCaseBookFilter: jest.fn().mockImplementation((p) => (p.role === 'LOCAL_BDE' ? { company: { referredByAdminUserId: p.id } } : null)) } as never,
       abr as never,
       { sendComplianceApprovedEmail: jest.fn().mockResolvedValue({ skipped: true }), sendComplianceInfoRequestedEmail: jest.fn().mockResolvedValue({ skipped: true }) } as never,
+      { applyProposedChanges: jest.fn() } as never,
     );
   }
 
@@ -165,6 +166,7 @@ describe('ComplianceService member/decide leftovers', () => {
         sendComplianceApprovedEmail: jest.fn().mockResolvedValue({ skipped: true }),
         sendComplianceInfoRequestedEmail: jest.fn().mockResolvedValue({ skipped: true }),
       } as never,
+      { applyProposedChanges: jest.fn() } as never
     );
     await expect(
       service.submit(localBde, {

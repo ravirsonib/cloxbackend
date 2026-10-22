@@ -195,7 +195,11 @@ describe('Controller delegation leftovers', () => {
     const matching = {
       submitProposal: jest.fn().mockResolvedValue({ id: 'p1' }),
     };
-    const c = new CarrierController(carrier as never, matching as never);
+    const c = new CarrierController(
+      carrier as never,
+      matching as never,
+      { getProfile: jest.fn(), updateSelf: jest.fn(), requestChange: jest.fn() } as never,
+    );
     await expect(c.register({} as never)).resolves.toEqual({ id: 'co' });
     await expect(c.onboarding(principal)).resolves.toEqual({ step: 1 });
     await expect(c.profile(principal, {} as never)).resolves.toEqual({ ok: true });

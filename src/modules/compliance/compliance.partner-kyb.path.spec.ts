@@ -68,6 +68,7 @@ describe('ComplianceService ADMIN_PARTNER_KYB decide', () => {
       { assertLocalOwnsCompany: jest.fn(), complianceCaseBookFilter: jest.fn().mockImplementation((p) => (p.role === 'LOCAL_BDE' ? { company: { referredByAdminUserId: p.id } } : null)) } as never,
       abr as never,
       notifications as never,
+      { applyProposedChanges: jest.fn() } as never,
     );
   }
 

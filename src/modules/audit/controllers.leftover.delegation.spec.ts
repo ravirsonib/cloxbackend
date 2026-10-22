@@ -37,7 +37,11 @@ describe('Controller delegation leftovers (sender/driver/docs/ops/matching/leads
       confirmPayment: jest.fn().mockResolvedValue({ ok: true }),
       getBookingEligibility: jest.fn().mockResolvedValue({ canBook: true }),
     };
-    const c = new SenderController(sender as never);
+    const c = new SenderController(sender as never, {
+      getProfile: jest.fn(),
+      updateSelf: jest.fn(),
+      requestChange: jest.fn(),
+    } as never);
     await expect(c.register({} as never)).resolves.toEqual({ id: 'co' });
     await expect(c.onboarding(principal)).resolves.toEqual({ step: 1 });
     await expect(c.profile(principal, {} as never)).resolves.toEqual({ ok: true });

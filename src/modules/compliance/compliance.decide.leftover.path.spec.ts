@@ -46,6 +46,7 @@ describe('ComplianceService approve/reject region + decision leftovers', () => {
       { assertLocalOwnsCompany: jest.fn(), complianceCaseBookFilter: jest.fn().mockImplementation((p) => (p.role === 'LOCAL_BDE' ? { company: { referredByAdminUserId: p.id } } : null)) } as never,
       abr as never,
       { sendComplianceApprovedEmail: jest.fn().mockResolvedValue({ skipped: true }), sendComplianceInfoRequestedEmail: jest.fn().mockResolvedValue({ skipped: true }) } as never,
+      { applyProposedChanges: jest.fn() } as never,
     );
   }
 
@@ -142,7 +143,7 @@ describe('ComplianceService approve/reject region + decision leftovers', () => {
     expect(scope.assertRegionAccess).toHaveBeenCalledWith(stateMaster, 'VIC');
     expect(audit.recordPlatform).toHaveBeenCalledWith(
       expect.objectContaining({
-        metadata: { note: 'docs incomplete' },
+        metadata: expect.objectContaining({ note: 'docs incomplete' }),
       }),
     );
   });

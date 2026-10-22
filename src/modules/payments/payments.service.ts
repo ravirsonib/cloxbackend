@@ -6,6 +6,7 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  Optional,
   ServiceUnavailableException,
   forwardRef,
 } from '@nestjs/common';
@@ -14,6 +15,7 @@ import {
   JobStatus,
   PaymentEventStatus,
   PaymentEventType,
+  PlatformRole,
   ProposalStatus,
   SettlementLineStatus,
   SettlementRecipientType,
@@ -26,6 +28,7 @@ import type { AuthenticatedPrincipal } from '../../common/guards/jwt-auth.guard'
 import { AuditAction } from '../../shared/types';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
+import { NotificationsService } from '../notifications/notifications.service';
 import { TripsService } from '../trips/trips.service';
 import { splitIncGst } from '../trips/geofence.util';
 import { StripeService } from './stripe.service';
@@ -42,6 +45,7 @@ export class PaymentsService {
     private readonly stripe: StripeService,
     @Inject(forwardRef(() => TripsService))
     private readonly trips: TripsService,
+    @Optional() private readonly notifications?: NotificationsService,
   ) {}
 
   private ensureDatabase() {
@@ -1199,12 +1203,65 @@ export class PaymentsService {
 
     const locked = await this.prisma.assignment.findUnique({
       where: { jobId: pe.jobId },
+      include: {
+        job: { select: { id: true, title: true } },
+        vehicle: { select: { registration: true, label: true } },
+        driver: {
+          select: {
+            user: { select: { email: true, name: true } },
+          },
+        },
+        carrierCompany: {
+          select: {
+            email: true,
+            users: {
+              where: { role: PlatformRole.TRANSPORT_COMPANY },
+              select: { email: true },
+              take: 10,
+            },
+          },
+        },
+      },
     });
     if (locked) {
       await this.trips.ensureTripForAssignment(locked.id);
+      await this.notifyAssignmentLockedAfterPay({
+        jobId: pe.jobId,
+        jobTitle: locked.job?.title ?? '',
+        amountIncGstCents: pe.amountIncGstCents,
+        vehicleLabel:
+          locked.vehicle?.registration ?? locked.vehicle?.label ?? 'Vehicle',
+        driverName: locked.driver?.user.name ?? locked.driver?.user.email ?? 'Driver',
+        driverEmail: locked.driver?.user.email ?? null,
+        carrierEmails: [
+          ...locked.carrierCompany.users.map((u) => u.email),
+          ...(locked.carrierCompany.email ? [locked.carrierCompany.email] : []),
+        ],
+      });
     }
 
     return { skipped: false as const };
+  }
+
+  private async notifyAssignmentLockedAfterPay(params: {
+    jobId: string;
+    jobTitle: string;
+    amountIncGstCents: number;
+    vehicleLabel: string;
+    driverName: string;
+    driverEmail: string | null;
+    carrierEmails: string[];
+  }) {
+    if (!this.notifications) return;
+    try {
+      await this.notifications.notifyAssignmentLocked(params);
+    } catch (err) {
+      this.logger.warn(
+        `Assignment-locked email failed for job ${params.jobId}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
   }
 
   async markPaymentFailed(params: {

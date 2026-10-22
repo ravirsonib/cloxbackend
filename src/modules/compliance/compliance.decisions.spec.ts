@@ -53,6 +53,7 @@ describe('ComplianceService decision gates', () => {
       { assertLocalOwnsCompany: jest.fn(), complianceCaseBookFilter: jest.fn().mockImplementation((p) => (p.role === 'LOCAL_BDE' ? { company: { referredByAdminUserId: p.id } } : null)) } as never,
       abr,
       { sendComplianceApprovedEmail: jest.fn().mockResolvedValue({ skipped: true }), sendComplianceInfoRequestedEmail: jest.fn().mockResolvedValue({ skipped: true }) } as never,
+      { applyProposedChanges: jest.fn() } as never,
     );
 
     await expect(service.reject(superAdmin(), 'case-1', { note: 'oops' })).rejects.toThrow(
@@ -97,6 +98,7 @@ describe('ComplianceService decision gates', () => {
       } as never,
       { lookupAbn: jest.fn() } as never,
       { sendComplianceApprovedEmail: jest.fn().mockResolvedValue({ skipped: true }), sendComplianceInfoRequestedEmail: jest.fn().mockResolvedValue({ skipped: true }) } as never,
+      { applyProposedChanges: jest.fn() } as never
     );
 
     await expect(service.requestInfo(superAdmin(), 'case-1', {})).rejects.toBeInstanceOf(

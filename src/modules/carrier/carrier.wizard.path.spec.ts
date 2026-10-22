@@ -14,7 +14,7 @@ const carrierPrincipal: AuthenticatedPrincipal = {
 const REQUIRED_DOCS = [
   { docType: ComplianceDocType.PUBLIC_LIABILITY },
   { docType: ComplianceDocType.CARGO_INSURANCE },
-  { docType: ComplianceDocType.RWC },
+  { docType: ComplianceDocType.RWC, vehicleId: 'veh-1' },
 ];
 
 function company(overrides: Record<string, unknown> = {}) {
@@ -115,12 +115,9 @@ describe('CarrierService getOnboarding wizardStep leftovers', () => {
     ],
     ['profile missing ABN', company({ abn: null }), 'profile'],
     [
-      'documents missing RWC',
+      'documents missing cargo',
       company({
-        complianceDocuments: [
-          { docType: ComplianceDocType.PUBLIC_LIABILITY },
-          { docType: ComplianceDocType.CARGO_INSURANCE },
-        ],
+        complianceDocuments: [{ docType: ComplianceDocType.PUBLIC_LIABILITY }],
       }),
       'documents',
     ],
@@ -130,6 +127,16 @@ describe('CarrierService getOnboarding wizardStep leftovers', () => {
       'connect',
     ],
     ['vehicles empty', company({ vehicles: [] }), 'vehicles'],
+    [
+      'vehicles missing per-vehicle RWC',
+      company({
+        complianceDocuments: [
+          { docType: ComplianceDocType.PUBLIC_LIABILITY },
+          { docType: ComplianceDocType.CARGO_INSURANCE },
+        ],
+      }),
+      'vehicles',
+    ],
     ['drivers empty', company({ drivers: [] }), 'drivers'],
     [
       'capabilities empty regions',

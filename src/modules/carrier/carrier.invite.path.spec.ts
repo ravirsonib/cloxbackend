@@ -6,6 +6,7 @@ import {
 import {
   CompanyStatus,
   CompanyType,
+  ComplianceDocType,
   DriverStatus,
 } from '@prisma/client';
 import type { AuthenticatedPrincipal } from '../../common/guards/jwt-auth.guard';
@@ -199,8 +200,11 @@ describe('CarrierService invite + eligibility paths', () => {
             stripeConnectPayoutsEnabled: true,
             abn: '51824753556',
             serviceRegionCodes: ['VIC'],
-            vehicles: [{ status: 'ACTIVE' }],
+            vehicles: [{ id: 'veh-1', status: 'ACTIVE' }],
             drivers: [{ status: 'ACTIVE' }],
+            complianceDocuments: [
+              { docType: ComplianceDocType.RWC, vehicleId: 'veh-1' },
+            ],
           }),
         }),
       },

@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { JwtModule } from '@nestjs/jwt';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../../common/guards/roles.guard';
+import { CompanyProfileModule } from '../../common/services/company-profile.module';
 import { ScopeService } from '../../common/services/scope.service';
 import { AuditModule } from '../audit/audit.module';
 import { NotificationsModule } from '../notifications/notifications.module';
@@ -12,7 +13,13 @@ import { ExpiryWatchdogService } from './expiry-watchdog.service';
 import { DriverModule } from '../driver/driver.module';
 
 @Module({
-  imports: [JwtModule.register({}), AuditModule, DriverModule, NotificationsModule],
+  imports: [
+    JwtModule.register({}),
+    AuditModule,
+    DriverModule,
+    NotificationsModule,
+    CompanyProfileModule,
+  ],
   controllers: [ComplianceController],
   providers: [
     ComplianceService,

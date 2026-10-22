@@ -44,6 +44,7 @@ describe('ComplianceService gates', () => {
         sendComplianceApprovedEmail: jest.fn().mockResolvedValue({ skipped: true }),
         sendComplianceInfoRequestedEmail: jest.fn().mockResolvedValue({ skipped: true }),
       } as never,
+      { applyProposedChanges: jest.fn() } as never
     );
 
     const local: AuthenticatedPrincipal = {

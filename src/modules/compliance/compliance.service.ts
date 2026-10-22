@@ -22,6 +22,7 @@ import {
 } from '@prisma/client';
 import type { AuthenticatedPrincipal } from '../../common/guards/jwt-auth.guard';
 import { AttributionService } from '../../common/services/attribution.service';
+import { CompanyProfileService } from '../../common/services/company-profile.service';
 import { ScopeService } from '../../common/services/scope.service';
 import {
   AdminRole,
@@ -35,10 +36,10 @@ import { AuditService } from '../audit/audit.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { AbrService } from './abr.service';
 
+/** Company KYB only — RWC is per-vehicle (fleet), not a carrier company doc. */
 const CARRIER_REQUIRED: ComplianceDocType[] = [
   ComplianceDocType.PUBLIC_LIABILITY,
   ComplianceDocType.CARGO_INSURANCE,
-  ComplianceDocType.RWC,
 ];
 
 @Injectable()
@@ -52,6 +53,7 @@ export class ComplianceService {
     private readonly attribution: AttributionService,
     private readonly abr: AbrService,
     private readonly notifications: NotificationsService,
+    private readonly companyProfile: CompanyProfileService,
   ) {}
 
   private ensureDatabase() {
@@ -339,13 +341,33 @@ export class ComplianceService {
     }
     const infoRequestedAt = complianceCase.infoRequestedAt;
     const infoRequestedMs = infoRequestedAt?.getTime() ?? null;
+    const vehicleIds = [
+      ...new Set(
+        complianceCase.documents
+          .map((d) => d.vehicleId)
+          .filter((id): id is string => Boolean(id)),
+      ),
+    ];
+    const vehicles =
+      vehicleIds.length === 0
+        ? []
+        : await this.prisma.vehicle.findMany({
+            where: { id: { in: vehicleIds }, companyId: complianceCase.companyId },
+            select: { id: true, registration: true, label: true },
+          });
+    const vehicleById = new Map(vehicles.map((v) => [v.id, v]));
     const documents = [...complianceCase.documents]
       .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
-      .map((doc) => ({
-        ...doc,
-        isNewSinceInfoRequest:
-          infoRequestedMs != null && doc.createdAt.getTime() > infoRequestedMs,
-      }));
+      .map((doc) => {
+        const vehicle = doc.vehicleId ? vehicleById.get(doc.vehicleId) : undefined;
+        return {
+          ...doc,
+          vehicleRegistration: vehicle?.registration ?? null,
+          vehicleLabel: vehicle?.label ?? null,
+          isNewSinceInfoRequest:
+            infoRequestedMs != null && doc.createdAt.getTime() > infoRequestedMs,
+        };
+      });
     return { ...complianceCase, documents, abrAssist };
   }
 
@@ -371,6 +393,89 @@ export class ComplianceService {
 
     if (complianceCase.caseType === ComplianceCaseType.ADMIN_PARTNER_KYB) {
       return this.approveAdminPartnerKyb(principal, caseId, complianceCase, input);
+    }
+
+    // Fleet RWC review: approve docs only — keep company BID_ELIGIBLE (or current status).
+    if (complianceCase.caseType === ComplianceCaseType.CARRIER_FLEET_RWC) {
+      await this.prisma.$transaction(async (tx) => {
+        await tx.complianceCase.update({
+          where: { id: caseId },
+          data: {
+            status: ComplianceCaseStatus.APPROVED,
+            decisionNote: input.note,
+            decidedAt: new Date(),
+            decidedByAdminId: principal.id,
+          },
+        });
+        await tx.complianceDocument.updateMany({
+          where: { caseId },
+          data: { status: ComplianceDocStatus.APPROVED, reviewedAt: new Date() },
+        });
+      });
+      await this.audit.recordPlatform({
+        action: AuditAction.COMPLIANCE_APPROVED,
+        actorAdminId: principal.id,
+        entityType: 'ComplianceCase',
+        entityId: caseId,
+        metadata: {
+          nextCompanyStatus: complianceCase.company.status,
+          note: input.note ?? null,
+          caseType: ComplianceCaseType.CARRIER_FLEET_RWC,
+        },
+      });
+      return {
+        id: caseId,
+        status: ComplianceCaseStatus.APPROVED,
+        companyStatus: complianceCase.company.status,
+      };
+    }
+
+    // Profile field change: apply proposedChanges; keep company status.
+    if (complianceCase.caseType === ComplianceCaseType.COMPANY_PROFILE_CHANGE) {
+      let applied: Awaited<ReturnType<CompanyProfileService['applyProposedChanges']>>;
+      await this.prisma.$transaction(async (tx) => {
+        applied = await this.companyProfile.applyProposedChanges(
+          tx,
+          complianceCase.companyId,
+          complianceCase.proposedChanges,
+        );
+        await tx.complianceCase.update({
+          where: { id: caseId },
+          data: {
+            status: ComplianceCaseStatus.APPROVED,
+            decisionNote: input.note ?? complianceCase.decisionNote,
+            decidedAt: new Date(),
+            decidedByAdminId: principal.id,
+          },
+        });
+      });
+      await this.audit.recordPlatform({
+        action: AuditAction.COMPLIANCE_APPROVED,
+        actorAdminId: principal.id,
+        entityType: 'ComplianceCase',
+        entityId: caseId,
+        metadata: {
+          nextCompanyStatus: complianceCase.company.status,
+          note: input.note ?? null,
+          caseType: ComplianceCaseType.COMPANY_PROFILE_CHANGE,
+          appliedChanges: applied!,
+        },
+      });
+      await this.audit.recordPlatform({
+        action: AuditAction.COMPANY_PROFILE_CHANGE_APPLIED,
+        actorAdminId: principal.id,
+        entityType: 'Company',
+        entityId: complianceCase.companyId,
+        metadata: {
+          caseId,
+          appliedChanges: applied!,
+        },
+      });
+      return {
+        id: caseId,
+        status: ComplianceCaseStatus.APPROVED,
+        companyStatus: complianceCase.company.status,
+      };
     }
 
     const nextCompanyStatus =
@@ -599,6 +704,50 @@ export class ComplianceService {
     this.assertCanDecidePartnerKyb(principal, complianceCase.caseType);
     this.assertCaseActionable(complianceCase.status);
 
+    // Fleet RWC / profile change reject: close case only — do not reject the company.
+    if (
+      complianceCase.caseType === ComplianceCaseType.CARRIER_FLEET_RWC ||
+      complianceCase.caseType === ComplianceCaseType.COMPANY_PROFILE_CHANGE
+    ) {
+      await this.prisma.$transaction(async (tx) => {
+        await tx.complianceCase.update({
+          where: { id: caseId },
+          data: {
+            status: ComplianceCaseStatus.REJECTED,
+            decisionNote: input.note,
+            decidedAt: new Date(),
+            decidedByAdminId: principal.id,
+          },
+        });
+        if (complianceCase.caseType === ComplianceCaseType.CARRIER_FLEET_RWC) {
+          await tx.complianceDocument.updateMany({
+            where: { caseId },
+            data: {
+              status: ComplianceDocStatus.REJECTED,
+              reviewedAt: new Date(),
+              reviewNote: input.note,
+            },
+          });
+        }
+      });
+      await this.audit.recordPlatform({
+        action: AuditAction.COMPLIANCE_REJECTED,
+        actorAdminId: principal.id,
+        entityType: 'ComplianceCase',
+        entityId: caseId,
+        metadata: {
+          note: input.note ?? null,
+          caseType: complianceCase.caseType,
+          companyStatusUnchanged: complianceCase.company.status,
+        },
+      });
+      return {
+        id: caseId,
+        status: ComplianceCaseStatus.REJECTED,
+        companyStatus: complianceCase.company.status,
+      };
+    }
+
     const partner =
       complianceCase.caseType === ComplianceCaseType.ADMIN_PARTNER_KYB
         ? await this.prisma.adminUser.findFirst({
@@ -673,6 +822,31 @@ export class ComplianceService {
     const complianceCase = await this.loadCaseForAdmin(principal, caseId);
     this.assertCanDecidePartnerKyb(principal, complianceCase.caseType);
     this.assertCaseActionable(complianceCase.status);
+
+    // Fleet RWC: request replacement without pulling company out of BID_ELIGIBLE.
+    if (complianceCase.caseType === ComplianceCaseType.CARRIER_FLEET_RWC) {
+      const infoRequestedAt = new Date();
+      await this.prisma.complianceCase.update({
+        where: { id: caseId },
+        data: {
+          status: ComplianceCaseStatus.INFO_REQUESTED,
+          decisionNote: input.note,
+          infoRequestedAt,
+        },
+      });
+      await this.audit.recordPlatform({
+        action: AuditAction.COMPLIANCE_INFO_REQUESTED,
+        actorAdminId: principal.id,
+        entityType: 'ComplianceCase',
+        entityId: caseId,
+        metadata: { note: input.note ?? null, caseType: complianceCase.caseType },
+      });
+      return {
+        id: caseId,
+        status: ComplianceCaseStatus.INFO_REQUESTED,
+        companyStatus: complianceCase.company.status,
+      };
+    }
 
     const partner =
       complianceCase.caseType === ComplianceCaseType.ADMIN_PARTNER_KYB

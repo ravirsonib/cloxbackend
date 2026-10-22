@@ -52,7 +52,8 @@ import {
   parseDataUrl,
   writeTripArtifact,
 } from './pod-artifacts.util';
-import { readFile } from 'fs/promises';
+import { createReadStream, type ReadStream } from 'fs';
+import { access, readFile } from 'fs/promises';
 import { join } from 'path';
 
 @Injectable()
@@ -113,6 +114,7 @@ export class TripsService {
       podStatus?: string;
       signedAt?: Date | null;
       signerName?: string | null;
+      signatureStorageKey?: string | null;
       receiverPresentAttested?: boolean;
       goodsPhotoRefs?: unknown;
       podFinalizedAt?: Date | null;
@@ -143,6 +145,7 @@ export class TripsService {
       podStatus: p.podStatus ?? 'PENDING',
       signedAt: p.signedAt ?? null,
       signerName: p.signerName ?? null,
+      hasSignature: Boolean(p.signatureStorageKey),
       receiverPresentAttested: Boolean(p.receiverPresentAttested),
       goodsPhotoCount: Array.isArray(p.goodsPhotoRefs) ? p.goodsPhotoRefs.length : 0,
       podFinalizedAt: p.podFinalizedAt ?? null,
@@ -205,6 +208,51 @@ export class TripsService {
     return (surcharges ?? []).some(
       (s) => s.kind === SurchargeKind.MASS && s.status === SurchargeStatus.PENDING_PAYMENT,
     );
+  }
+
+  private hasPendingPaymentSurcharge(
+    surcharges?: Array<{ status: SurchargeStatus }>,
+  ): boolean {
+    return (surcharges ?? []).some((s) => s.status === SurchargeStatus.PENDING_PAYMENT);
+  }
+
+  /** Best-effort charge deferred WAITING rows (created with chargeNow=false during dwell). */
+  private async settlePendingWaitingSurcharges(tripId: string) {
+    const pendingWaiting = await this.prisma.surcharge.findMany({
+      where: {
+        tripId,
+        kind: SurchargeKind.WAITING,
+        status: SurchargeStatus.PENDING_PAYMENT,
+      },
+      select: { id: true },
+    });
+    for (const s of pendingWaiting) {
+      try {
+        await this.payments.chargeSurcharge(s.id);
+      } catch {
+        // Caller decides whether remaining PENDING_PAYMENT blocks POD.
+      }
+    }
+  }
+
+  /**
+   * POD is only allowed after pending surcharges are cleared.
+   * Tries to settle deferred WAITING first; any remaining PENDING_PAYMENT blocks POD.
+   */
+  private async assertReadyForPod(tripId: string) {
+    await this.settlePendingWaitingSurcharges(tripId);
+    const pending = await this.prisma.surcharge.count({
+      where: {
+        tripId,
+        status: SurchargeStatus.PENDING_PAYMENT,
+      },
+    });
+    if (pending > 0) {
+      throw new BadRequestException({
+        message: 'Pending surcharges must be paid or waived before proof of delivery',
+        code: 'POD_BLOCKED_PENDING_SURCHARGE',
+      });
+    }
   }
 
   /** Create PENDING_GATES trip when assignment is paid/locked (idempotent). */
@@ -338,6 +386,7 @@ export class TripsService {
     }>;
   }) {
     const pendingMass = this.hasPendingMass(trip.surcharges);
+    const pendingSurcharges = this.hasPendingPaymentSurcharge(trip.surcharges);
     const massOk = trip.massCheckOk && !pendingMass;
     const gates = {
       paid: trip.assignment?.status === AssignmentStatus.LOCKED,
@@ -350,6 +399,9 @@ export class TripsService {
         massOk &&
         !pendingMass &&
         !trip.startedAt,
+      /** POD capture/finalize only when no PENDING_PAYMENT surcharges remain. */
+      canFinalizePod: !pendingSurcharges,
+      pendingSurcharges,
     };
     return {
       id: trip.id,
@@ -1078,7 +1130,12 @@ export class TripsService {
     };
   }
 
-  /** Mark trip/job/assignment COMPLETED when geofence + POD + surcharges clear. */
+  /**
+   * Mark trip/job/assignment COMPLETED when every DROPOFF POD is FINALIZED.
+   * POD is the operational end of the trip (geofence exit not required).
+   * Pending surcharges are gated at POD capture — by the time POD is FINALIZED
+   * they should already be paid/waived.
+   */
   private async completeTripIfReady(tripId: string, actorUserId?: string) {
     const trip = await this.prisma.trip.findUnique({
       where: { id: tripId },
@@ -1093,41 +1150,12 @@ export class TripsService {
     if (trip.job.stops.length < 1) return;
 
     const byStop = new Map(trip.stopProgress.map((p) => [p.jobStopId, p]));
-    const allDone = trip.job.stops.every((s) => {
-      const p = byStop.get(s.id);
-      return Boolean(p?.arrivalRecorded && p.exitedAt);
-    });
-    if (!allDone) return;
-
-    // M10 — every DROPOFF must have finalized driver-SOG POD
-    const dropoffsReady = trip.job.stops
-      .filter((s) => s.stopType === 'DROPOFF')
-      .every((s) => byStop.get(s.id)?.podStatus === 'FINALIZED');
-    if (!dropoffsReady) return;
-
-    // Attempt to settle deferred WAITING before completion (chargeNow was false during dwell).
-    const pendingWaiting = trip.surcharges.filter(
-      (s) =>
-        s.kind === SurchargeKind.WAITING &&
-        s.status === SurchargeStatus.PENDING_PAYMENT,
+    const dropoffs = trip.job.stops.filter((s) => s.stopType === 'DROPOFF');
+    if (dropoffs.length < 1) return;
+    const dropoffsReady = dropoffs.every(
+      (s) => byStop.get(s.id)?.podStatus === 'FINALIZED',
     );
-    for (const s of pendingWaiting) {
-      try {
-        await this.payments.chargeSurcharge(s.id);
-      } catch {
-        // Gate below blocks COMPLETED until paid or waived.
-      }
-    }
-
-    const stillPending = await this.prisma.surcharge.count({
-      where: {
-        tripId: trip.id,
-        status: SurchargeStatus.PENDING_PAYMENT,
-      },
-    });
-    if (stillPending > 0) {
-      return;
-    }
+    if (!dropoffsReady) return;
 
     await this.prisma.$transaction(async (tx) => {
       await tx.trip.update({
@@ -1934,6 +1962,71 @@ export class TripsService {
     return this.getDriverTrip(principal, tripId);
   }
 
+  async getPodArtifact(
+    principal: AuthenticatedPrincipal,
+    tripId: string,
+    jobStopId: string,
+    kind: 'signature' | 'photo',
+    index = 0,
+  ): Promise<{ stream: ReadStream; mimeType: string; filename: string }> {
+    this.ensureDatabase();
+    const user = await this.requireDriver(principal);
+    const trip = await this.loadTripForDriver(user.driver!.id, tripId);
+    const stop = (trip.job.stops ?? []).find((s) => s.id === jobStopId);
+    if (!stop || stop.stopType !== 'DROPOFF') {
+      throw new NotFoundException('POD stop not found');
+    }
+
+    const progress = await this.prisma.tripStopProgress.findUnique({
+      where: { tripId_jobStopId: { tripId: trip.id, jobStopId: stop.id } },
+    });
+    if (!progress) {
+      throw new NotFoundException('POD progress not found');
+    }
+
+    let storageKey: string | null = null;
+    if (kind === 'signature') {
+      storageKey = progress.signatureStorageKey;
+    } else {
+      const refs = Array.isArray(progress.goodsPhotoRefs)
+        ? (progress.goodsPhotoRefs as string[])
+        : [];
+      if (!Number.isInteger(index) || index < 0 || index >= refs.length) {
+        throw new NotFoundException('Photo not found');
+      }
+      storageKey = refs[index] ?? null;
+    }
+
+    if (!storageKey || storageKey.includes('..') || !storageKey.startsWith(`trips/${trip.id}/`)) {
+      throw new NotFoundException('Artifact not found');
+    }
+
+    const fullPath = join(this.storageRoot(), storageKey);
+    try {
+      await access(fullPath);
+    } catch {
+      throw new NotFoundException('Artifact file missing from storage');
+    }
+
+    const ext = storageKey.split('.').pop()?.toLowerCase() ?? 'bin';
+    const mimeType =
+      ext === 'jpg' || ext === 'jpeg'
+        ? 'image/jpeg'
+        : ext === 'png'
+          ? 'image/png'
+          : ext === 'webp'
+            ? 'image/webp'
+            : 'application/octet-stream';
+    const filename =
+      kind === 'signature' ? `signature.${ext}` : `goods-photo-${index}.${ext}`;
+
+    return {
+      stream: createReadStream(fullPath),
+      mimeType,
+      filename,
+    };
+  }
+
   async submitPodSignature(
     principal: AuthenticatedPrincipal,
     tripId: string,
@@ -1946,6 +2039,7 @@ export class TripsService {
     const user = await this.requireDriver(principal);
     const trip = await this.loadTripForDriver(user.driver!.id, tripId);
     if (!trip.startedAt) throw new BadRequestException('Trip not started');
+    await this.assertReadyForPod(trip.id);
 
     const stop = (trip.job.stops ?? []).find((s) => s.id === input.jobStopId);
     if (!stop || stop.stopType !== 'DROPOFF') {
@@ -2006,6 +2100,7 @@ export class TripsService {
     this.ensureDatabase();
     const user = await this.requireDriver(principal);
     const trip = await this.loadTripForDriver(user.driver!.id, tripId);
+    await this.assertReadyForPod(trip.id);
     const stop = (trip.job.stops ?? []).find((s) => s.id === input.jobStopId);
     if (!stop || stop.stopType !== 'DROPOFF') {
       throw new BadRequestException('Photos only apply to dropoff stops');
@@ -2054,8 +2149,11 @@ export class TripsService {
     }
     const progress = await this.ensureStopProgress(trip.id, stop.id);
     if (progress.podStatus === 'FINALIZED') {
+      // Recover stuck trips where POD was saved but completion was gated.
+      await this.completeTripIfReady(trip.id, user.id);
       return this.getDriverTrip(principal, tripId);
     }
+    await this.assertReadyForPod(trip.id);
     if (!progress.signedAt || !progress.signerName || !progress.signatureStorageKey) {
       throw new BadRequestException('Receiver signature required on driver SOG');
     }
@@ -2187,29 +2285,35 @@ export class TripsService {
       },
     });
 
-    await this.notifications.notifyPodFinalized({
-      senderEmails: parties.senderEmails,
-      receiverEmail: parties.receiverEmail,
-      carrierEmails: parties.carrierEmails,
-      jobId: parties.jobId,
-      jobTitle: parties.jobTitle,
-      dropSuburb: parties.dropSuburb,
-      signerName: progress.signerName,
-      attachments: [
-        {
-          filename: `CLOX-POD-${parties.jobId.slice(0, 8)}.pdf`,
-          content: podPdf,
-          contentType: 'application/pdf',
-        },
-        {
-          filename: `CLOX-signature-${parties.jobId.slice(0, 8)}.pdf`,
-          content: signaturePdf,
-          contentType: 'application/pdf',
-        },
-      ],
-    });
-
+    // Complete + release driver first (POD is trip end). Emails must not block release.
     await this.completeTripIfReady(trip.id, user.id);
+
+    try {
+      await this.notifications.notifyPodFinalized({
+        senderEmails: parties.senderEmails,
+        receiverEmail: parties.receiverEmail,
+        carrierEmails: parties.carrierEmails,
+        jobId: parties.jobId,
+        jobTitle: parties.jobTitle,
+        dropSuburb: parties.dropSuburb,
+        signerName: progress.signerName,
+        attachments: [
+          {
+            filename: `CLOX-POD-${parties.jobId.slice(0, 8)}.pdf`,
+            content: podPdf,
+            contentType: 'application/pdf',
+          },
+          {
+            filename: `CLOX-signature-${parties.jobId.slice(0, 8)}.pdf`,
+            content: signaturePdf,
+            contentType: 'application/pdf',
+          },
+        ],
+      });
+    } catch {
+      // POD + trip completion already persisted; email can be retried operationally.
+    }
+
     return this.getDriverTrip(principal, tripId);
   }
 }

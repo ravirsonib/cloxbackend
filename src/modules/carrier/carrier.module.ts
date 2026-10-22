@@ -2,6 +2,7 @@ import { Module, forwardRef } from '@nestjs/common';
 import { JwtModule } from '@nestjs/jwt';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../../common/guards/roles.guard';
+import { CompanyProfileModule } from '../../common/services/company-profile.module';
 import { AuditModule } from '../audit/audit.module';
 import { DriverModule } from '../driver/driver.module';
 import { MatchingModule } from '../matching/matching.module';
@@ -16,6 +17,7 @@ import { CarrierService } from './carrier.service';
     AuditModule,
     PaymentsModule,
     NotificationsModule,
+    CompanyProfileModule,
     forwardRef(() => DriverModule),
     forwardRef(() => MatchingModule),
   ],

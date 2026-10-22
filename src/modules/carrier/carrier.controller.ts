@@ -5,6 +5,7 @@ import {
   Get,
   Param,
   ParseUUIDPipe,
+  Patch,
   Post,
   Put,
   UseGuards,
@@ -22,6 +23,8 @@ import {
   carrierSubmitVerificationSchema,
   assignmentReassignSchema,
   carrierVehicleSchema,
+  companyProfileChangeRequestSchema,
+  companyProfileSelfSchema,
   fleetDisableReasonSchema,
   type AssignmentReassignInput,
   type ProposalSubmitInput,
@@ -32,6 +35,8 @@ import {
   type CarrierRegisterInput,
   type CarrierSubmitVerificationInput,
   type CarrierVehicleInput,
+  type CompanyProfileChangeRequestInput,
+  type CompanyProfileSelfInput,
   type FleetDisableReasonInput,
 } from '../../shared/types';
 import { CurrentPrincipal } from '../../common/decorators/current-admin.decorator';
@@ -39,6 +44,7 @@ import { Roles } from '../../common/decorators/roles.decorator';
 import { JwtAuthGuard, type AuthenticatedPrincipal } from '../../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../../common/guards/roles.guard';
 import { ZodValidationPipe } from '../../common/pipes/zod-validation.pipe';
+import { CompanyProfileService } from '../../common/services/company-profile.service';
 import { MatchingService } from '../matching/matching.service';
 import { CarrierService } from './carrier.service';
 
@@ -48,6 +54,7 @@ export class CarrierController {
   constructor(
     private readonly carrierService: CarrierService,
     private readonly matchingService: MatchingService,
+    private readonly companyProfileService: CompanyProfileService,
   ) {}
 
   @Post('register')
@@ -77,6 +84,40 @@ export class CarrierController {
     @Body(new ZodValidationPipe(carrierProfileSchema)) body: CarrierProfileInput,
   ) {
     return this.carrierService.updateProfile(principal, body);
+  }
+
+  @Get('company-profile')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(AppRole.TRANSPORT_COMPANY)
+  @ApiOperation({ summary: 'Post-approval company profile + pending Ops change request' })
+  getCompanyProfile(@CurrentPrincipal() principal: AuthenticatedPrincipal) {
+    return this.companyProfileService.getProfile(principal);
+  }
+
+  @Patch('company-profile')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(AppRole.TRANSPORT_COMPANY)
+  @ApiOperation({ summary: 'Self-serve update (trading name, phone, service regions)' })
+  patchCompanyProfileSelf(
+    @CurrentPrincipal() principal: AuthenticatedPrincipal,
+    @Body(new ZodValidationPipe(companyProfileSelfSchema)) body: CompanyProfileSelfInput,
+  ) {
+    return this.companyProfileService.updateSelf(principal, body);
+  }
+
+  @Post('company-profile/change-request')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(AppRole.TRANSPORT_COMPANY)
+  @ApiOperation({ summary: 'Request Ops approval for KYB field changes' })
+  postCompanyProfileChangeRequest(
+    @CurrentPrincipal() principal: AuthenticatedPrincipal,
+    @Body(new ZodValidationPipe(companyProfileChangeRequestSchema))
+    body: CompanyProfileChangeRequestInput,
+  ) {
+    return this.companyProfileService.requestChange(principal, body);
   }
 
   @Post('connect/setup')

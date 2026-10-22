@@ -142,8 +142,7 @@ prisma as never,
     );
   });
 
-  it('blocks COMPLETED when pending WAITING surcharge remains after charge fail', async () => {
-    payments.chargeSurcharge.mockRejectedValueOnce(new Error('card declined'));
+  it('completes when POD already FINALIZED (surcharges were gated at POD, not at complete)', async () => {
     const stopId = 'stop-1';
     const progress = {
       id: 'prog-1',
@@ -187,13 +186,7 @@ prisma as never,
       },
       stopProgress: [afterExit],
       assignment: { id: 'asg-1' },
-      surcharges: [
-        {
-          id: 's-wait',
-          kind: SurchargeKind.WAITING,
-          status: SurchargeStatus.PENDING_PAYMENT,
-        },
-      ],
+      surcharges: [],
     };
     const prisma = {
       policyVersion: {
@@ -208,12 +201,23 @@ prisma as never,
           .mockResolvedValueOnce(tripForComplete),
       },
       tripStopProgress: { update: jest.fn().mockResolvedValue(afterExit) },
-      surcharge: { count: jest.fn().mockResolvedValue(1) },
-      $transaction: jest.fn(),
+      $transaction: jest.fn().mockImplementation(async (fn: (tx: unknown) => unknown) => {
+        const tx = {
+          trip: { update: jest.fn() },
+          job: { update: jest.fn() },
+          assignment: { update: jest.fn() },
+        };
+        return fn(tx);
+      }),
     };
     const service = makeService(prisma);
     await service.evaluateGeofence('trip-1', { lat: -33.86, lng: 151.2 }, 'user-driver');
-    expect(payments.chargeSurcharge).toHaveBeenCalledWith('s-wait');
-    expect(prisma.$transaction).not.toHaveBeenCalled();
+    expect(prisma.$transaction).toHaveBeenCalled();
+    expect(audit.recordPlatform).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'trip.completed',
+        entityId: 'trip-1',
+      }),
+    );
   });
 });

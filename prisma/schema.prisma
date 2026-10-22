@@ -474,6 +474,8 @@ enum ComplianceDocType {
   CARGO_INSURANCE
   INSURANCE
   NHVR
+  /// Dangerous goods licence / authority (company capability DG)
+  DG_LICENCE
   MASTER_ADMIN_AGREEMENT
   OTHER
 }
@@ -491,6 +493,10 @@ enum ComplianceCaseType {
   SENDER_KYB
   SENDER_KYC
   CARRIER_KYB
+  /// Post-KYB fleet RWC review (does not change company BID_ELIGIBLE)
+  CARRIER_FLEET_RWC
+  /// Post-approval company profile field changes (Ops must approve KYB fields)
+  COMPANY_PROFILE_CHANGE
   ADMIN_PARTNER_KYB
 }
 
@@ -601,6 +607,8 @@ model ComplianceCase {
   submittedByUserId String?
   assignedAdminId  String?
   decisionNote     String?
+  /// Pending profile field patch for COMPANY_PROFILE_CHANGE (JSON object of proposed values).
+  proposedChanges  Json?
   /// Latest Request info time — used to flag docs uploaded after that request.
   infoRequestedAt  DateTime?
   escalatedAt      DateTime?

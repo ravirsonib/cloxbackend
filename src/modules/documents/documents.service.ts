@@ -11,7 +11,14 @@ import {
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { AdminUserStatus, CompanyType, ComplianceDocStatus } from '@prisma/client';
+import {
+  AdminUserStatus,
+  CompanyStatus,
+  CompanyType,
+  ComplianceCaseStatus,
+  ComplianceCaseType,
+  ComplianceDocStatus,
+} from '@prisma/client';
 import type { AppEnv } from '../../config/env.validation';
 import type { AuthenticatedPrincipal } from '../../common/guards/jwt-auth.guard';
 import {
@@ -212,6 +219,71 @@ export class DocumentsService {
       companyType = company?.type;
     }
     this.assertUploadRoleAllowed(principal, { docType: doc.docType }, companyType);
+  }
+
+  /** Company members (carrier/sender) and Ops may read; drivers only their own allowed types. */
+  private async assertDocReadAllowed(
+    principal: AuthenticatedPrincipal,
+    doc: { companyId: string | null; driverId: string | null; docType: string },
+  ) {
+    if (!doc.companyId) {
+      throw new NotFoundException('Document not found');
+    }
+    await this.assertCompanyAccess(principal, doc.companyId);
+    await this.assertDriverOwnsDoc(principal, doc);
+    if (principal.kind === 'user' && principal.role === 'DRIVER') {
+      this.assertUploadRoleAllowed(principal, { docType: doc.docType });
+    }
+  }
+
+  private mapDocumentMeta(
+    doc: {
+      id: string;
+      companyId: string | null;
+      driverId: string | null;
+      vehicleId: string | null;
+      docType: string;
+      status: ComplianceDocStatus;
+      mimeType: string | null;
+      sizeBytes: number | null;
+      originalFilename: string | null;
+      contentHash: string | null;
+      expiresAt: Date | null;
+      createdAt: Date;
+      updatedAt: Date;
+    },
+    links?: {
+      vehicleRegistration?: string | null;
+      vehicleLabel?: string | null;
+      driverName?: string | null;
+      driverEmail?: string | null;
+    },
+  ) {
+    const ownerKind = doc.vehicleId
+      ? ('fleet' as const)
+      : doc.driverId
+        ? ('driver' as const)
+        : ('company' as const);
+    return {
+      id: doc.id,
+      companyId: doc.companyId,
+      driverId: doc.driverId,
+      vehicleId: doc.vehicleId,
+      docType: doc.docType,
+      status: doc.status,
+      mimeType: doc.mimeType,
+      sizeBytes: doc.sizeBytes,
+      originalFilename: doc.originalFilename,
+      contentHash: doc.contentHash,
+      expiresAt: doc.expiresAt,
+      createdAt: doc.createdAt,
+      updatedAt: doc.updatedAt,
+      ownerKind,
+      vehicleRegistration: links?.vehicleRegistration ?? null,
+      vehicleLabel: links?.vehicleLabel ?? null,
+      driverName: links?.driverName ?? null,
+      driverEmail: links?.driverEmail ?? null,
+    };
   }
 
   private async resolveLinkedIds(
@@ -430,12 +502,175 @@ export class DocumentsService {
       entityId: updated.id,
     });
 
+    if (
+      updated.docType === ComplianceDocType.RWC &&
+      updated.vehicleId &&
+      updated.companyId
+    ) {
+      await this.attachVehicleRwcToFleetCaseIfBidEligible(updated.companyId, updated.id);
+    }
+
     return {
       id: updated.id,
       status: updated.status,
       contentHash: updated.contentHash,
       mimeType: updated.mimeType,
       sizeBytes: updated.sizeBytes,
+    };
+  }
+
+  /**
+   * After KYB, new/replaced per-vehicle RWCs open (or join) CARRIER_FLEET_RWC for Ops
+   * without changing company BID_ELIGIBLE. Also attaches orphan UPLOADED vehicle RWCs.
+   */
+  private async attachVehicleRwcToFleetCaseIfBidEligible(
+    companyId: string,
+    documentId: string,
+  ) {
+    const company = await this.prisma.company.findUnique({
+      where: { id: companyId },
+      select: { id: true, status: true, homeRegionId: true, type: true },
+    });
+    if (!company || company.type !== CompanyType.CARRIER) return;
+    if (company.status !== CompanyStatus.BID_ELIGIBLE) return;
+
+    let fleetCase = await this.prisma.complianceCase.findFirst({
+      where: {
+        companyId,
+        caseType: ComplianceCaseType.CARRIER_FLEET_RWC,
+        status: {
+          in: [
+            ComplianceCaseStatus.OPEN,
+            ComplianceCaseStatus.INFO_REQUESTED,
+            ComplianceCaseStatus.ESCALATED,
+          ],
+        },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    if (!fleetCase) {
+      fleetCase = await this.prisma.complianceCase.create({
+        data: {
+          companyId,
+          caseType: ComplianceCaseType.CARRIER_FLEET_RWC,
+          status: ComplianceCaseStatus.OPEN,
+          regionId: company.homeRegionId,
+        },
+      });
+    } else if (fleetCase.status === ComplianceCaseStatus.INFO_REQUESTED) {
+      fleetCase = await this.prisma.complianceCase.update({
+        where: { id: fleetCase.id },
+        data: {
+          status: ComplianceCaseStatus.OPEN,
+          decisionNote: null,
+        },
+      });
+    }
+
+    const orphanRwcs = await this.prisma.complianceDocument.findMany({
+      where: {
+        companyId,
+        docType: ComplianceDocType.RWC,
+        vehicleId: { not: null },
+        status: ComplianceDocStatus.UPLOADED,
+        OR: [{ caseId: null }, { id: documentId }],
+      },
+      select: { id: true },
+    });
+    const ids = [...new Set([documentId, ...orphanRwcs.map((d) => d.id)])];
+    await this.prisma.complianceDocument.updateMany({
+      where: { id: { in: ids } },
+      data: {
+        caseId: fleetCase.id,
+        status: ComplianceDocStatus.UNDER_REVIEW,
+      },
+    });
+  }
+
+  async listDocuments(
+    principal: AuthenticatedPrincipal,
+    query: { companyId: string; driverId?: string },
+  ) {
+    this.ensureDatabase();
+    await this.assertCompanyAccess(principal, query.companyId);
+
+    let driverIdFilter: string | undefined = query.driverId;
+
+    if (principal.kind === 'user' && principal.role === 'DRIVER') {
+      const self = await this.prisma.driver.findUnique({
+        where: { userId: principal.id },
+        select: { id: true, companyId: true },
+      });
+      if (!self || self.companyId !== query.companyId) {
+        throw new ForbiddenException('Driver not in company');
+      }
+      if (query.driverId && query.driverId !== self.id) {
+        throw new ForbiddenException('Cannot list another driver document');
+      }
+      driverIdFilter = self.id;
+    } else if (query.driverId) {
+      const driver = await this.prisma.driver.findFirst({
+        where: { id: query.driverId, companyId: query.companyId },
+        select: { id: true },
+      });
+      if (!driver) {
+        throw new BadRequestException('driverId must belong to companyId');
+      }
+    }
+
+    const docs = await this.prisma.complianceDocument.findMany({
+      where: {
+        companyId: query.companyId,
+        status: { not: ComplianceDocStatus.UPLOAD_PENDING },
+        ...(driverIdFilter ? { driverId: driverIdFilter } : {}),
+      },
+      orderBy: { createdAt: 'desc' },
+      take: 100,
+    });
+
+    const vehicleIds = [
+      ...new Set(docs.map((d) => d.vehicleId).filter((id): id is string => Boolean(id))),
+    ];
+    const driverIds = [
+      ...new Set(docs.map((d) => d.driverId).filter((id): id is string => Boolean(id))),
+    ];
+    const [vehicles, drivers] = await Promise.all([
+      vehicleIds.length === 0
+        ? Promise.resolve([] as Array<{ id: string; registration: string | null; label: string | null }>)
+        : this.prisma.vehicle.findMany({
+            where: { id: { in: vehicleIds }, companyId: query.companyId },
+            select: { id: true, registration: true, label: true },
+          }),
+      driverIds.length === 0
+        ? Promise.resolve(
+            [] as Array<{
+              id: string;
+              user: { name: string | null; email: string };
+            }>,
+          )
+        : this.prisma.driver.findMany({
+            where: { id: { in: driverIds }, companyId: query.companyId },
+            select: {
+              id: true,
+              user: { select: { name: true, email: true } },
+            },
+          }),
+    ]);
+    const vehicleById = new Map(vehicles.map((v) => [v.id, v]));
+    const driverById = new Map(drivers.map((d) => [d.id, d]));
+
+    return {
+      items: docs.map((d) => {
+        const vehicle = d.vehicleId ? vehicleById.get(d.vehicleId) : undefined;
+        const driver = d.driverId ? driverById.get(d.driverId) : undefined;
+        return this.mapDocumentMeta(d, {
+          vehicleRegistration: vehicle?.registration ?? null,
+          vehicleLabel: vehicle?.label ?? null,
+          driverName: driver?.user.name ?? null,
+          driverEmail: driver?.user.email ?? null,
+        });
+      }),
     };
   }
 
@@ -447,21 +682,8 @@ export class DocumentsService {
     if (!doc || !doc.companyId) {
       throw new NotFoundException('Document not found');
     }
-    await this.assertCompanyAccess(principal, doc.companyId);
-    await this.assertDocActionAllowed(principal, doc);
-    await this.assertDriverOwnsDoc(principal, doc);
-    return {
-      id: doc.id,
-      companyId: doc.companyId,
-      docType: doc.docType,
-      status: doc.status,
-      mimeType: doc.mimeType,
-      sizeBytes: doc.sizeBytes,
-      originalFilename: doc.originalFilename,
-      contentHash: doc.contentHash,
-      expiresAt: doc.expiresAt,
-      createdAt: doc.createdAt,
-    };
+    await this.assertDocReadAllowed(principal, doc);
+    return this.mapDocumentMeta(doc);
   }
 
   /**
@@ -479,9 +701,7 @@ export class DocumentsService {
     if (!doc || !doc.companyId || !doc.storageKey) {
       throw new NotFoundException('Document not found');
     }
-    await this.assertCompanyAccess(principal, doc.companyId);
-    await this.assertDocActionAllowed(principal, doc);
-    await this.assertDriverOwnsDoc(principal, doc);
+    await this.assertDocReadAllowed(principal, doc);
 
     if (doc.status === ComplianceDocStatus.UPLOAD_PENDING) {
       throw new BadRequestException('Document has not been uploaded yet');

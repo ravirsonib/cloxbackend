@@ -1,12 +1,16 @@
-import { Body, Controller, Get, Post, Put, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Patch, Post, Put, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { Throttle, ThrottlerGuard } from '@nestjs/throttler';
 import {
   AppRole,
+  companyProfileChangeRequestSchema,
+  companyProfileSelfSchema,
   senderPaymentConfirmSchema,
   senderProfileSchema,
   senderRegisterSchema,
   senderSubmitVerificationSchema,
+  type CompanyProfileChangeRequestInput,
+  type CompanyProfileSelfInput,
   type SenderPaymentConfirmInput,
   type SenderProfileInput,
   type SenderRegisterInput,
@@ -17,12 +21,16 @@ import { Roles } from '../../common/decorators/roles.decorator';
 import { JwtAuthGuard, type AuthenticatedPrincipal } from '../../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../../common/guards/roles.guard';
 import { ZodValidationPipe } from '../../common/pipes/zod-validation.pipe';
+import { CompanyProfileService } from '../../common/services/company-profile.service';
 import { SenderService } from './sender.service';
 
 @ApiTags('sender')
 @Controller('sender')
 export class SenderController {
-  constructor(private readonly senderService: SenderService) {}
+  constructor(
+    private readonly senderService: SenderService,
+    private readonly companyProfileService: CompanyProfileService,
+  ) {}
 
   @Post('register')
   @UseGuards(ThrottlerGuard)
@@ -51,6 +59,40 @@ export class SenderController {
     @Body(new ZodValidationPipe(senderProfileSchema)) body: SenderProfileInput,
   ) {
     return this.senderService.updateProfile(principal, body);
+  }
+
+  @Get('company-profile')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(AppRole.SENDER)
+  @ApiOperation({ summary: 'Post-approval company profile + pending Ops change request' })
+  getCompanyProfile(@CurrentPrincipal() principal: AuthenticatedPrincipal) {
+    return this.companyProfileService.getProfile(principal);
+  }
+
+  @Patch('company-profile')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(AppRole.SENDER)
+  @ApiOperation({ summary: 'Self-serve update (trading name, phone)' })
+  patchCompanyProfileSelf(
+    @CurrentPrincipal() principal: AuthenticatedPrincipal,
+    @Body(new ZodValidationPipe(companyProfileSelfSchema)) body: CompanyProfileSelfInput,
+  ) {
+    return this.companyProfileService.updateSelf(principal, body);
+  }
+
+  @Post('company-profile/change-request')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(AppRole.SENDER)
+  @ApiOperation({ summary: 'Request Ops approval for KYB / invoice field changes' })
+  postCompanyProfileChangeRequest(
+    @CurrentPrincipal() principal: AuthenticatedPrincipal,
+    @Body(new ZodValidationPipe(companyProfileChangeRequestSchema))
+    body: CompanyProfileChangeRequestInput,
+  ) {
+    return this.companyProfileService.requestChange(principal, body);
   }
 
   @Post('verification/submit')

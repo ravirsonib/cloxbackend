@@ -51,6 +51,7 @@ describe('ComplianceService submit + approve/reject happy paths', () => {
       { assertLocalOwnsCompany: jest.fn(), complianceCaseBookFilter: jest.fn().mockImplementation((p) => (p.role === 'LOCAL_BDE' ? { company: { referredByAdminUserId: p.id } } : null)) } as never,
       abr,
       { sendComplianceApprovedEmail: jest.fn().mockResolvedValue({ skipped: true }), sendComplianceInfoRequestedEmail: jest.fn().mockResolvedValue({ skipped: true }) } as never,
+      { applyProposedChanges: jest.fn() } as never,
     );
   }
 
@@ -115,7 +116,6 @@ describe('ComplianceService submit + approve/reject happy paths', () => {
       const docIds = [
         '11111111-1111-4111-8111-111111111111',
         '22222222-2222-4222-8222-222222222222',
-        '33333333-3333-4333-8333-333333333333',
       ];
       const prisma = {
         isConnected: () => true,
@@ -139,7 +139,6 @@ describe('ComplianceService submit + approve/reject happy paths', () => {
           findMany: jest.fn().mockResolvedValue([
             { id: docIds[0], docType: ComplianceDocType.PUBLIC_LIABILITY, status: ComplianceDocStatus.UPLOADED },
             { id: docIds[1], docType: ComplianceDocType.CARGO_INSURANCE, status: ComplianceDocStatus.UPLOADED },
-            { id: docIds[2], docType: ComplianceDocType.RWC, status: ComplianceDocStatus.UPLOADED },
           ]),
           updateMany: jest.fn(),
         },

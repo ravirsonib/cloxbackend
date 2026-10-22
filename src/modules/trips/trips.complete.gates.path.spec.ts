@@ -106,7 +106,7 @@ prisma as never,
     expect(prisma.$transaction).not.toHaveBeenCalled();
   });
 
-  it('no-ops when not all stops are arrived+exited', async () => {
+  it('no-ops when dropoff POD is not finalized', async () => {
     const prisma = prismaForCompleteLoad({
       id: 'trip-1',
       jobId: 'job-1',
@@ -115,8 +115,8 @@ prisma as never,
       status: TripStatus.IN_TRANSIT,
       job: {
         stops: [
-          { id: 's1' },
-          { id: 's2' },
+          { id: 's1', stopType: 'PICKUP' },
+          { id: 's2', stopType: 'DROPOFF' },
         ],
       },
       stopProgress: [
@@ -124,11 +124,13 @@ prisma as never,
           jobStopId: 's1',
           arrivalRecorded: true,
           exitedAt: new Date(),
+          podStatus: 'PENDING',
         },
         {
           jobStopId: 's2',
           arrivalRecorded: true,
           exitedAt: null,
+          podStatus: 'SIGNED',
         },
       ],
       assignment: { id: 'asg-1' },

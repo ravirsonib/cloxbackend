@@ -107,6 +107,9 @@ export const AuditAction = {
   COMPANY_INVITE_RESENT: 'company.invite_resent',
   COMPANY_INVITE_ACCEPTED: 'company.invite_accepted',
   COMPANY_REFERRER_REASSIGNED: 'company.referrer_reassigned',
+  COMPANY_PROFILE_SELF_UPDATED: 'company.profile_self_updated',
+  COMPANY_PROFILE_CHANGE_REQUESTED: 'company.profile_change_requested',
+  COMPANY_PROFILE_CHANGE_APPLIED: 'company.profile_change_applied',
   PROSPECT_CREATED: 'prospect.created',
   PROSPECT_UPDATED: 'prospect.updated',
   SENDER_REGISTERED: 'sender.registered',
@@ -648,6 +651,7 @@ export const ComplianceDocType = {
   CARGO_INSURANCE: 'CARGO_INSURANCE',
   INSURANCE: 'INSURANCE',
   NHVR: 'NHVR',
+  DG_LICENCE: 'DG_LICENCE',
   MASTER_ADMIN_AGREEMENT: 'MASTER_ADMIN_AGREEMENT',
   OTHER: 'OTHER',
 } as const;
@@ -667,6 +671,7 @@ export const createUploadIntentSchema = z.object({
     ComplianceDocType.CARGO_INSURANCE,
     ComplianceDocType.INSURANCE,
     ComplianceDocType.NHVR,
+    ComplianceDocType.DG_LICENCE,
     ComplianceDocType.MASTER_ADMIN_AGREEMENT,
     ComplianceDocType.OTHER,
   ]),
@@ -680,6 +685,14 @@ export const createUploadIntentSchema = z.object({
 
 export type CreateUploadIntentInput = z.infer<typeof createUploadIntentSchema>;
 
+export const listDocumentsQuerySchema = z.object({
+  companyId: z.string().uuid(),
+  /** When set, only documents linked to this driver. Drivers are always scoped to self. */
+  driverId: z.string().uuid().optional(),
+});
+
+export type ListDocumentsQuery = z.infer<typeof listDocumentsQuerySchema>;
+
 export const confirmDocumentSchema = z.object({
   contentHash: z
     .string()
@@ -691,7 +704,14 @@ export type ConfirmDocumentInput = z.infer<typeof confirmDocumentSchema>;
 
 export const submitComplianceSchema = z.object({
   companyId: z.string().uuid(),
-  caseType: z.enum(['SENDER_KYB', 'SENDER_KYC', 'CARRIER_KYB', 'ADMIN_PARTNER_KYB']),
+  caseType: z.enum([
+    'SENDER_KYB',
+    'SENDER_KYC',
+    'CARRIER_KYB',
+    'CARRIER_FLEET_RWC',
+    'COMPANY_PROFILE_CHANGE',
+    'ADMIN_PARTNER_KYB',
+  ]),
   documentIds: z.array(z.string().uuid()).min(1).max(50),
 });
 
@@ -703,7 +723,16 @@ export const complianceCaseListQuerySchema = z.object({
   status: z
     .enum(['OPEN', 'INFO_REQUESTED', 'ESCALATED', 'APPROVED', 'REJECTED', 'CLOSED'])
     .optional(),
-  caseType: z.enum(['SENDER_KYB', 'SENDER_KYC', 'CARRIER_KYB', 'ADMIN_PARTNER_KYB']).optional(),
+  caseType: z
+    .enum([
+      'SENDER_KYB',
+      'SENDER_KYC',
+      'CARRIER_KYB',
+      'CARRIER_FLEET_RWC',
+      'COMPANY_PROFILE_CHANGE',
+      'ADMIN_PARTNER_KYB',
+    ])
+    .optional(),
   regionCode: z.string().trim().toUpperCase().max(3).optional(),
 });
 
@@ -873,24 +902,95 @@ export const carrierProfileSchema = z.object({
 
 export type CarrierProfileInput = z.infer<typeof carrierProfileSchema>;
 
+/** Post-approval self-serve company fields (no Ops). */
+export const companyProfileSelfSchema = z
+  .object({
+    tradingName: z.string().trim().max(200).optional().nullable(),
+    phone: z.string().trim().min(8).max(32).optional().nullable(),
+    /** Carrier only — ignored for senders. */
+    serviceRegionCodes: z
+      .array(z.string().trim().toUpperCase().regex(/^[A-Z]{2,3}$/))
+      .min(1)
+      .max(8)
+      .optional(),
+  })
+  .refine(
+    (v) =>
+      v.tradingName !== undefined ||
+      v.phone !== undefined ||
+      v.serviceRegionCodes !== undefined,
+    { message: 'At least one self-serve field is required' },
+  );
+export type CompanyProfileSelfInput = z.infer<typeof companyProfileSelfSchema>;
+
+/** Post-approval KYB field changes — Ops must approve via COMPANY_PROFILE_CHANGE. */
+export const companyProfileChangeRequestSchema = z
+  .object({
+    legalName: z.string().trim().min(2).max(200).optional(),
+    abn: z
+      .string()
+      .trim()
+      .transform((v) => v.replace(/\s/g, ''))
+      .refine((v) => /^\d{11}$/.test(v), 'ABN must be 11 digits')
+      .optional(),
+    acn: z.string().trim().max(20).optional().nullable(),
+    homeRegionCode: z.string().trim().toUpperCase().regex(/^[A-Z]{2,3}$/).optional(),
+    invoiceLegalName: z.string().trim().min(2).max(200).optional(),
+    invoiceAddressLine1: z.string().trim().min(3).max(200).optional(),
+    invoiceSuburb: z.string().trim().min(2).max(100).optional(),
+    invoiceState: z.string().trim().toUpperCase().regex(/^[A-Z]{2,3}$/).optional(),
+    invoicePostcode: z.string().trim().regex(/^\d{4}$/).optional(),
+    gstRegistered: z.boolean().optional(),
+    note: z.string().trim().max(2000).optional(),
+  })
+  .refine(
+    (v) =>
+      v.legalName != null ||
+      v.abn != null ||
+      v.acn !== undefined ||
+      v.homeRegionCode != null ||
+      v.invoiceLegalName != null ||
+      v.invoiceAddressLine1 != null ||
+      v.invoiceSuburb != null ||
+      v.invoiceState != null ||
+      v.invoicePostcode != null ||
+      v.gstRegistered != null,
+    { message: 'At least one Ops-gated field is required' },
+  );
+export type CompanyProfileChangeRequestInput = z.infer<
+  typeof companyProfileChangeRequestSchema
+>;
+
 export const carrierSubmitVerificationSchema = z.object({
   documentIds: z.array(z.string().uuid()).min(1).max(20),
 });
 
 export type CarrierSubmitVerificationInput = z.infer<typeof carrierSubmitVerificationSchema>;
 
-export const carrierVehicleSchema = z.object({
-  label: z.string().trim().min(1).max(120),
-  registration: z.string().trim().min(2).max(20),
-  vehicleClass: z
-    .string()
-    .trim()
-    .toUpperCase()
-    .regex(/^(UTE|VAN|RIGID_1_2T|RIGID_3_4T|SEMI|BDOUBLE)$/),
-  tareKg: z.number().int().positive().max(100_000).optional(),
-  gvmKg: z.number().int().positive().max(200_000).optional(),
-  gcmKg: z.number().int().positive().max(300_000).optional(),
-});
+export const carrierVehicleSchema = z
+  .object({
+    label: z.string().trim().min(1).max(120),
+    registration: z.string().trim().min(2).max(20),
+    vehicleClass: z
+      .string()
+      .trim()
+      .toUpperCase()
+      .regex(/^(UTE|VAN|RIGID_1_2T|RIGID_3_4T|SEMI|BDOUBLE)$/),
+    /** Unladen mass (kg) — optional but recommended. */
+    tareKg: z.number().int().positive().max(100_000).optional(),
+    /** Gross Vehicle Mass (kg) — required from compliance plate. */
+    gvmKg: z.number().int().positive().max(200_000),
+    gcmKg: z.number().int().positive().max(300_000).optional(),
+  })
+  .superRefine((value, ctx) => {
+    if (value.tareKg != null && value.tareKg >= value.gvmKg) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['tareKg'],
+        message: 'Tare must be less than GVM',
+      });
+    }
+  });
 
 export type CarrierVehicleInput = z.infer<typeof carrierVehicleSchema>;
 
@@ -1192,8 +1292,8 @@ export type TripPodSignatureInput = z.infer<typeof tripPodSignatureSchema>;
 
 export const tripPodPhotoSchema = z.object({
   jobStopId: z.string().uuid(),
-  /// data:image/jpeg|png;base64,... 
-  photoDataUrl: z.string().min(32).max(4_000_000),
+  /// data:image/jpeg|png;base64,... (clients should compress; API allows up to ~8MB chars)
+  photoDataUrl: z.string().min(32).max(8_000_000),
 });
 
 export type TripPodPhotoInput = z.infer<typeof tripPodPhotoSchema>;
