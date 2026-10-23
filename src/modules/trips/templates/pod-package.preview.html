@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>CLOX — Proof of Delivery (preview)</title>
+    <style>
+      :root {
+        --navy: #1a2f4c;
+        --ink: #17233b;
+        --mute: #5b6b84;
+        --line: #dce2ec;
+        --orange: #f26e22;
+        --surface: #f3f5f9;
+        --white: #ffffff;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        background: #e8ecf2;
+        color: var(--ink);
+        font-family: "Segoe UI", Helvetica, Arial, sans-serif;
+        font-size: 12px;
+        line-height: 1.45;
+      }
+      .page {
+        width: 210mm;
+        min-height: 297mm;
+        margin: 24px auto;
+        background: var(--white);
+        box-shadow: 0 8px 28px rgba(23, 35, 59, 0.12);
+        display: flex;
+        flex-direction: column;
+      }
+      .header {
+        background: var(--navy);
+        color: var(--white);
+        padding: 14px 22px 12px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+      }
+      .header-brand {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+      }
+      .header-brand img {
+        height: 36px;
+        width: auto;
+        display: block;
+      }
+      .header-brand .tag {
+        font-size: 10px;
+        color: #c9d3e4;
+        margin-top: 2px;
+      }
+      .header-doc {
+        text-align: right;
+      }
+      .header-doc .doc-type {
+        font-size: 13px;
+        font-weight: 700;
+        letter-spacing: 0.02em;
+      }
+      .header-doc .doc-ref {
+        font-size: 10px;
+        color: #c9d3e4;
+        margin-top: 2px;
+      }
+      .accent { height: 3px; background: var(--orange); }
+      .body { padding: 22px 28px 18px; flex: 1; }
+      h1 {
+        margin: 0 0 4px;
+        font-size: 20px;
+        color: var(--navy);
+      }
+      .subtitle {
+        margin: 0 0 18px;
+        color: var(--mute);
+        font-size: 11px;
+      }
+      .section { margin-bottom: 18px; }
+      .section h2 {
+        margin: 0 0 6px;
+        font-size: 12px;
+        color: var(--navy);
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+      }
+      .section .rule {
+        height: 1px;
+        background: var(--line);
+        margin-bottom: 10px;
+      }
+      .kv {
+        display: grid;
+        grid-template-columns: 140px 1fr;
+        gap: 4px 12px;
+        margin-bottom: 4px;
+      }
+      .kv .k { color: var(--mute); font-size: 10px; }
+      .kv .v { color: var(--ink); font-size: 11px; }
+      .evidence-grid {
+        display: grid;
+        grid-template-columns: repeat(2, 1fr);
+        gap: 12px;
+      }
+      .evidence-card {
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 10px;
+        background: var(--surface);
+      }
+      .evidence-card .caption {
+        font-size: 10px;
+        color: var(--mute);
+        margin-bottom: 8px;
+      }
+      .evidence-card .caption strong { color: var(--ink); }
+      .evidence-card .frame {
+        background: var(--white);
+        border: 1px dashed var(--line);
+        border-radius: 6px;
+        min-height: 110px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: var(--mute);
+        font-size: 10px;
+        overflow: hidden;
+      }
+      .evidence-card .frame img {
+        max-width: 100%;
+        max-height: 140px;
+        object-fit: contain;
+      }
+      table.timeline {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 10.5px;
+      }
+      table.timeline th,
+      table.timeline td {
+        border: 1px solid var(--line);
+        padding: 7px 8px;
+        text-align: left;
+        vertical-align: top;
+      }
+      table.timeline th {
+        background: var(--surface);
+        color: var(--navy);
+        font-weight: 700;
+      }
+      table.timeline td.time { white-space: nowrap; width: 28%; color: var(--mute); }
+      table.timeline td.event { font-weight: 600; width: 28%; }
+      .note {
+        font-size: 10px;
+        color: var(--mute);
+        margin-top: 8px;
+      }
+      .footer {
+        border-top: 1px solid var(--line);
+        padding: 10px 28px 14px;
+        display: flex;
+        justify-content: space-between;
+        gap: 12px;
+        color: var(--mute);
+        font-size: 9px;
+      }
+      .banner {
+        max-width: 210mm;
+        margin: 16px auto 0;
+        padding: 10px 14px;
+        background: #fff7ed;
+        border: 1px solid #fdba74;
+        border-radius: 8px;
+        color: #9a3412;
+        font-size: 12px;
+      }
+      @media print {
+        body { background: white; }
+        .page { margin: 0; box-shadow: none; }
+        .banner { display: none; }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="banner">
+      <strong>Design preview only</strong> — open in a browser, then Print → PDF to judge layout.
+      After approval this layout is rebuilt in PDFKit for live POD finalize emails.
+    </div>
+
+    <article class="page">
+      <header class="header">
+        <div class="header-brand">
+          <img src="logo-clox-light.png" alt="CLOX" />
+          <div>
+            <div class="tag">Freight marketplace · Australia</div>
+          </div>
+        </div>
+        <div class="header-doc">
+          <div class="doc-type">Proof of Delivery</div>
+          <div class="doc-ref">CLOX-POD-a1b2c3d4 · Job sample-job-88</div>
+        </div>
+      </header>
+      <div class="accent"></div>
+
+      <div class="body">
+        <h1>Proof of Delivery</h1>
+        <p class="subtitle">
+          Job Metro pallet run · Richmond drop · Finalized 23 Oct 2026, 14:42 AEST
+        </p>
+
+        <section class="section">
+          <h2>Delivery details</h2>
+          <div class="rule"></div>
+          <div class="kv"><span class="k">Job</span><span class="v">Metro pallet run (a1b2c3d4-…)</span></div>
+          <div class="kv"><span class="k">Drop address</span><span class="v">42 Swan St, Richmond VIC 3121</span></div>
+          <div class="kv"><span class="k">Carrier</span><span class="v">Sample Carrier Pty Ltd</span></div>
+          <div class="kv"><span class="k">Driver</span><span class="v">Alex Driver</span></div>
+          <div class="kv"><span class="k">Goods photos</span><span class="v">2 (embedded below · also attached to email)</span></div>
+        </section>
+
+        <section class="section">
+          <h2>Signer</h2>
+          <div class="rule"></div>
+          <div class="kv"><span class="k">Signed by</span><span class="v">Jamie Receiver</span></div>
+          <div class="kv"><span class="k">Signed at</span><span class="v">23 Oct 2026, 14:38:12 AEST</span></div>
+          <div class="kv"><span class="k">Capture</span><span class="v">Driver SOG (receiver signed on driver device)</span></div>
+          <div class="kv"><span class="k">Signature file</span><span class="v">Attached: CLOX-signature-image-a1b2c3d4.png</span></div>
+        </section>
+
+        <section class="section">
+          <h2>Evidence</h2>
+          <div class="rule"></div>
+          <div class="evidence-grid">
+            <div class="evidence-card">
+              <div class="caption"><strong>Signature</strong> · attached: signature.png</div>
+              <div class="frame">[ Signature image embeds here ]</div>
+            </div>
+            <div class="evidence-card">
+              <div class="caption"><strong>Photo 1</strong> · attached: goods-1.jpg</div>
+              <div class="frame">[ Goods photo 1 embeds here ]</div>
+            </div>
+            <div class="evidence-card">
+              <div class="caption"><strong>Photo 2</strong> · attached: goods-2.jpg</div>
+              <div class="frame">[ Goods photo 2 embeds here ]</div>
+            </div>
+          </div>
+          <p class="note">
+            Images are embedded in this PDF and attached as separate files on the POD finalize email.
+            Storage keys are not shown as links (auth-gated APIs are not usable from email).
+          </p>
+        </section>
+
+        <section class="section">
+          <h2>Driver journey</h2>
+          <div class="rule"></div>
+          <table class="timeline">
+            <thead>
+              <tr>
+                <th>Time (AEST)</th>
+                <th>Event</th>
+                <th>Detail</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td class="time">23 Oct 2026, 09:12</td>
+                <td class="event">Trip started</td>
+                <td>Safety + mass gates passed · EN_ROUTE_PICKUP</td>
+              </tr>
+              <tr>
+                <td class="time">23 Oct 2026, 09:41</td>
+                <td class="event">Geofence enter</td>
+                <td>Pickup · Docklands</td>
+              </tr>
+              <tr>
+                <td class="time">23 Oct 2026, 10:05</td>
+                <td class="event">Geofence exit</td>
+                <td>Pickup complete · IN_TRANSIT</td>
+              </tr>
+              <tr>
+                <td class="time">23 Oct 2026, 11:20</td>
+                <td class="event">Break started</td>
+                <td>Sender ETA paused</td>
+              </tr>
+              <tr>
+                <td class="time">23 Oct 2026, 11:45</td>
+                <td class="event">Break ended</td>
+                <td>Resume tracking</td>
+              </tr>
+              <tr>
+                <td class="time">23 Oct 2026, 13:55</td>
+                <td class="event">Approaching</td>
+                <td>Drop notified · source DRIVER</td>
+              </tr>
+              <tr>
+                <td class="time">23 Oct 2026, 14:18</td>
+                <td class="event">At dropoff</td>
+                <td>Geofence enter · receiver notify sent</td>
+              </tr>
+              <tr>
+                <td class="time">23 Oct 2026, 14:38</td>
+                <td class="event">POD signed</td>
+                <td>Jamie Receiver on SOG</td>
+              </tr>
+              <tr>
+                <td class="time">23 Oct 2026, 14:42</td>
+                <td class="event">POD finalized</td>
+                <td>Package generated · trip completing</td>
+              </tr>
+            </tbody>
+          </table>
+          <p class="note">
+            Milestone history only (start, break, geofence, approaching, dropoff, exceptions, POD).
+            Raw GPS samples are omitted for readability.
+          </p>
+        </section>
+      </div>
+
+      <footer class="footer">
+        <span>CLOX · Confidential · System-generated proof of delivery</span>
+        <span>Page 1 of 1</span>
+      </footer>
+    </article>
+  </body>
+</html>

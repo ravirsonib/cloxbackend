@@ -46,15 +46,24 @@ import {
   waitingSurchargeIncGstCents,
   type GeofencePolicy,
 } from './geofence.util';
-import { buildBrandedPdf } from './branded-pdf.util';
+import {
+  buildBrandedPdf,
+  loadCloxLogoBuffer,
+  type BrandedPdfImage,
+} from './branded-pdf.util';
 import {
   formatAudCents,
   parseDataUrl,
   writeTripArtifact,
 } from './pod-artifacts.util';
+import {
+  buildPodJourney,
+  formatJourneyForTable,
+  formatPodDateTime,
+} from './pod-journey.util';
 import { createReadStream, type ReadStream } from 'fs';
 import { access, readFile } from 'fs/promises';
-import { join } from 'path';
+import { extname, join } from 'path';
 
 @Injectable()
 export class TripsService {
@@ -1713,6 +1722,11 @@ export class TripsService {
                 },
               },
             },
+            driver: {
+              include: {
+                user: { select: { name: true, email: true } },
+              },
+            },
           },
         },
       },
@@ -1735,6 +1749,11 @@ export class TripsService {
     const dropAddress = [stop.addressLine, stop.suburb, stop.state, stop.postcode]
       .filter(Boolean)
       .join(', ');
+    const carrier = trip.assignment.carrierCompany;
+    const carrierName =
+      carrier.tradingName || carrier.legalName || '—';
+    const driverUser = trip.assignment.driver?.user;
+    const driverName = driverUser?.name || driverUser?.email || '—';
 
     return {
       trip,
@@ -1746,6 +1765,8 @@ export class TripsService {
       dropAddress: dropAddress || null,
       jobTitle: trip.job.title,
       jobId: trip.jobId,
+      carrierName,
+      driverName,
     };
   }
 
@@ -2168,34 +2189,172 @@ export class TripsService {
     }
 
     const parties = await this.resolveNotifyParties(trip.id, stop.id);
-    const signedAtIso = progress.signedAt.toISOString();
+    const finalizedAt = new Date();
+    const signedAtLabel = `${formatPodDateTime(progress.signedAt)} AEST`;
+    const finalizedAtLabel = `${formatPodDateTime(finalizedAt)} AEST`;
+    const jobRef = parties.jobTitle || parties.jobId;
+    const jobShort = parties.jobId.slice(0, 8);
+    const jobDisplay = parties.jobTitle
+      ? `${parties.jobTitle} (${jobShort}…)`
+      : parties.jobId;
+    const sigImageName = `CLOX-signature-image-${jobShort}`;
+    const logo = loadCloxLogoBuffer();
+
+    const signatureFile = progress.signatureStorageKey
+      ? await this.readStoredArtifact(progress.signatureStorageKey)
+      : null;
+    const photoFiles: Array<{
+      key: string;
+      buffer: Buffer;
+      filename: string;
+      contentType: string;
+    }> = [];
+    for (let i = 0; i < photos.length; i++) {
+      const key = photos[i]!;
+      const file = await this.readStoredArtifact(key);
+      if (file) {
+        photoFiles.push({
+          key,
+          buffer: file.buffer,
+          filename: `CLOX-goods-${jobShort}-${i + 1}${file.ext}`,
+          contentType: file.contentType,
+        });
+      }
+    }
+
+    const signatureImages: BrandedPdfImage[] = signatureFile
+      ? [
+          {
+            caption: `Signature · attached: ${sigImageName}${signatureFile.ext}`,
+            buffer: signatureFile.buffer,
+            fitWidth: 280,
+            fitHeight: 120,
+          },
+        ]
+      : [];
+
+    const goodsImages: BrandedPdfImage[] = photoFiles.map((p, i) => ({
+      caption: `Photo ${i + 1} · attached: ${p.filename}`,
+      buffer: p.buffer,
+      fitWidth: 240,
+      fitHeight: 140,
+    }));
+
+    const [exceptions, auditEvents] = await Promise.all([
+      this.prisma.tripException.findMany({
+        where: { tripId: trip.id },
+        orderBy: { openedAt: 'asc' },
+        select: {
+          kind: true,
+          status: true,
+          openedAt: true,
+          resolvedAt: true,
+          note: true,
+          reasonCode: true,
+        },
+      }),
+      this.prisma.auditEvent.findMany({
+        where: {
+          entityType: 'Trip',
+          entityId: trip.id,
+          action: {
+            in: [
+              AuditAction.TRIP_BREAK_TOGGLED,
+              AuditAction.TRIP_STARTED,
+              AuditAction.TRIP_GEOFENCE_ENTER,
+              AuditAction.TRIP_GEOFENCE_EXIT,
+              AuditAction.TRIP_APPROACHING_NOTIFIED,
+              AuditAction.TRIP_AT_DROPOFF_NOTIFIED,
+            ],
+          },
+        },
+        orderBy: { createdAt: 'asc' },
+        take: 100,
+        select: { action: true, createdAt: true, metadata: true },
+      }),
+    ]);
+
+    const journey = buildPodJourney({
+      trip: {
+        startedAt: trip.startedAt,
+        safetyPassedAt: trip.safetyPassedAt,
+        massCheckedAt: trip.massCheckedAt,
+        breakStartedAt: trip.breakStartedAt,
+        onBreak: trip.onBreak,
+        completedAt: trip.completedAt,
+      },
+      stopProgress: trip.stopProgress.map((p) => ({
+        stopType: p.jobStop?.stopType ?? null,
+        stopLabel: p.jobStop?.label ?? null,
+        suburb: p.jobStop?.suburb ?? null,
+        enteredAt: p.enteredAt,
+        exitedAt: p.exitedAt,
+        approachingNotifiedAt: p.approachingNotifiedAt,
+        approachingSource: p.approachingSource,
+        atDropoffNotifiedAt: p.atDropoffNotifiedAt,
+        signedAt: p.signedAt,
+        signerName: p.signerName,
+        podFinalizedAt: p.id === progress.id ? finalizedAt : p.podFinalizedAt,
+      })),
+      exceptions,
+      auditEvents: auditEvents.map((a) => ({
+        action: a.action,
+        createdAt: a.createdAt,
+        metadata:
+          a.metadata && typeof a.metadata === 'object' && !Array.isArray(a.metadata)
+            ? (a.metadata as Record<string, unknown>)
+            : null,
+      })),
+      finalizeAt: finalizedAt,
+    });
+    const journeyTable = formatJourneyForTable(journey);
+
     const signaturePdf = await buildBrandedPdf({
       documentTitle: 'Signature receipt',
-      subtitle: `Job ${parties.jobTitle || parties.jobId}`,
+      subtitle: `Job ${jobRef} · Delivery sign-on-glass`,
+      headerRef: `CLOX-signature-${jobShort} · Job ${jobShort}`,
+      logo,
+      footerNote: 'CLOX · Confidential · System-generated signature receipt',
       sections: [
         {
           title: 'Delivery sign-on-glass',
           rows: [
-            { label: 'Job', value: parties.jobTitle || parties.jobId },
+            { label: 'Job', value: jobDisplay },
             { label: 'Drop suburb', value: parties.dropSuburb || '—' },
-            {
-              label: 'Drop address',
-              value: parties.dropAddress || '—',
-            },
+            { label: 'Drop address', value: parties.dropAddress || '—' },
             { label: 'Signer', value: progress.signerName },
-            { label: 'Signed at', value: signedAtIso },
+            { label: 'Signed at', value: signedAtLabel },
             {
               label: 'Capture method',
               value: 'Driver SOG (receiver signed on driver device)',
             },
             {
               label: 'Signature hash',
-              value: progress.signatureContentHash ?? '—',
+              value: progress.signatureContentHash
+                ? `sha256:${progress.signatureContentHash.slice(0, 8)}…`
+                : '—',
+            },
+            {
+              label: 'Attachment',
+              value: signatureFile
+                ? `${sigImageName}${signatureFile.ext}`
+                : '—',
             },
           ],
+        },
+        {
+          title: 'Signature image',
           paragraphs: [
             'Receiver signature was captured on the driver’s authenticated SOG session. No public magic-link was used.',
           ],
+          images: signatureImages.length
+            ? [
+                {
+                  ...signatureImages[0]!,
+                  caption: 'Embedded signature · also attached to email',
+                },
+              ]
+            : undefined,
         },
       ],
     });
@@ -2210,29 +2369,63 @@ export class TripsService {
 
     const podPdf = await buildBrandedPdf({
       documentTitle: 'Proof of Delivery',
-      subtitle: `Job ${parties.jobTitle || parties.jobId} · ${parties.dropSuburb || 'drop'}`,
+      subtitle: `Job ${jobRef} · ${parties.dropSuburb || 'drop'} · Finalized ${finalizedAtLabel}`,
+      headerRef: `CLOX-POD-${jobShort} · Job ${jobShort}`,
+      logo,
+      footerNote: 'CLOX · Confidential · System-generated proof of delivery',
       sections: [
         {
           title: 'Delivery details',
           rows: [
-            { label: 'Job', value: parties.jobTitle || parties.jobId },
+            { label: 'Job', value: jobDisplay },
             {
               label: 'Drop address',
               value: parties.dropAddress || parties.dropSuburb || '—',
             },
-            { label: 'Signer', value: progress.signerName },
-            { label: 'Signed at', value: signedAtIso },
-            { label: 'Goods photos', value: String(photos.length) },
-            { label: 'Finalized at', value: new Date().toISOString() },
+            { label: 'Carrier', value: parties.carrierName },
+            { label: 'Driver', value: parties.driverName },
+            {
+              label: 'Goods photos',
+              value: `${photos.length} (embedded below · also attached to email)`,
+            },
           ],
         },
         {
-          title: 'Evidence references',
-          paragraphs: [
-            ...photos.map((key, i) => `Photo ${i + 1}: ${key}`),
-            `Signature file: ${progress.signatureStorageKey}`,
-            `Signature receipt: ${signaturePdfArtifact.storageKey}`,
+          title: 'Signer',
+          rows: [
+            { label: 'Signed by', value: progress.signerName },
+            { label: 'Signed at', value: signedAtLabel },
+            {
+              label: 'Capture',
+              value: 'Driver SOG (receiver signed on driver device)',
+            },
+            {
+              label: 'Signature file',
+              value: signatureFile
+                ? `Attached: ${sigImageName}${signatureFile.ext}`
+                : '—',
+            },
           ],
+        },
+        {
+          title: 'Evidence',
+          paragraphs: [
+            'Images are embedded in this PDF and attached as separate files on the POD finalize email. Storage keys are not shown as links (auth-gated APIs are not usable from email).',
+          ],
+          images: [...signatureImages, ...goodsImages],
+        },
+        {
+          title: 'Driver journey',
+          paragraphs:
+            journeyTable.rows.length === 0
+              ? ['No milestone events recorded for this trip.']
+              : [
+                  'Milestone history only (start, break, geofence, approaching, dropoff, exceptions, POD). Raw GPS samples are omitted for readability.',
+                ],
+          table:
+            journeyTable.rows.length > 0
+              ? { headers: journeyTable.headers, rows: journeyTable.rows }
+              : undefined,
         },
       ],
     });
@@ -2249,7 +2442,7 @@ export class TripsService {
       where: { id: progress.id },
       data: {
         podStatus: 'FINALIZED',
-        podFinalizedAt: new Date(),
+        podFinalizedAt: finalizedAt,
         podPackageStorageKey: podPdfArtifact.storageKey,
         signaturePdfStorageKey: signaturePdfArtifact.storageKey,
       },
@@ -2259,7 +2452,7 @@ export class TripsService {
       where: { id: trip.id },
       data: {
         podStorageKey: podPdfArtifact.storageKey,
-        podCapturedAt: new Date(),
+        podCapturedAt: finalizedAt,
       },
     });
 
@@ -2282,6 +2475,7 @@ export class TripsService {
       metadata: {
         jobStopId: stop.id,
         podPackageStorageKey: podPdfArtifact.storageKey,
+        journeyEventCount: journey.length,
       },
     });
 
@@ -2289,6 +2483,37 @@ export class TripsService {
     await this.completeTripIfReady(trip.id, user.id);
 
     try {
+      const emailAttachments: Array<{
+        filename: string;
+        content: Buffer;
+        contentType?: string;
+      }> = [
+        {
+          filename: `CLOX-POD-${jobShort}.pdf`,
+          content: podPdf,
+          contentType: 'application/pdf',
+        },
+        {
+          filename: `CLOX-signature-${jobShort}.pdf`,
+          content: signaturePdf,
+          contentType: 'application/pdf',
+        },
+      ];
+      if (signatureFile) {
+        emailAttachments.push({
+          filename: `${sigImageName}${signatureFile.ext}`,
+          content: signatureFile.buffer,
+          contentType: signatureFile.contentType,
+        });
+      }
+      for (const photo of photoFiles) {
+        emailAttachments.push({
+          filename: photo.filename,
+          content: photo.buffer,
+          contentType: photo.contentType,
+        });
+      }
+
       await this.notifications.notifyPodFinalized({
         senderEmails: parties.senderEmails,
         receiverEmail: parties.receiverEmail,
@@ -2297,23 +2522,37 @@ export class TripsService {
         jobTitle: parties.jobTitle,
         dropSuburb: parties.dropSuburb,
         signerName: progress.signerName,
-        attachments: [
-          {
-            filename: `CLOX-POD-${parties.jobId.slice(0, 8)}.pdf`,
-            content: podPdf,
-            contentType: 'application/pdf',
-          },
-          {
-            filename: `CLOX-signature-${parties.jobId.slice(0, 8)}.pdf`,
-            content: signaturePdf,
-            contentType: 'application/pdf',
-          },
-        ],
+        attachments: emailAttachments,
       });
     } catch {
       // POD + trip completion already persisted; email can be retried operationally.
     }
 
     return this.getDriverTrip(principal, tripId);
+  }
+
+  /** Load a trip storage artifact for PDF embed / email attach. */
+  private async readStoredArtifact(
+    storageKey: string,
+  ): Promise<{ buffer: Buffer; ext: string; contentType: string } | null> {
+    try {
+      const fullPath = join(this.storageRoot(), storageKey);
+      await access(fullPath);
+      const buffer = await readFile(fullPath);
+      const ext = (extname(storageKey) || '.bin').toLowerCase();
+      const contentType =
+        ext === '.png'
+          ? 'image/png'
+          : ext === '.jpg' || ext === '.jpeg'
+            ? 'image/jpeg'
+            : ext === '.webp'
+              ? 'image/webp'
+              : ext === '.pdf'
+                ? 'application/pdf'
+                : 'application/octet-stream';
+      return { buffer, ext, contentType };
+    } catch {
+      return null;
+    }
   }
 }

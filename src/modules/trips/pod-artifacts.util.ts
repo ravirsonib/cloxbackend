@@ -41,7 +41,16 @@ export function formatAudCents(cents: number): string {
 
 export {
   buildBrandedPdf,
+  loadCloxLogoBuffer,
+  type BrandedPdfImage,
   type BrandedPdfInput,
   type BrandedPdfKv,
   type BrandedPdfSection,
 } from './branded-pdf.util';
+
+export {
+  buildPodJourney,
+  formatJourneyForTable,
+  type PodJourneyEvent,
+  type PodJourneyInput,
+} from './pod-journey.util';
