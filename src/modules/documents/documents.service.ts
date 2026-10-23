@@ -40,6 +40,21 @@ const ALLOWED_MIME = new Set([
   'image/webp',
 ]);
 
+/** Camera / OS quirks: image/jpg, empty, or octet-stream vs declared intent. */
+function normalizeUploadMime(mime: string | null | undefined): string {
+  const value = (mime ?? '').toLowerCase().trim();
+  if (value === 'image/jpg' || value === 'image/pjpeg') return 'image/jpeg';
+  return value;
+}
+
+function mimeMatchesIntent(declared: string | null | undefined, actual: string | null | undefined): boolean {
+  if (!declared) return true;
+  const want = normalizeUploadMime(declared);
+  const got = normalizeUploadMime(actual);
+  if (!got || got === 'application/octet-stream') return true;
+  return got === want;
+}
+
 const ADMIN_PARTNER_DOC_TYPES: readonly string[] = [
   ComplianceDocType.ABN_EXTRACT,
   ComplianceDocType.GOVERNMENT_ID,
@@ -424,7 +439,7 @@ export class DocumentsService {
     await this.assertDocActionAllowed(principal, doc);
     await this.assertDriverOwnsDoc(principal, doc);
 
-    if (doc.mimeType && file.mimetype !== doc.mimeType) {
+    if (!mimeMatchesIntent(doc.mimeType, file.mimetype)) {
       throw new BadRequestException('Content-Type does not match upload intent');
     }
     const maxBytes = doc.sizeBytes ?? 10 * 1024 * 1024;
@@ -622,11 +637,12 @@ export class DocumentsService {
     const docs = await this.prisma.complianceDocument.findMany({
       where: {
         companyId: query.companyId,
+        // Include UPLOADED / UNDER_REVIEW / APPROVED / REJECTED / EXPIRED — anything with bytes.
         status: { not: ComplianceDocStatus.UPLOAD_PENDING },
         ...(driverIdFilter ? { driverId: driverIdFilter } : {}),
       },
-      orderBy: { createdAt: 'desc' },
-      take: 100,
+      orderBy: { updatedAt: 'desc' },
+      take: 200,
     });
 
     const vehicleIds = [

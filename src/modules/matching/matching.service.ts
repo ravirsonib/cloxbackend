@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ConflictException,
   ForbiddenException,
   Injectable,
   Logger,
@@ -8,12 +9,14 @@ import {
   ServiceUnavailableException,
 } from '@nestjs/common';
 import {
+  AssignmentStatus,
   CompanyStatus,
   CompanyType,
   DriverStatus,
   JobStatus,
   PlatformRole,
   ProposalStatus,
+  TripStatus,
   VehicleStatus,
 } from '@prisma/client';
 import type { AuthenticatedPrincipal } from '../../common/guards/jwt-auth.guard';
@@ -121,7 +124,10 @@ export class MatchingService {
         stops: { orderBy: { sequence: 'asc' }, take: 4 },
         originRegion: true,
         proposals: {
-          where: { carrierCompanyId: company.id },
+          where: {
+            carrierCompanyId: company.id,
+            status: ProposalStatus.SUBMITTED,
+          },
           take: 1,
         },
       },
@@ -220,6 +226,86 @@ export class MatchingService {
       throw new BadRequestException({
         message: `Driver licence ${driver.licenceClass ?? 'none'} does not cover vehicle class ${vehicle.vehicleClass}`,
         code: 'LICENCE_CLASS_MISMATCH',
+      });
+    }
+
+    const vehicleBusyAssignment = await this.prisma.assignment.findFirst({
+      where: {
+        vehicleId: vehicle.id,
+        OR: [
+          { status: AssignmentStatus.PENDING },
+          {
+            status: AssignmentStatus.LOCKED,
+            trip: {
+              status: { notIn: [TripStatus.COMPLETED, TripStatus.CANCELLED] },
+            },
+          },
+        ],
+      },
+      select: { id: true, jobId: true, status: true },
+    });
+    if (vehicleBusyAssignment) {
+      throw new ConflictException({
+        message: 'Vehicle is already assigned or pending payment on another job',
+        code: 'VEHICLE_BUSY',
+        jobId: vehicleBusyAssignment.jobId,
+      });
+    }
+    const driverBusyAssignment = await this.prisma.assignment.findFirst({
+      where: {
+        driverId: driver.id,
+        OR: [
+          { status: AssignmentStatus.PENDING },
+          {
+            status: AssignmentStatus.LOCKED,
+            trip: {
+              status: { notIn: [TripStatus.COMPLETED, TripStatus.CANCELLED] },
+            },
+          },
+        ],
+      },
+      select: { id: true, jobId: true, status: true },
+    });
+    if (driverBusyAssignment) {
+      throw new ConflictException({
+        message: 'Driver is already assigned or pending payment on another job',
+        code: 'DRIVER_BUSY',
+        jobId: driverBusyAssignment.jobId,
+      });
+    }
+
+    const vehicleOpenBid = await this.prisma.proposal.findFirst({
+      where: {
+        vehicleId: vehicle.id,
+        status: ProposalStatus.SUBMITTED,
+        jobId: { not: job.id },
+        job: { status: { in: [JobStatus.PUBLISHED, JobStatus.BIDDING] } },
+      },
+      select: { id: true, jobId: true },
+    });
+    if (vehicleOpenBid) {
+      throw new ConflictException({
+        message: 'Vehicle already has an open bid on another job — accept/withdraw that bid first',
+        code: 'VEHICLE_BID_COMMITTED',
+        jobId: vehicleOpenBid.jobId,
+        proposalId: vehicleOpenBid.id,
+      });
+    }
+    const driverOpenBid = await this.prisma.proposal.findFirst({
+      where: {
+        driverId: driver.id,
+        status: ProposalStatus.SUBMITTED,
+        jobId: { not: job.id },
+        job: { status: { in: [JobStatus.PUBLISHED, JobStatus.BIDDING] } },
+      },
+      select: { id: true, jobId: true },
+    });
+    if (driverOpenBid) {
+      throw new ConflictException({
+        message: 'Driver already has an open bid on another job — accept/withdraw that bid first',
+        code: 'DRIVER_BID_COMMITTED',
+        jobId: driverOpenBid.jobId,
+        proposalId: driverOpenBid.id,
       });
     }
 

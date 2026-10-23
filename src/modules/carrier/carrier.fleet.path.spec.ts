@@ -266,6 +266,7 @@ describe('CarrierService resend / vehicle / capabilities leftovers', () => {
         findMany: jest.fn().mockResolvedValue([
           {
             vehicleId: 'veh-1',
+            status: 'LOCKED',
             trip: {
               id: 'trip-1',
               status: 'AT_DROPOFF',
@@ -276,11 +277,13 @@ describe('CarrierService resend / vehicle / capabilities leftovers', () => {
           },
         ]),
       },
+      proposal: { findMany: jest.fn().mockResolvedValue([]) },
     };
     const result = await makeService(prisma).listVehicles(carrier);
     expect(result.items).toHaveLength(1);
     expect(result.items[0].compliance.rwc.state).toBe('EXPIRING');
     expect(result.items[0].activityStatus).toBe('AT_DROPOFF');
+    expect(result.items[0].bidAvailable).toBe(false);
     expect(result.items[0].currentTrip?.jobTitle).toContain('Tullamarine');
     expect(prisma.vehicle.findMany).toHaveBeenCalledWith(
       expect.objectContaining({ where: { companyId: 'co-c' } }),

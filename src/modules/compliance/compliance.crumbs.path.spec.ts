@@ -184,21 +184,25 @@ describe('ComplianceService crumb branch leftovers', () => {
     const svc = makeService(prisma);
     await svc.reject(superAdmin, 'case-1', {} as never);
     expect(audit.recordPlatform).toHaveBeenCalledWith(
-      expect.objectContaining({ metadata: { note: null } }),
+      expect.objectContaining({
+        metadata: expect.objectContaining({ note: null }),
+      }),
     );
 
     await svc.requestInfo(superAdmin, 'case-1', {} as never);
     expect(audit.recordPlatform).toHaveBeenCalledWith(
       expect.objectContaining({
         action: expect.anything(),
-        metadata: { note: null },
+        metadata: expect.objectContaining({ note: null }),
       }),
     );
 
     scope.allowedTerritoryCodes.mockReturnValue(['MEL']);
     await svc.escalate(localBde, 'case-1', {} as never);
     expect(audit.recordPlatform).toHaveBeenCalledWith(
-      expect.objectContaining({ metadata: { note: null } }),
+      expect.objectContaining({
+        metadata: expect.objectContaining({ note: null }),
+      }),
     );
   });
 });

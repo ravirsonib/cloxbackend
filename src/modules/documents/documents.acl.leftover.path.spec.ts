@@ -85,6 +85,7 @@ describe('DocumentsService ACL / mime leftover paths', () => {
           homeRegionId: null,
         }),
       },
+      adminUser: { findUnique: jest.fn().mockResolvedValue(null) },
     };
     await expect(
       makeService(prisma).createUploadIntent(stateMaster, {

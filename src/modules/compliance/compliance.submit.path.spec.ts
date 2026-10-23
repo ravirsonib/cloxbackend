@@ -249,6 +249,34 @@ describe('ComplianceService submit + approve/reject happy paths', () => {
       expect(result.companyStatus).toBe(CompanyStatus.PENDING_PAYMENT);
     });
 
+    it('approve supplementary KYB keeps ACTIVE company status', async () => {
+      const companyUpdate = jest.fn();
+      const base = openCase(CompanyType.SENDER);
+      const prisma = {
+        isConnected: () => true,
+        complianceCase: {
+          findUnique: jest.fn().mockResolvedValue({
+            ...base,
+            company: { ...base.company, status: CompanyStatus.ACTIVE },
+          }),
+        },
+        user: { findMany: jest.fn().mockResolvedValue([{ email: 'sender@yopmail.com' }]) },
+        $transaction: jest.fn().mockImplementation(async (fn: (tx: unknown) => unknown) => {
+          const tx = {
+            complianceCase: { update: jest.fn() },
+            complianceDocument: { updateMany: jest.fn() },
+            company: { update: companyUpdate },
+          };
+          return fn(tx);
+        }),
+      };
+      const service = makeService(prisma);
+      const result = await service.approve(superAdmin, 'case-1', { note: 'docs ok' });
+      expect(result.companyStatus).toBe(CompanyStatus.ACTIVE);
+      expect(companyUpdate).not.toHaveBeenCalled();
+      expect(prisma.user.findMany).not.toHaveBeenCalled();
+    });
+
     it('reject sets company REJECTED', async () => {
       const prisma = {
         isConnected: () => true,

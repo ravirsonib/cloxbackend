@@ -287,6 +287,18 @@ export class SenderService {
       throw new NotFoundException(`Unknown region ${input.homeRegionCode}`);
     }
 
+    const invoicePatch =
+      input.invoiceLegalName !== undefined
+        ? {
+            invoiceLegalName: input.invoiceLegalName,
+            invoiceAddressLine1: input.invoiceAddressLine1,
+            invoiceSuburb: input.invoiceSuburb,
+            invoiceState: input.invoiceState,
+            invoicePostcode: input.invoicePostcode,
+            gstRegistered: input.gstRegistered ?? false,
+          }
+        : {};
+
     await this.prisma.company.update({
       where: { id: company.id },
       data: {
@@ -295,21 +307,16 @@ export class SenderService {
         tradingName: input.tradingName,
         abn: input.abn || null,
         acn: input.acn,
-        phone: input.phone,
+        ...(input.phone !== undefined ? { phone: input.phone } : {}),
         homeRegionId: region.id,
-        invoiceLegalName: input.invoiceLegalName,
-        invoiceAddressLine1: input.invoiceAddressLine1,
-        invoiceSuburb: input.invoiceSuburb,
-        invoiceState: input.invoiceState,
-        invoicePostcode: input.invoicePostcode,
-        gstRegistered: input.gstRegistered,
+        ...invoicePatch,
       },
     });
 
     await this.prisma.user.update({
       where: { id: user.id },
       data: {
-        phone: input.phone ?? user.phone,
+        ...(input.phone !== undefined ? { phone: input.phone } : {}),
         name: input.legalName,
       },
     });
@@ -423,10 +430,16 @@ export class SenderService {
         where: { id: { in: input.documentIds } },
         data: { caseId: complianceCase.id, status: ComplianceDocStatus.UNDER_REVIEW },
       });
-      await tx.company.update({
-        where: { id: company.id },
-        data: { status: CompanyStatus.PENDING_REVIEW },
-      });
+      // Initial KYB only — do not demote ACTIVE / PENDING_PAYMENT on re-submit.
+      if (
+        company.status !== CompanyStatus.ACTIVE &&
+        company.status !== CompanyStatus.PENDING_PAYMENT
+      ) {
+        await tx.company.update({
+          where: { id: company.id },
+          data: { status: CompanyStatus.PENDING_REVIEW },
+        });
+      }
       return complianceCase;
     });
 

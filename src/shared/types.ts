@@ -754,10 +754,17 @@ export const abrLookupQuerySchema = z.object({
 
 export type AbrLookupQuery = z.infer<typeof abrLookupQuerySchema>;
 
+/** Empty / whitespace → undefined so optional phoneField can skip. */
+const optionalPhoneInput = z.preprocess((value) => {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value === 'string' && value.trim() === '') return undefined;
+  return value;
+}, phoneField.optional());
+
 export const senderRegisterSchema = z.object({
   email: emailField,
   name: z.string().trim().min(2).max(120),
-  phone: z.string().trim().min(8).max(32).optional(),
+  phone: optionalPhoneInput,
   acceptedTerms: acceptedTrue,
   /** Local BDE company invite token — invalid/expired → HQ (no referrer). */
   inviteToken: z.string().trim().min(16).max(200).optional(),
@@ -777,14 +784,15 @@ export const senderProfileSchema = z
       .refine((v) => v === '' || /^\d{11}$/.test(v), 'ABN must be 11 digits')
       .optional(),
     acn: z.string().trim().max(20).optional(),
-    phone: z.string().trim().min(8).max(32).optional(),
+    phone: optionalPhoneInput,
     homeRegionCode: z.string().trim().toUpperCase().regex(/^[A-Z]{2,3}$/).default('VIC'),
-    invoiceLegalName: z.string().trim().min(2).max(200),
-    invoiceAddressLine1: z.string().trim().min(3).max(200),
-    invoiceSuburb: z.string().trim().min(2).max(100),
-    invoiceState: z.string().trim().toUpperCase().regex(/^[A-Z]{2,3}$/),
-    invoicePostcode: z.string().trim().regex(/^\d{4}$/),
-    gstRegistered: z.boolean().default(false),
+    /** Invoice fields optional so account_type can save without completing invoice. */
+    invoiceLegalName: z.string().trim().min(2).max(200).optional(),
+    invoiceAddressLine1: z.string().trim().min(3).max(200).optional(),
+    invoiceSuburb: z.string().trim().min(2).max(100).optional(),
+    invoiceState: z.string().trim().toUpperCase().regex(/^[A-Z]{2,3}$/).optional(),
+    invoicePostcode: z.string().trim().regex(/^\d{4}$/).optional(),
+    gstRegistered: z.boolean().optional(),
   })
   .superRefine((value, ctx) => {
     if (value.accountType === 'BUSINESS' && !value.abn?.length) {
@@ -793,6 +801,30 @@ export const senderProfileSchema = z
         path: ['abn'],
         message: 'ABN is required for business senders',
       });
+    }
+    const invoiceProvided =
+      value.invoiceLegalName !== undefined ||
+      value.invoiceAddressLine1 !== undefined ||
+      value.invoiceSuburb !== undefined ||
+      value.invoiceState !== undefined ||
+      value.invoicePostcode !== undefined;
+    if (!invoiceProvided) return;
+    const required: Array<{ key: keyof typeof value; message: string }> = [
+      { key: 'invoiceLegalName', message: 'Invoice legal name is required' },
+      { key: 'invoiceAddressLine1', message: 'Invoice address is required' },
+      { key: 'invoiceSuburb', message: 'Invoice suburb is required' },
+      { key: 'invoiceState', message: 'Invoice state is required' },
+      { key: 'invoicePostcode', message: 'Invoice postcode is required' },
+    ];
+    for (const field of required) {
+      const current = value[field.key];
+      if (typeof current !== 'string' || !current.trim()) {
+        ctx.addIssue({
+          code: 'custom',
+          path: [field.key],
+          message: field.message,
+        });
+      }
     }
   });
 
@@ -814,7 +846,7 @@ export type SenderPaymentConfirmInput = z.infer<typeof senderPaymentConfirmSchem
 export const carrierRegisterSchema = z.object({
   email: emailField,
   name: z.string().trim().min(2).max(120),
-  phone: z.string().trim().min(8).max(32).optional(),
+  phone: optionalPhoneInput,
   acceptedTerms: acceptedTrue,
   /** Local BDE company invite token — invalid/expired → HQ (no referrer). */
   inviteToken: z.string().trim().min(16).max(200).optional(),

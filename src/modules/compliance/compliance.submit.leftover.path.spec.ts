@@ -367,4 +367,65 @@ describe('ComplianceService submit leftover validation paths', () => {
       }),
     ).rejects.toBeInstanceOf(BadRequestException);
   });
+
+  it('preserves ACTIVE company status on supplementary sender KYB submit', async () => {
+    const docId = '11111111-1111-4111-8111-111111111111';
+    const companyUpdate = jest.fn();
+    const prisma = {
+      isConnected: () => true,
+      company: {
+        findUnique: jest.fn().mockResolvedValue({
+          id: 'co-s',
+          type: CompanyType.SENDER,
+          status: CompanyStatus.ACTIVE,
+          abn: '51824753556',
+          homeRegionId: 'reg-vic',
+          homeRegion: { code: 'VIC' },
+        }),
+      },
+      user: {
+        findUnique: jest.fn().mockResolvedValue({
+          id: 'user-sender',
+          companyId: 'co-s',
+        }),
+      },
+      complianceDocument: {
+        findMany: jest.fn().mockResolvedValue([
+          {
+            id: docId,
+            docType: ComplianceDocType.ABN_EXTRACT,
+            status: ComplianceDocStatus.UPLOADED,
+          },
+        ]),
+      },
+      complianceCase: { findFirst: jest.fn().mockResolvedValue(null) },
+      $transaction: jest.fn().mockImplementation(async (fn: (tx: unknown) => unknown) => {
+        const tx = {
+          complianceCase: {
+            create: jest.fn().mockResolvedValue({
+              id: 'case-supp',
+              status: ComplianceCaseStatus.OPEN,
+              caseType: ComplianceCaseType.SENDER_KYB,
+            }),
+          },
+          complianceDocument: { updateMany: jest.fn() },
+          company: { update: companyUpdate },
+        };
+        return fn(tx);
+      }),
+    };
+
+    const result = await makeService(prisma).submit(senderPrincipal, {
+      companyId: 'co-s',
+      caseType: ComplianceCaseType.SENDER_KYB,
+      documentIds: [docId],
+    });
+    expect(result).toEqual({
+      id: 'case-supp',
+      status: ComplianceCaseStatus.OPEN,
+      caseType: ComplianceCaseType.SENDER_KYB,
+      companyStatus: CompanyStatus.ACTIVE,
+    });
+    expect(companyUpdate).not.toHaveBeenCalled();
+  });
 });

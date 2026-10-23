@@ -125,6 +125,7 @@ describe('DocumentsService.listDocuments', () => {
           companyId: 'co-1',
           status: { not: ComplianceDocStatus.UPLOAD_PENDING },
         }),
+        orderBy: { updatedAt: 'desc' },
       }),
     );
     expect(findMany.mock.calls[0][0].where.driverId).toBeUndefined();

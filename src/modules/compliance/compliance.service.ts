@@ -115,6 +115,35 @@ export class ComplianceService {
     }
   }
 
+  /**
+   * Post-ops operational statuses: supplementary KYB/doc review must not demote
+   * the company (same pattern as fleet RWC + COMPANY_PROFILE_CHANGE).
+   */
+  private isPostOpsOperationalStatus(status: CompanyStatus): boolean {
+    return (
+      status === CompanyStatus.ACTIVE ||
+      status === CompanyStatus.PENDING_PAYMENT ||
+      status === CompanyStatus.BID_ELIGIBLE
+    );
+  }
+
+  private nextStatusAfterKybSubmit(current: CompanyStatus): CompanyStatus {
+    return this.isPostOpsOperationalStatus(current)
+      ? current
+      : CompanyStatus.PENDING_REVIEW;
+  }
+
+  private nextStatusAfterKybApprove(
+    company: { type: CompanyType; status: CompanyStatus },
+  ): CompanyStatus {
+    if (this.isPostOpsOperationalStatus(company.status)) {
+      return company.status;
+    }
+    return company.type === CompanyType.SENDER
+      ? CompanyStatus.PENDING_PAYMENT
+      : CompanyStatus.BID_ELIGIBLE;
+  }
+
   /** Admin partner KYB: Super Admin only (G0-4 — State must not approve peers). */
   private assertCanDecidePartnerKyb(
     principal: AuthenticatedPrincipal,
@@ -251,12 +280,15 @@ export class ComplianceService {
         },
       });
 
-      await tx.company.update({
-        where: { id: company.id },
-        data: { status: CompanyStatus.PENDING_REVIEW },
-      });
+      const nextCompanyStatus = this.nextStatusAfterKybSubmit(company.status);
+      if (nextCompanyStatus !== company.status) {
+        await tx.company.update({
+          where: { id: company.id },
+          data: { status: nextCompanyStatus },
+        });
+      }
 
-      return complianceCase;
+      return { complianceCase, nextCompanyStatus };
     });
 
     await this.audit.recordPlatform({
@@ -264,15 +296,19 @@ export class ComplianceService {
       actorAdminId: principal.kind === 'admin' ? principal.id : undefined,
       actorUserId: principal.kind === 'user' ? principal.id : undefined,
       entityType: 'ComplianceCase',
-      entityId: created.id,
-      metadata: { caseType: input.caseType, documentIds: input.documentIds },
+      entityId: created.complianceCase.id,
+      metadata: {
+        caseType: input.caseType,
+        documentIds: input.documentIds,
+        companyStatus: created.nextCompanyStatus,
+      },
     });
 
     return {
-      id: created.id,
-      status: created.status,
-      caseType: created.caseType,
-      companyStatus: CompanyStatus.PENDING_REVIEW,
+      id: created.complianceCase.id,
+      status: created.complianceCase.status,
+      caseType: created.complianceCase.caseType,
+      companyStatus: created.nextCompanyStatus,
     };
   }
 
@@ -478,10 +514,8 @@ export class ComplianceService {
       };
     }
 
-    const nextCompanyStatus =
-      complianceCase.company.type === CompanyType.SENDER
-        ? CompanyStatus.PENDING_PAYMENT
-        : CompanyStatus.BID_ELIGIBLE;
+    const nextCompanyStatus = this.nextStatusAfterKybApprove(complianceCase.company);
+    const statusUnchanged = nextCompanyStatus === complianceCase.company.status;
 
     await this.prisma.$transaction(async (tx) => {
       await tx.complianceCase.update({
@@ -497,10 +531,12 @@ export class ComplianceService {
         where: { caseId },
         data: { status: ComplianceDocStatus.APPROVED, reviewedAt: new Date() },
       });
-      await tx.company.update({
-        where: { id: complianceCase.companyId },
-        data: { status: nextCompanyStatus },
-      });
+      if (!statusUnchanged) {
+        await tx.company.update({
+          where: { id: complianceCase.companyId },
+          data: { status: nextCompanyStatus },
+        });
+      }
     });
 
     await this.audit.recordPlatform({
@@ -511,21 +547,25 @@ export class ComplianceService {
       metadata: { nextCompanyStatus, note: input.note ?? null },
     });
 
-    void this.notifyCompanyDecision({
-      kind: 'approved',
-      companyId: complianceCase.companyId,
-      companyEmail: complianceCase.company.email,
-      companyName: complianceCase.company.legalName,
-      companyType: complianceCase.company.type,
-      companyStatus: nextCompanyStatus,
-      caseType: complianceCase.caseType,
-      decisionNote: input.note,
-    }).catch((error: unknown) => {
-      this.logger.error(
-        `Failed to send compliance approval email for case ${caseId}`,
-        error instanceof Error ? error.stack : String(error),
-      );
-    });
+    // Initial KYB advance only — supplementary review on an already-ops-cleared company
+    // should not re-send the activation-style approval email.
+    if (!statusUnchanged) {
+      void this.notifyCompanyDecision({
+        kind: 'approved',
+        companyId: complianceCase.companyId,
+        companyEmail: complianceCase.company.email,
+        companyName: complianceCase.company.legalName,
+        companyType: complianceCase.company.type,
+        companyStatus: nextCompanyStatus,
+        caseType: complianceCase.caseType,
+        decisionNote: input.note,
+      }).catch((error: unknown) => {
+        this.logger.error(
+          `Failed to send compliance approval email for case ${caseId}`,
+          error instanceof Error ? error.stack : String(error),
+        );
+      });
+    }
 
     return {
       id: caseId,
@@ -704,11 +744,13 @@ export class ComplianceService {
     this.assertCanDecidePartnerKyb(principal, complianceCase.caseType);
     this.assertCaseActionable(complianceCase.status);
 
-    // Fleet RWC / profile change reject: close case only — do not reject the company.
-    if (
+    // Fleet RWC / profile change / post-ops KYB re-review: close case only — keep company status.
+    const preserveCompanyOnReject =
       complianceCase.caseType === ComplianceCaseType.CARRIER_FLEET_RWC ||
-      complianceCase.caseType === ComplianceCaseType.COMPANY_PROFILE_CHANGE
-    ) {
+      complianceCase.caseType === ComplianceCaseType.COMPANY_PROFILE_CHANGE ||
+      this.isPostOpsOperationalStatus(complianceCase.company.status);
+
+    if (preserveCompanyOnReject) {
       await this.prisma.$transaction(async (tx) => {
         await tx.complianceCase.update({
           where: { id: caseId },
@@ -719,7 +761,10 @@ export class ComplianceService {
             decidedByAdminId: principal.id,
           },
         });
-        if (complianceCase.caseType === ComplianceCaseType.CARRIER_FLEET_RWC) {
+        if (
+          complianceCase.caseType === ComplianceCaseType.CARRIER_FLEET_RWC ||
+          this.isPostOpsOperationalStatus(complianceCase.company.status)
+        ) {
           await tx.complianceDocument.updateMany({
             where: { caseId },
             data: {
@@ -823,8 +868,11 @@ export class ComplianceService {
     this.assertCanDecidePartnerKyb(principal, complianceCase.caseType);
     this.assertCaseActionable(complianceCase.status);
 
-    // Fleet RWC: request replacement without pulling company out of BID_ELIGIBLE.
-    if (complianceCase.caseType === ComplianceCaseType.CARRIER_FLEET_RWC) {
+    // Fleet RWC / post-ops KYB re-review: request info without demoting company.
+    if (
+      complianceCase.caseType === ComplianceCaseType.CARRIER_FLEET_RWC ||
+      this.isPostOpsOperationalStatus(complianceCase.company.status)
+    ) {
       const infoRequestedAt = new Date();
       await this.prisma.complianceCase.update({
         where: { id: caseId },
@@ -841,6 +889,23 @@ export class ComplianceService {
         entityId: caseId,
         metadata: { note: input.note ?? null, caseType: complianceCase.caseType },
       });
+      if (complianceCase.caseType !== ComplianceCaseType.CARRIER_FLEET_RWC) {
+        void this.notifyCompanyDecision({
+          kind: 'info_requested',
+          companyId: complianceCase.companyId,
+          companyEmail: complianceCase.company.email,
+          companyName: complianceCase.company.legalName,
+          companyType: complianceCase.company.type,
+          companyStatus: complianceCase.company.status,
+          caseType: complianceCase.caseType,
+          decisionNote: input.note,
+        }).catch((error: unknown) => {
+          this.logger.error(
+            `Failed to send compliance info-requested email for case ${caseId}`,
+            error instanceof Error ? error.stack : String(error),
+          );
+        });
+      }
       return {
         id: caseId,
         status: ComplianceCaseStatus.INFO_REQUESTED,

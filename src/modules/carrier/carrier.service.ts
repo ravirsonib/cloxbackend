@@ -17,7 +17,9 @@ import {
   ComplianceDocStatus,
   ComplianceDocType,
   DriverStatus,
+  JobStatus,
   PlatformRole,
+  ProposalStatus,
   TripStatus,
   UserStatus,
   VehicleStatus,
@@ -93,7 +95,8 @@ export class CarrierService {
                   ],
                 },
               },
-              take: 100,
+              orderBy: { updatedAt: 'desc' },
+              take: 200,
             },
           },
         },
@@ -313,6 +316,7 @@ export class CarrierService {
         serviceRegionCodes: company.serviceRegionCodes,
       },
       vehicles: company.vehicles.map((v) => {
+        // complianceDocuments are ordered updatedAt desc — first match is latest RWC.
         const rwcDoc = company.complianceDocuments.find(
           (d) => d.docType === ComplianceDocType.RWC && d.vehicleId === v.id,
         );
@@ -606,12 +610,17 @@ export class CarrierService {
             where: {
               carrierCompanyId: company.id,
               vehicleId: { in: vehicleIds },
-              status: AssignmentStatus.LOCKED,
-              trip: {
-                status: {
-                  notIn: [TripStatus.COMPLETED, TripStatus.CANCELLED],
+              OR: [
+                { status: AssignmentStatus.PENDING },
+                {
+                  status: AssignmentStatus.LOCKED,
+                  trip: {
+                    status: {
+                      notIn: [TripStatus.COMPLETED, TripStatus.CANCELLED],
+                    },
+                  },
                 },
-              },
+              ],
             },
             orderBy: { updatedAt: 'desc' },
             include: {
@@ -634,19 +643,56 @@ export class CarrierService {
       }
     }
 
+    const openBidCommitments =
+      vehicleIds.length === 0
+        ? []
+        : await this.prisma.proposal.findMany({
+            where: {
+              carrierCompanyId: company.id,
+              vehicleId: { in: vehicleIds },
+              status: ProposalStatus.SUBMITTED,
+              job: { status: { in: [JobStatus.PUBLISHED, JobStatus.BIDDING] } },
+            },
+            orderBy: { createdAt: 'desc' },
+            select: {
+              id: true,
+              vehicleId: true,
+              jobId: true,
+              job: { select: { id: true, title: true } },
+            },
+          });
+    const bidByVehicle = new Map<string, (typeof openBidCommitments)[number]>();
+    for (const row of openBidCommitments) {
+      if (row.vehicleId && !bidByVehicle.has(row.vehicleId)) {
+        bidByVehicle.set(row.vehicleId, row);
+      }
+    }
+
     return {
       items: items.map((v) => {
         const active = assignmentByVehicle.get(v.id) ?? null;
         const trip = active?.trip ?? null;
+        const openBid = bidByVehicle.get(v.id) ?? null;
         /** Operational label for UI — does not mutate VehicleStatus (asset lifecycle). */
         const activityStatus = trip
           ? trip.onBreak
             ? 'ON_BREAK'
             : trip.status
-          : null;
+          : active?.status === AssignmentStatus.PENDING
+            ? 'PENDING_ASSIGNMENT'
+            : openBid
+              ? 'BID_COMMITTED'
+              : null;
+        const bidAvailable = v.status === VehicleStatus.ACTIVE && activityStatus == null;
         return {
           ...v,
           activityStatus,
+          bidAvailable,
+          committedJob: active
+            ? { id: active.job.id, title: active.job.title }
+            : openBid
+              ? { id: openBid.job.id, title: openBid.job.title }
+              : null,
           currentTrip: trip
             ? {
                 id: trip.id,
@@ -726,12 +772,17 @@ export class CarrierService {
         user: { select: { id: true, email: true, name: true, phone: true, status: true } },
         assignments: {
           where: {
-            status: AssignmentStatus.LOCKED,
-            trip: {
-              status: {
-                notIn: [TripStatus.COMPLETED, TripStatus.CANCELLED],
+            OR: [
+              { status: AssignmentStatus.PENDING },
+              {
+                status: AssignmentStatus.LOCKED,
+                trip: {
+                  status: {
+                    notIn: [TripStatus.COMPLETED, TripStatus.CANCELLED],
+                  },
+                },
               },
-            },
+            ],
           },
           orderBy: { updatedAt: 'desc' },
           take: 1,
@@ -747,22 +798,47 @@ export class CarrierService {
             job: { select: { id: true, title: true } },
           },
         },
+        proposals: {
+          where: {
+            status: ProposalStatus.SUBMITTED,
+            job: { status: { in: [JobStatus.PUBLISHED, JobStatus.BIDDING] } },
+          },
+          orderBy: { createdAt: 'desc' },
+          take: 1,
+          select: {
+            id: true,
+            jobId: true,
+            job: { select: { id: true, title: true } },
+          },
+        },
       },
     });
     return {
       items: rows.map((d) => {
         const active = d.assignments[0] ?? null;
         const trip = active?.trip ?? null;
+        const openBid = d.proposals[0] ?? null;
         /** Operational label for UI — does not mutate DriverStatus (account lifecycle). */
         const activityStatus = trip
           ? trip.onBreak
             ? 'ON_BREAK'
             : trip.status
-          : null;
+          : active?.status === AssignmentStatus.PENDING
+            ? 'PENDING_ASSIGNMENT'
+            : openBid
+              ? 'BID_COMMITTED'
+              : null;
+        const bidAvailable = d.status === DriverStatus.ACTIVE && activityStatus == null;
         return {
           id: d.id,
           status: d.status,
           activityStatus,
+          bidAvailable,
+          committedJob: active
+            ? { id: active.job.id, title: active.job.title }
+            : openBid
+              ? { id: openBid.job.id, title: openBid.job.title }
+              : null,
           currentTrip: trip
             ? {
                 id: trip.id,

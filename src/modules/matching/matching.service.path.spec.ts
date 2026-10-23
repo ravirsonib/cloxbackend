@@ -1,4 +1,8 @@
-import { BadRequestException, ForbiddenException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ConflictException,
+  ForbiddenException,
+} from '@nestjs/common';
 import {
   CompanyStatus,
   CompanyType,
@@ -183,7 +187,8 @@ describe('MatchingService path (mocked Prisma)', () => {
         },
         vehicle: { findFirst: jest.fn() },
         driver: { findFirst: jest.fn() },
-        proposal: { findFirst: jest.fn(), create: jest.fn() },
+        assignment: { findFirst: jest.fn().mockResolvedValue(null) },
+        proposal: { findFirst: jest.fn().mockResolvedValue(null), create: jest.fn() },
         job: { update: jest.fn() },
         ...prismaOverrides,
       };
@@ -324,6 +329,41 @@ describe('MatchingService path (mocked Prisma)', () => {
         expect((err as BadRequestException).getResponse()).toMatchObject({
           message: 'Driver licence C does not cover vehicle class SEMI',
           code: 'LICENCE_CLASS_MISMATCH',
+        });
+      }
+    });
+
+    it('rejects vehicle already bid on another job with VEHICLE_BID_COMMITTED', async () => {
+      const { service } = buildService({
+        vehicle: {
+          findFirst: jest.fn().mockResolvedValue({
+            id: 'veh-1',
+            vehicleClass: 'SEMI',
+            status: VehicleStatus.ACTIVE,
+          }),
+        },
+        driver: {
+          findFirst: jest.fn().mockResolvedValue({
+            id: 'drv-1',
+            status: DriverStatus.ACTIVE,
+            licenceClass: 'HC',
+            licenceExpiry: new Date('2030-01-01T00:00:00.000Z'),
+            nhvrAcknowledgedAt: new Date('2026-01-01T00:00:00.000Z'),
+          }),
+        },
+        proposal: {
+          findFirst: jest.fn().mockResolvedValue({ id: 'prop-other', jobId: 'job-2' }),
+        },
+      });
+
+      try {
+        await service.submitProposal(carrierPrincipal, baseInput);
+        fail('expected ConflictException');
+      } catch (err) {
+        expect(err).toBeInstanceOf(ConflictException);
+        expect((err as ConflictException).getResponse()).toMatchObject({
+          code: 'VEHICLE_BID_COMMITTED',
+          jobId: 'job-2',
         });
       }
     });
