@@ -83,8 +83,8 @@ describe('buildPodJourney', () => {
     expect(labels).toContain('At dropoff');
     expect(labels).toContain('POD signed');
     expect(labels).toContain('POD finalized');
-    expect(labels).toContain('Exception · BREAKDOWN');
-    expect(labels).toContain('Exception resolved · BREAKDOWN');
+    expect(labels).toContain('Exception | BREAKDOWN');
+    expect(labels).toContain('Exception resolved | BREAKDOWN');
     expect(labels[labels.length - 1]).toBe('Trip completed');
 
     for (let i = 1; i < events.length; i++) {

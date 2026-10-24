@@ -1298,7 +1298,10 @@ export class TripsService {
     const completedDate = (trip.completedAt ?? new Date()).toISOString().slice(0, 10);
     const invoicePdf = await buildBrandedPdf({
       documentTitle: 'Tax Invoice',
-      subtitle: `${invoiceRef} · ${completedDate}`,
+      subtitle: `${invoiceRef} | ${completedDate}`,
+      headerRef: `${invoiceRef} | Job ${trip.jobId.slice(0, 8)}`,
+      logo: loadCloxLogoBuffer(),
+      footerNote: 'CLOX | Confidential | System-generated tax invoice',
       sections: [
         {
           title: 'Invoice summary',
@@ -1313,8 +1316,8 @@ export class TripsService {
           title: 'Bill to',
           rows: [
             { label: 'Name', value: billTo },
-            { label: 'Address', value: billAddress || '—' },
-            { label: 'Sender ABN', value: sender?.abn || '—' },
+            { label: 'Address', value: billAddress || '-' },
+            { label: 'Sender ABN', value: sender?.abn || '-' },
           ],
         },
         {
@@ -1324,11 +1327,11 @@ export class TripsService {
               label: 'Carrier',
               value: carrier?.legalName || carrier?.tradingName || 'Carrier',
             },
-            { label: 'Carrier ABN', value: carrier?.abn || '—' },
+            { label: 'Carrier ABN', value: carrier?.abn || '-' },
             { label: 'Driver', value: driverName },
             {
               label: 'Vehicle',
-              value: trip.assignment?.vehicle?.registration || '—',
+              value: trip.assignment?.vehicle?.registration || '-',
             },
           ],
         },
@@ -1376,13 +1379,13 @@ export class TripsService {
         const p = byStop.get(stop.id);
         const arrive = p?.enteredAt
           ? p.enteredAt.toISOString().replace('T', ' ').slice(0, 16)
-          : '—';
+          : '-';
         const depart = p?.exitedAt
           ? p.exitedAt.toISOString().replace('T', ' ').slice(0, 16)
-          : '—';
+          : '-';
         const dwell =
-          p?.waitOverageMinutes != null ? `${p.waitOverageMinutes}m` : '—';
-        const addr = [stop.suburb, stop.state].filter(Boolean).join(', ') || '—';
+          p?.waitOverageMinutes != null ? `${p.waitOverageMinutes}m` : '-';
+        const addr = [stop.suburb, stop.state].filter(Boolean).join(', ') || '-';
         return [
           String(index + 1),
           stop.stopType,
@@ -1409,14 +1412,18 @@ export class TripsService {
       const billedHours = Math.max(4, trip.job.billableHours ?? actualHours ?? 4);
       const floorNote =
         actualHours != null && actualHours < 4
-          ? `Total time: ${actualHours.toFixed(2)}h · Billed: 4.0 hours (minimum engagement).`
+          ? `Total time: ${actualHours.toFixed(2)}h | Billed: 4.0 hours (minimum engagement).`
           : `Billed hours: ${billedHours.toFixed(1)} (4.0 hour floor applies).`;
 
       const signer =
-        trip.stopProgress.find((p) => p.signerName)?.signerName ?? '—';
+        trip.stopProgress.find((p) => p.signerName)?.signerName ?? '-';
+      const jobShortInv = trip.jobId.slice(0, 8);
       runSheetPdf = await buildBrandedPdf({
         documentTitle: 'Hourly Run Sheet',
-        subtitle: `Job ${trip.jobId.slice(0, 8)} · ${completedDate}`,
+        subtitle: `Job ${jobShortInv} | ${completedDate}`,
+        headerRef: `CLOX-runsheet-${jobShortInv} | Job ${jobShortInv}`,
+        logo: loadCloxLogoBuffer(),
+        footerNote: 'CLOX | Confidential | System-generated hourly run sheet',
         sections: [
           {
             title: 'Trip header',
@@ -1426,21 +1433,21 @@ export class TripsService {
               { label: 'Driver', value: driverName },
               {
                 label: 'Transport company',
-                value: carrier?.legalName || '—',
+                value: carrier?.legalName || '-',
               },
-              { label: 'ABN', value: carrier?.abn || '—' },
+              { label: 'ABN', value: carrier?.abn || '-' },
               {
                 label: 'Vehicle rego',
-                value: trip.assignment?.vehicle?.registration || '—',
+                value: trip.assignment?.vehicle?.registration || '-',
               },
-              { label: 'Pattern', value: trip.job.hourlyPattern || '—' },
+              { label: 'Pattern', value: trip.job.hourlyPattern || '-' },
               {
                 label: 'Route distance (planned)',
-                value: `${trip.job.routeDistanceKm ?? '—'} km`,
+                value: `${trip.job.routeDistanceKm ?? '-'} km`,
               },
               {
                 label: 'Site access',
-                value: `${trip.job.siteManeuverability || '—'} / ${trip.job.siteFacility || '—'}`,
+                value: `${trip.job.siteManeuverability || '-'} / ${trip.job.siteFacility || '-'}`,
               },
             ],
           },
@@ -1463,7 +1470,7 @@ export class TripsService {
               },
               {
                 label: 'Break started',
-                value: trip.breakStartedAt?.toISOString() ?? '—',
+                value: trip.breakStartedAt?.toISOString() ?? '-',
               },
               { label: 'Billing note', value: floorNote },
               { label: 'Final receiver (SOG)', value: signer },
@@ -2195,7 +2202,7 @@ export class TripsService {
     const jobRef = parties.jobTitle || parties.jobId;
     const jobShort = parties.jobId.slice(0, 8);
     const jobDisplay = parties.jobTitle
-      ? `${parties.jobTitle} (${jobShort}…)`
+      ? `${parties.jobTitle} (${jobShort}...)`
       : parties.jobId;
     const sigImageName = `CLOX-signature-image-${jobShort}`;
     const logo = loadCloxLogoBuffer();
@@ -2225,7 +2232,7 @@ export class TripsService {
     const signatureImages: BrandedPdfImage[] = signatureFile
       ? [
           {
-            caption: `Signature · attached: ${sigImageName}${signatureFile.ext}`,
+            caption: `Signature | attached: ${sigImageName}${signatureFile.ext}`,
             buffer: signatureFile.buffer,
             fitWidth: 280,
             fitHeight: 120,
@@ -2234,7 +2241,7 @@ export class TripsService {
       : [];
 
     const goodsImages: BrandedPdfImage[] = photoFiles.map((p, i) => ({
-      caption: `Photo ${i + 1} · attached: ${p.filename}`,
+      caption: `Photo ${i + 1} | attached: ${p.filename}`,
       buffer: p.buffer,
       fitWidth: 240,
       fitHeight: 140,
@@ -2311,17 +2318,17 @@ export class TripsService {
 
     const signaturePdf = await buildBrandedPdf({
       documentTitle: 'Signature receipt',
-      subtitle: `Job ${jobRef} · Delivery sign-on-glass`,
-      headerRef: `CLOX-signature-${jobShort} · Job ${jobShort}`,
+      subtitle: `Job ${jobRef} | Delivery sign-on-glass`,
+      headerRef: `CLOX-signature-${jobShort} | Job ${jobShort}`,
       logo,
-      footerNote: 'CLOX · Confidential · System-generated signature receipt',
+      footerNote: 'CLOX | Confidential | System-generated signature receipt',
       sections: [
         {
           title: 'Delivery sign-on-glass',
           rows: [
             { label: 'Job', value: jobDisplay },
-            { label: 'Drop suburb', value: parties.dropSuburb || '—' },
-            { label: 'Drop address', value: parties.dropAddress || '—' },
+            { label: 'Drop suburb', value: parties.dropSuburb || '-' },
+            { label: 'Drop address', value: parties.dropAddress || '-' },
             { label: 'Signer', value: progress.signerName },
             { label: 'Signed at', value: signedAtLabel },
             {
@@ -2331,30 +2338,30 @@ export class TripsService {
             {
               label: 'Signature hash',
               value: progress.signatureContentHash
-                ? `sha256:${progress.signatureContentHash.slice(0, 8)}…`
-                : '—',
+                ? `sha256:${progress.signatureContentHash.slice(0, 8)}...`
+                : '-',
             },
             {
               label: 'Attachment',
               value: signatureFile
                 ? `${sigImageName}${signatureFile.ext}`
-                : '—',
+                : '-',
             },
           ],
         },
         {
           title: 'Signature image',
-          paragraphs: [
-            'Receiver signature was captured on the driver’s authenticated SOG session. No public magic-link was used.',
-          ],
           images: signatureImages.length
             ? [
                 {
                   ...signatureImages[0]!,
-                  caption: 'Embedded signature · also attached to email',
+                  caption: 'Embedded signature | also attached to email',
                 },
               ]
             : undefined,
+          paragraphs: [
+            "Receiver signature was captured on the driver's authenticated SOG session. No public magic-link was used.",
+          ],
         },
       ],
     });
@@ -2369,10 +2376,10 @@ export class TripsService {
 
     const podPdf = await buildBrandedPdf({
       documentTitle: 'Proof of Delivery',
-      subtitle: `Job ${jobRef} · ${parties.dropSuburb || 'drop'} · Finalized ${finalizedAtLabel}`,
-      headerRef: `CLOX-POD-${jobShort} · Job ${jobShort}`,
+      subtitle: `Job ${jobRef} | ${parties.dropSuburb || 'drop'} | Finalized ${finalizedAtLabel}`,
+      headerRef: `CLOX-POD-${jobShort} | Job ${jobShort}`,
       logo,
-      footerNote: 'CLOX · Confidential · System-generated proof of delivery',
+      footerNote: 'CLOX | Confidential | System-generated proof of delivery',
       sections: [
         {
           title: 'Delivery details',
@@ -2380,13 +2387,13 @@ export class TripsService {
             { label: 'Job', value: jobDisplay },
             {
               label: 'Drop address',
-              value: parties.dropAddress || parties.dropSuburb || '—',
+              value: parties.dropAddress || parties.dropSuburb || '-',
             },
             { label: 'Carrier', value: parties.carrierName },
             { label: 'Driver', value: parties.driverName },
             {
               label: 'Goods photos',
-              value: `${photos.length} (embedded below · also attached to email)`,
+              value: `${photos.length} (embedded below | also attached to email)`,
             },
           ],
         },
@@ -2403,7 +2410,7 @@ export class TripsService {
               label: 'Signature file',
               value: signatureFile
                 ? `Attached: ${sigImageName}${signatureFile.ext}`
-                : '—',
+                : '-',
             },
           ],
         },

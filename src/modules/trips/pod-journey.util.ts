@@ -89,10 +89,10 @@ export function buildPodJourney(input: PodJourneyInput): PodJourneyEvent[] {
     push(events, p.enteredAt, 'Geofence enter', name);
     push(events, p.exitedAt, 'Geofence exit', name);
     if (p.approachingNotifiedAt) {
-      const src = p.approachingSource ? ` · source ${p.approachingSource}` : '';
+      const src = p.approachingSource ? ` | source ${p.approachingSource}` : '';
       push(events, p.approachingNotifiedAt, 'Approaching', `${name}${src}`);
     }
-    push(events, p.atDropoffNotifiedAt, 'At dropoff', `${name} · notify sent`);
+    push(events, p.atDropoffNotifiedAt, 'At dropoff', `${name} | notify sent`);
     if (p.signedAt) {
       push(
         events,
@@ -105,9 +105,9 @@ export function buildPodJourney(input: PodJourneyInput): PodJourneyEvent[] {
   }
 
   for (const ex of input.exceptions ?? []) {
-    const note = [ex.reasonCode, ex.note].filter(Boolean).join(' — ') || ex.status;
-    push(events, ex.openedAt, `Exception · ${ex.kind}`, note);
-    push(events, ex.resolvedAt ?? null, `Exception resolved · ${ex.kind}`, ex.status);
+    const note = [ex.reasonCode, ex.note].filter(Boolean).join(' - ') || ex.status;
+    push(events, ex.openedAt, `Exception | ${ex.kind}`, note);
+    push(events, ex.resolvedAt ?? null, `Exception resolved | ${ex.kind}`, ex.status);
   }
 
   for (const a of input.auditEvents ?? []) {

@@ -36,7 +36,10 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { CarrierService } from '../carrier/carrier.service';
 import { NotificationsService } from '../notifications/notifications.service';
-import { buildBrandedPdf } from '../trips/branded-pdf.util';
+import {
+  buildBrandedPdf,
+  loadCloxLogoBuffer,
+} from '../trips/branded-pdf.util';
 import { writeTripArtifact } from '../trips/pod-artifacts.util';
 
 export type RescueCandidate = {
@@ -947,9 +950,13 @@ export class ExceptionsService {
       return exception;
     }
     const tripId = exception.tripId ?? 'unlinked';
+    const exShort = exception.id.slice(0, 8);
     const pdf = await buildBrandedPdf({
       documentTitle: 'Exception report',
-      subtitle: `${exception.kind} · ${exception.id.slice(0, 8)}`,
+      subtitle: `${exception.kind} | ${exShort}`,
+      headerRef: `CLOX-exception-${exShort} | ${exception.kind}`,
+      logo: loadCloxLogoBuffer(),
+      footerNote: 'CLOX | Confidential | System-generated exception report',
       sections: [
         {
           title: 'Exception details',
@@ -963,15 +970,15 @@ export class ExceptionsService {
             { label: 'Carrier', value: params.carrierLegalName },
             {
               label: 'Vehicle',
-              value: params.vehicleRegistration || '—',
+              value: params.vehicleRegistration || '-',
             },
-            { label: 'Reason code', value: exception.reasonCode || '—' },
+            { label: 'Reason code', value: exception.reasonCode || '-' },
             {
               label: 'GPS',
               value:
                 exception.gpsLat != null && exception.gpsLng != null
                   ? `${exception.gpsLat}, ${exception.gpsLng}`
-                  : '—',
+                  : '-',
             },
             {
               label: 'Photo evidence',
@@ -981,7 +988,7 @@ export class ExceptionsService {
         },
         {
           title: 'Driver note',
-          paragraphs: [exception.note || '—'],
+          paragraphs: [exception.note || '-'],
         },
         {
           title: 'Notes',
