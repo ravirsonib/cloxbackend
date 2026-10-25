@@ -127,8 +127,9 @@ describe('DriverService wizard / invite helper leftovers', () => {
     await expect(service.getOnboarding(driverPrincipal)).resolves.toMatchObject({
       step: 'suspended',
     });
+    // ACTIVE + licence fields but no uploaded DRIVER_LICENCE stays on licence.
     await expect(service.getOnboarding(driverPrincipal)).resolves.toMatchObject({
-      step: 'complete',
+      step: 'licence',
     });
   });
 

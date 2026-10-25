@@ -26,11 +26,11 @@ import { AuditService } from '../audit/audit.service';
 import { CarrierService } from '../carrier/carrier.service';
 import { JobsService } from '../jobs/jobs.service';
 import { NotificationsService } from '../notifications/notifications.service';
+import { assertAssignmentCompliance } from '../jobs/assignment-gates';
 import {
   carrierNetPayoutCents,
   gstSplitFromIncCents,
   isVehicleClassAdequate,
-  licenceCoversVehicleClass,
 } from '../jobs/job-pricing.util';
 
 @Injectable()
@@ -210,24 +210,15 @@ export class MatchingService {
       where: { id: input.driverId, companyId: company.id, status: DriverStatus.ACTIVE },
     });
     if (!driver) throw new BadRequestException('Active driver required');
-    if (!driver.licenceExpiry || driver.licenceExpiry <= new Date()) {
-      throw new BadRequestException({
-        message: 'Driver licence expired or missing expiry',
-        code: 'LICENCE_EXPIRED',
-      });
-    }
-    if (!driver.nhvrAcknowledgedAt) {
-      throw new BadRequestException({
-        message: 'Driver NHVR acknowledgement required',
-        code: 'NHVR_REQUIRED',
-      });
-    }
-    if (!licenceCoversVehicleClass(driver.licenceClass, vehicle.vehicleClass)) {
-      throw new BadRequestException({
-        message: `Driver licence ${driver.licenceClass ?? 'none'} does not cover vehicle class ${vehicle.vehicleClass}`,
-        code: 'LICENCE_CLASS_MISMATCH',
-      });
-    }
+    await assertAssignmentCompliance(
+      this.prisma,
+      {
+        driver,
+        vehicleId: vehicle.id,
+        vehicleClass: vehicle.vehicleClass,
+      },
+      'badRequest',
+    );
 
     const vehicleBusyAssignment = await this.prisma.assignment.findFirst({
       where: {

@@ -11,8 +11,10 @@ import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import {
   AppRole,
   jobCreateSchema,
+  jobReceiverUpdateSchema,
   jobRouteEstimateSchema,
   type JobCreateInput,
+  type JobReceiverUpdateInput,
   type JobRouteEstimateInput,
 } from '../../shared/types';
 import { CurrentPrincipal } from '../../common/decorators/current-admin.decorator';
@@ -106,13 +108,30 @@ export class JobsController {
   @ApiBearerAuth()
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(AppRole.SENDER)
-  @ApiOperation({ summary: 'Update DRAFT job (canBook required)' })
+  @ApiOperation({
+    summary: 'Full job update before accept/payment (canBook required)',
+  })
   update(
     @CurrentPrincipal() principal: AuthenticatedPrincipal,
     @Param('id') id: string,
     @Body(new ZodValidationPipe(jobCreateSchema)) body: JobCreateInput,
   ) {
     return this.jobsService.updateJob(principal, id, body);
+  }
+
+  @Patch(':id/receiver')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(AppRole.SENDER)
+  @ApiOperation({
+    summary: 'Update receiver details after payment until AT_DROPOFF',
+  })
+  updateReceiver(
+    @CurrentPrincipal() principal: AuthenticatedPrincipal,
+    @Param('id') id: string,
+    @Body(new ZodValidationPipe(jobReceiverUpdateSchema)) body: JobReceiverUpdateInput,
+  ) {
+    return this.jobsService.updateJobReceiver(principal, id, body);
   }
 
   @Post(':id/publish')

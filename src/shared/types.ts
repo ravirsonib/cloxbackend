@@ -140,6 +140,8 @@ export const AuditAction = {
   JOB_CREATED: 'job.created',
   JOB_UPDATED: 'job.updated',
   JOB_PUBLISHED: 'job.published',
+  JOB_DELETED: 'job.deleted',
+  JOB_CANCELLED: 'job.cancelled',
   PROPOSAL_SUBMITTED: 'proposal.submitted',
   PROPOSAL_ACCEPTED: 'proposal.accepted',
   PROPOSAL_EXPIRED_CONFLICT: 'proposal.expired_conflict',
@@ -795,7 +797,13 @@ export const senderProfileSchema = z
     gstRegistered: z.boolean().optional(),
   })
   .superRefine((value, ctx) => {
-    if (value.accountType === 'BUSINESS' && !value.abn?.length) {
+    // Require ABN only when the client sends it empty — omit abn on invoice-only
+    // patches so an already-saved company ABN is preserved server-side.
+    if (
+      value.accountType === 'BUSINESS' &&
+      value.abn !== undefined &&
+      value.abn.length === 0
+    ) {
       ctx.addIssue({
         code: 'custom',
         path: ['abn'],
@@ -1155,8 +1163,8 @@ export const driverProfileSchema = z.object({
     .regex(/^(C|LR|MR|HR|HC|MC)$/, 'Invalid licence class'),
   licenceExpiry: z.string().datetime({ offset: true }).or(z.string().regex(/^\d{4}-\d{2}-\d{2}$/)),
   nhvrAcknowledged: z.literal(true),
-  /** Optional DRIVER_LICENCE document id after upload */
-  licenceDocumentId: z.string().uuid().optional(),
+  /** Required DRIVER_LICENCE document id after upload */
+  licenceDocumentId: z.string().uuid(),
 });
 
 export type DriverProfileInput = z.infer<typeof driverProfileSchema>;
@@ -1246,6 +1254,45 @@ export const jobCreateSchema = z
   });
 
 export type JobCreateInput = z.infer<typeof jobCreateSchema>;
+
+/** Receiver-only patch after payment lock (before AT_DROPOFF). */
+export const jobReceiverUpdateSchema = z.object({
+  receiverName: z.string().trim().min(2).max(120),
+  receiverEmail: z.string().trim().email(),
+  receiverPhone: z.string().trim().min(8).max(32).optional().nullable(),
+  stops: z
+    .array(
+      z.object({
+        id: z.string().uuid(),
+        receiverName: z.string().trim().min(2).max(120).optional().nullable(),
+        receiverEmail: z.string().trim().email().optional().nullable(),
+      }),
+    )
+    .max(4)
+    .optional(),
+});
+
+export type JobReceiverUpdateInput = z.infer<typeof jobReceiverUpdateSchema>;
+
+export const adminJobListQuerySchema = z.object({
+  page: z.coerce.number().int().min(1).default(1),
+  pageSize: z.coerce.number().int().min(1).max(100).default(20),
+  q: z.string().trim().max(120).optional(),
+  status: z
+    .enum([
+      'DRAFT',
+      'PUBLISHED',
+      'BIDDING',
+      'ASSIGNED',
+      'IN_TRANSIT',
+      'COMPLETED',
+      'CANCELLED',
+      'EXPIRED',
+    ])
+    .optional(),
+});
+
+export type AdminJobListQuery = z.infer<typeof adminJobListQuerySchema>;
 
 /** Preview suggested distance/duration from pickup + drop (mock Valhalla today). */
 export const jobRouteEstimateSchema = z

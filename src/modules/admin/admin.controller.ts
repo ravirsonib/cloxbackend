@@ -16,6 +16,7 @@ import {
   AdminRole,
   adminAuditQuerySchema,
   adminCompanyListQuerySchema,
+  adminJobListQuerySchema,
   adminLeadExportQuerySchema,
   adminLeadListQuerySchema,
   createLeadNoteSchema,
@@ -23,6 +24,7 @@ import {
   updateLeadSchema,
   type AdminAuditQuery,
   type AdminCompanyListQuery,
+  type AdminJobListQuery,
   type AdminLeadExportQuery,
   type AdminLeadListQuery,
   type CreateLeadNoteInput,
@@ -104,6 +106,42 @@ export class AdminController {
     @CurrentAdmin() admin: AuthenticatedAdmin,
   ) {
     return this.adminService.deleteCompany(id, admin.id);
+  }
+
+  @Get('jobs')
+  @ApiOperation({ summary: 'List all marketplace jobs (Super Admin)' })
+  listJobs(
+    @Query(new ZodValidationPipe(adminJobListQuerySchema)) query: AdminJobListQuery,
+  ) {
+    return this.adminService.listJobs(query);
+  }
+
+  @Get('jobs/:id')
+  @ApiOperation({ summary: 'Job detail (Super Admin)' })
+  getJob(@Param('id', ParseUUIDPipe) id: string) {
+    return this.adminService.getJob(id);
+  }
+
+  @Delete('jobs/:id')
+  @ApiOperation({
+    summary: 'Hard-delete DRAFT/CANCELLED/EXPIRED job (Super Admin)',
+  })
+  hardDeleteJob(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentAdmin() admin: AuthenticatedAdmin,
+  ) {
+    return this.adminService.hardDeleteJob(id, admin.id);
+  }
+
+  @Post('jobs/:id/soft-delete')
+  @ApiOperation({
+    summary: 'Soft-delete (cancel) an active job — keeps payment history (Super Admin)',
+  })
+  softDeleteJob(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentAdmin() admin: AuthenticatedAdmin,
+  ) {
+    return this.adminService.softDeleteJob(id, admin.id);
   }
 
   @Get('leads/:id')

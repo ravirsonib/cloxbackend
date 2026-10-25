@@ -38,8 +38,8 @@ describe('Zod schemas — M1/M2/M3 edge validation', () => {
       ).toBe(false);
     });
 
-    it('requires ABN for BUSINESS', () => {
-      const r = senderProfileSchema.safeParse({
+    it('rejects empty ABN string for BUSINESS (omit is ok to preserve server ABN)', () => {
+      const omitted = senderProfileSchema.safeParse({
         accountType: 'BUSINESS',
         legalName: 'Co',
         homeRegionCode: 'VIC',
@@ -49,7 +49,20 @@ describe('Zod schemas — M1/M2/M3 edge validation', () => {
         invoiceState: 'VIC',
         invoicePostcode: '3000',
       });
-      expect(r.success).toBe(false);
+      expect(omitted.success).toBe(true);
+
+      const empty = senderProfileSchema.safeParse({
+        accountType: 'BUSINESS',
+        legalName: 'Co',
+        abn: '',
+        homeRegionCode: 'VIC',
+        invoiceLegalName: 'Co',
+        invoiceAddressLine1: '1 St',
+        invoiceSuburb: 'Melbourne',
+        invoiceState: 'VIC',
+        invoicePostcode: '3000',
+      });
+      expect(empty.success).toBe(false);
     });
 
     it('accepts INDIVIDUAL without ABN', () => {

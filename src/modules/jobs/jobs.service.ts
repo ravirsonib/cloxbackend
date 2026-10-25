@@ -6,6 +6,7 @@ import {
   ServiceUnavailableException,
 } from '@nestjs/common';
 import {
+  AssignmentStatus,
   CompanyType,
   JobPricingModel,
   JobStatus,
@@ -16,12 +17,14 @@ import type { AuthenticatedPrincipal } from '../../common/guards/jwt-auth.guard'
 import {
   AuditAction,
   type JobCreateInput,
+  type JobReceiverUpdateInput,
   type JobRouteEstimateInput,
 } from '../../shared/types';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { PaymentsService } from '../payments/payments.service';
 import { SenderService } from '../sender/sender.service';
+import { resolveJobEditMode } from './job-edit-mode';
 import {
   carrierNetPayoutCents,
   chargeableWeightKg,
@@ -282,10 +285,12 @@ export class JobsService {
           orderBy: { createdAt: 'asc' },
         },
         assignment: true,
+        trip: { select: { id: true, status: true } },
         paymentEvents: { orderBy: { createdAt: 'desc' }, take: 3 },
       },
     });
     if (!job) throw new NotFoundException('Job not found');
+    const editability = resolveJobEditMode(job);
     const openException = await this.prisma.tripException.findFirst({
       where: {
         jobId: job.id,
@@ -312,12 +317,16 @@ export class JobsService {
     const mapped = this.mapJob(job);
     return {
       ...mapped,
+      editability,
+      trip: job.trip
+        ? { id: job.trip.id, status: job.trip.status }
+        : null,
       assignment: job.assignment
         ? {
             id: job.assignment.id,
             status: job.assignment.status,
             lockedAt: job.assignment.lockedAt,
-            paidAndConfirmed: job.assignment.status === 'LOCKED',
+            paidAndConfirmed: job.assignment.status === AssignmentStatus.LOCKED,
           }
         : null,
       payment: job.paymentEvents[0]
@@ -503,6 +512,19 @@ export class JobsService {
     return this.mapJob(job);
   }
 
+  async loadJobForEdit(jobId: string, senderCompanyId: string) {
+    const existing = await this.prisma.job.findFirst({
+      where: { id: jobId, senderCompanyId },
+      include: {
+        assignment: { select: { status: true } },
+        trip: { select: { status: true } },
+        stops: { select: { id: true, stopType: true } },
+      },
+    });
+    if (!existing) throw new NotFoundException('Job not found');
+    return existing;
+  }
+
   async updateJob(principal: AuthenticatedPrincipal, jobId: string, input: JobCreateInput) {
     this.ensureDatabase();
     const eligibility = await this.senderService.getBookingEligibility(principal);
@@ -520,12 +542,22 @@ export class JobsService {
     });
     if (!user?.company) throw new NotFoundException('Sender company not found');
 
-    const existing = await this.prisma.job.findFirst({
-      where: { id: jobId, senderCompanyId: user.company.id },
-    });
-    if (!existing) throw new NotFoundException('Job not found');
-    if (existing.status !== JobStatus.DRAFT) {
-      throw new BadRequestException('Only DRAFT jobs can be edited');
+    const existing = await this.loadJobForEdit(jobId, user.company.id);
+    const editability = resolveJobEditMode(existing);
+    if (editability.mode === 'NONE') {
+      throw new BadRequestException({
+        message: editability.reason,
+        code: 'JOB_NOT_EDITABLE',
+        editability,
+      });
+    }
+    if (editability.mode === 'RECEIVER') {
+      throw new BadRequestException({
+        message:
+          'Only receiver details can be edited now — use the receiver update payload',
+        code: 'JOB_RECEIVER_EDIT_ONLY',
+        editability,
+      });
     }
 
     if (!input.siteDisclaimerAccepted) {
@@ -640,10 +672,99 @@ export class JobsService {
       actorUserId: user.id,
       entityType: 'Job',
       entityId: job.id,
-      metadata: { pricingModel: input.pricingModel, minClass, chargeable },
+      metadata: {
+        pricingModel: input.pricingModel,
+        minClass,
+        chargeable,
+        editMode: 'FULL',
+      },
     });
 
-    return this.mapJob(job);
+    return { ...this.mapJob(job), editability: resolveJobEditMode(existing) };
+  }
+
+  async updateJobReceiver(
+    principal: AuthenticatedPrincipal,
+    jobId: string,
+    input: JobReceiverUpdateInput,
+  ) {
+    this.ensureDatabase();
+    const eligibility = await this.senderService.getBookingEligibility(principal);
+    if (!eligibility.canBook) {
+      throw new ForbiddenException({
+        message: 'Sender cannot update jobs until Ops approve + invoice + payment ready',
+        code: 'SENDER_NOT_BOOKING_READY',
+        goNoGo: eligibility.goNoGo,
+      });
+    }
+
+    const user = await this.prisma.user.findUnique({
+      where: { id: principal.id },
+      include: { company: true },
+    });
+    if (!user?.company) throw new NotFoundException('Sender company not found');
+
+    const existing = await this.loadJobForEdit(jobId, user.company.id);
+    const editability = resolveJobEditMode(existing);
+    if (editability.mode !== 'RECEIVER') {
+      throw new BadRequestException({
+        message: editability.reason,
+        code: editability.mode === 'FULL' ? 'JOB_FULL_EDIT_AVAILABLE' : 'JOB_NOT_EDITABLE',
+        editability,
+      });
+    }
+
+    if (input.stops?.length) {
+      const known = new Set(existing.stops.map((s) => s.id));
+      for (const stop of input.stops) {
+        if (!known.has(stop.id)) {
+          throw new BadRequestException({
+            message: `Stop ${stop.id} does not belong to this job`,
+            code: 'JOB_STOP_NOT_FOUND',
+          });
+        }
+      }
+    }
+
+    const job = await this.prisma.$transaction(async (tx) => {
+      if (input.stops?.length) {
+        for (const stop of input.stops) {
+          await tx.jobStop.update({
+            where: { id: stop.id },
+            data: {
+              ...(stop.receiverName !== undefined ? { receiverName: stop.receiverName } : {}),
+              ...(stop.receiverEmail !== undefined ? { receiverEmail: stop.receiverEmail } : {}),
+            },
+          });
+        }
+      }
+      return tx.job.update({
+        where: { id: existing.id },
+        data: {
+          receiverName: input.receiverName,
+          receiverEmail: input.receiverEmail,
+          receiverPhone:
+            input.receiverPhone === undefined ? undefined : input.receiverPhone,
+        },
+        include: { stops: { orderBy: { sequence: 'asc' } } },
+      });
+    });
+
+    await this.audit.recordPlatform({
+      action: AuditAction.JOB_UPDATED,
+      actorUserId: user.id,
+      entityType: 'Job',
+      entityId: job.id,
+      metadata: { editMode: 'RECEIVER' },
+    });
+
+    return {
+      ...this.mapJob(job),
+      editability: resolveJobEditMode({
+        ...existing,
+        // receivers changed; mode unchanged
+      }),
+    };
   }
 
   async publishJob(principal: AuthenticatedPrincipal, jobId: string) {

@@ -129,7 +129,7 @@ describe('DriverService invite + assignability paths', () => {
     expect(audit.recordPlatform).toHaveBeenCalled();
   });
 
-  it('getAssignability canBeAssigned when ACTIVE + licence + NHVR', async () => {
+  it('getAssignability canBeAssigned when ACTIVE + licence + NHVR + licence doc', async () => {
     const prisma = {
       isConnected: () => true,
       user: {
@@ -150,6 +150,9 @@ describe('DriverService invite + assignability paths', () => {
             company: { id: 'co-c', legalName: 'C', status: 'BID_ELIGIBLE' },
           },
         }),
+      },
+      complianceDocument: {
+        findFirst: jest.fn().mockResolvedValue({ id: 'doc-lic' }),
       },
     };
     const service = makeService(prisma);
@@ -187,6 +190,7 @@ describe('DriverService invite + assignability paths', () => {
         licenceClass: 'HC',
         licenceExpiry: '2030-01-01',
         nhvrAcknowledged: true,
+        licenceDocumentId: '11111111-1111-1111-1111-111111111111',
       }),
     ).rejects.toBeInstanceOf(BadRequestException);
   });

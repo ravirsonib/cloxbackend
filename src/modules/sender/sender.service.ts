@@ -299,14 +299,25 @@ export class SenderService {
           }
         : {};
 
+    if (
+      input.accountType === 'BUSINESS' &&
+      input.abn === undefined &&
+      !company.abn
+    ) {
+      throw new BadRequestException({
+        message: 'ABN is required for business senders',
+        code: 'ABN_REQUIRED',
+      });
+    }
+
     await this.prisma.company.update({
       where: { id: company.id },
       data: {
         senderAccountType: input.accountType as SenderAccountType,
         legalName: input.legalName,
         tradingName: input.tradingName,
-        abn: input.abn || null,
-        acn: input.acn,
+        ...(input.abn !== undefined ? { abn: input.abn || null } : {}),
+        ...(input.acn !== undefined ? { acn: input.acn } : {}),
         ...(input.phone !== undefined ? { phone: input.phone } : {}),
         homeRegionId: region.id,
         ...invoicePatch,

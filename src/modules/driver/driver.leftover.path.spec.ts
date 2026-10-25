@@ -195,6 +195,7 @@ describe('DriverService acceptInvite + submitProfile leftovers', () => {
       licenceClass: 'C',
       licenceExpiry: '2099-01-01',
       nhvrAcknowledged: true as const,
+      licenceDocumentId: 'doc-lic',
     };
     await expect(
       service.submitProfile(driverPrincipal, baseProfile),

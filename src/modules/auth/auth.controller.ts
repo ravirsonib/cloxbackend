@@ -10,7 +10,7 @@ import {
   Req,
   UseGuards,
 } from '@nestjs/common';
-import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
+import { ApiBearerAuth, ApiBody, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { Throttle, ThrottlerGuard } from '@nestjs/throttler';
 import {
   logoutSchema,
@@ -38,6 +38,35 @@ export class AuthController {
   @Post('otp/request')
   @UseGuards(ThrottlerGuard)
   @ApiOperation({ summary: 'Request OTP (any of 6 roles — email or phone)' })
+  @ApiBody({
+    description: 'Provide email and/or phone (at least one required).',
+    schema: {
+      type: 'object',
+      properties: {
+        email: {
+          type: 'string',
+          format: 'email',
+          example: 'sender@example.com',
+        },
+        phone: {
+          type: 'string',
+          example: '+61412345678',
+          description: 'Optional; email or phone required',
+        },
+        deviceLabel: {
+          type: 'string',
+          example: 'Swagger',
+          maxLength: 120,
+        },
+      },
+    },
+    examples: {
+      email: {
+        summary: 'Email login',
+        value: { email: 'sender@example.com', deviceLabel: 'Swagger' },
+      },
+    },
+  })
   @Throttle({ default: { limit: 5, ttl: 60_000 } })
   requestOtp(@Body(new ZodValidationPipe(otpRequestSchema)) body: OtpRequestInput) {
     return this.authService.requestOtp(body);
@@ -46,6 +75,25 @@ export class AuthController {
   @Post('otp/verify')
   @UseGuards(ThrottlerGuard)
   @ApiOperation({ summary: 'Verify OTP and receive JWT + session' })
+  @ApiBody({
+    description: 'Same email/phone used for request, plus the OTP code.',
+    schema: {
+      type: 'object',
+      required: ['code'],
+      properties: {
+        email: { type: 'string', format: 'email', example: 'sender@example.com' },
+        phone: { type: 'string', example: '+61412345678' },
+        code: { type: 'string', example: '123456', pattern: '^\\d{4,8}$' },
+        deviceLabel: { type: 'string', example: 'Swagger', maxLength: 120 },
+      },
+    },
+    examples: {
+      email: {
+        summary: 'Verify with email',
+        value: { email: 'sender@example.com', code: '123456' },
+      },
+    },
+  })
   @Throttle({ default: { limit: 10, ttl: 60_000 } })
   verifyOtp(
     @Body(new ZodValidationPipe(otpVerifySchema)) body: OtpVerifyInput,
@@ -62,6 +110,15 @@ export class AuthController {
   @Post('refresh')
   @UseGuards(ThrottlerGuard)
   @ApiOperation({ summary: 'Rotate refresh token' })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      required: ['refreshToken'],
+      properties: {
+        refreshToken: { type: 'string', example: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...' },
+      },
+    },
+  })
   @Throttle({ default: { limit: 20, ttl: 60_000 } })
   refresh(@Body(new ZodValidationPipe(refreshTokenSchema)) body: RefreshTokenInput) {
     return this.authService.refresh(body);
@@ -111,6 +168,15 @@ export class AuthController {
   @UseGuards(JwtAuthGuard, ThrottlerGuard)
   @Throttle({ default: { limit: 10, ttl: 60_000 } })
   @ApiOperation({ summary: 'Verify step-up OTP → short-lived X-Step-Up-Token' })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      required: ['code'],
+      properties: {
+        code: { type: 'string', example: '123456', pattern: '^\\d{4,8}$' },
+      },
+    },
+  })
   verifyStepUp(
     @CurrentPrincipal() principal: AuthenticatedPrincipal,
     @Body(new ZodValidationPipe(stepUpVerifySchema)) body: StepUpVerifyInput,

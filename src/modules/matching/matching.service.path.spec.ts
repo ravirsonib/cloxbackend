@@ -185,6 +185,9 @@ describe('MatchingService path (mocked Prisma)', () => {
             }),
           ),
         },
+        complianceDocument: {
+          findFirst: jest.fn().mockResolvedValue({ id: 'doc-ok' }),
+        },
         vehicle: { findFirst: jest.fn() },
         driver: { findFirst: jest.fn() },
         assignment: { findFirst: jest.fn().mockResolvedValue(null) },

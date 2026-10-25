@@ -50,7 +50,7 @@ function readyTrip(overrides: Record<string, unknown> = {}) {
       vehicle: {
         label: 'Truck',
         registration: 'ABC123',
-        vehicleClass: 'HR',
+        vehicleClass: 'SEMI',
       },
     },
     locations: [],
@@ -104,7 +104,13 @@ prisma as never,
       user: {
         findUnique: jest.fn().mockResolvedValue({
           id: 'user-driver',
-          driver: { id: 'drv-1' },
+          driver: {
+            id: 'drv-1',
+            status: 'ACTIVE',
+            licenceClass: 'HC',
+            licenceExpiry: new Date('2030-01-01'),
+            nhvrAcknowledgedAt: new Date('2026-01-01'),
+          },
         }),
       },
       trip: {
@@ -115,7 +121,13 @@ prisma as never,
           .mockResolvedValue(trip),
       },
       vehicle: {
-        findUnique: jest.fn().mockResolvedValue({ status: VehicleStatus.ACTIVE }),
+        findUnique: jest.fn().mockResolvedValue({
+          status: VehicleStatus.ACTIVE,
+          vehicleClass: 'SEMI',
+        }),
+      },
+      complianceDocument: {
+        findFirst: jest.fn().mockResolvedValue({ id: 'doc-ok' }),
       },
       $transaction: jest.fn().mockImplementation(async (fn: (tx: unknown) => unknown) => {
         const tx = {

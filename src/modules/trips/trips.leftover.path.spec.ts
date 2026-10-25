@@ -129,6 +129,9 @@ prisma as never,
       trip: {
         findFirst: jest.fn().mockResolvedValue(trip),
       },
+      tripException: {
+        findFirst: jest.fn().mockResolvedValue(null),
+      },
     };
     const service = makeService(prisma);
     const mapped = await service.getDriverTrip(driverPrincipal, 'trip-1');
@@ -214,19 +217,32 @@ prisma as never,
       }>,
     };
 
+    const readyDriver = {
+      id: 'drv-1',
+      status: 'ACTIVE' as const,
+      licenceClass: 'HC',
+      licenceExpiry: new Date('2030-01-01'),
+      nhvrAcknowledgedAt: new Date('2026-01-01'),
+    };
     const prisma = {
       isConnected: () => true,
       user: {
         findUnique: jest.fn().mockResolvedValue({
           id: 'user-driver',
-          driver: { id: 'drv-1' },
+          driver: readyDriver,
         }),
       },
       trip: {
         findFirst: jest.fn().mockResolvedValue({ ...base }),
       },
       vehicle: {
-        findUnique: jest.fn().mockResolvedValue({ status: VehicleStatus.ACTIVE }),
+        findUnique: jest.fn().mockResolvedValue({
+          status: VehicleStatus.ACTIVE,
+          vehicleClass: 'SEMI',
+        }),
+      },
+      complianceDocument: {
+        findFirst: jest.fn().mockResolvedValue({ id: 'doc-ok' }),
       },
     };
     const service = makeService(prisma);

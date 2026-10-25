@@ -6,7 +6,7 @@ import {
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { DriverStatus, UserStatus } from '@prisma/client';
+import { ComplianceDocType, DriverStatus, UserStatus } from '@prisma/client';
 import { randomBytes } from 'crypto';
 import type { AppEnv } from '../../config/env.validation';
 import type { AuthenticatedPrincipal } from '../../common/guards/jwt-auth.guard';
@@ -19,6 +19,10 @@ import {
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { NotificationsService } from '../notifications/notifications.service';
+import {
+  hasUsableDriverLicenceDocument,
+  USABLE_COMPLIANCE_DOC_STATUSES,
+} from '../jobs/assignment-gates';
 
 @Injectable()
 export class DriverService {
@@ -85,26 +89,31 @@ export class DriverService {
     return 'complete';
   }
 
-  private goNoGo(driver: {
-    status: DriverStatus;
-    companyId: string | null;
-    licenceClass: string | null;
-    licenceExpiry: Date | null;
-    nhvrAcknowledgedAt: Date | null;
-  }) {
+  private goNoGo(
+    driver: {
+      status: DriverStatus;
+      companyId: string | null;
+      licenceClass: string | null;
+      licenceExpiry: Date | null;
+      nhvrAcknowledgedAt: Date | null;
+    },
+    opts?: { licenceDocumentUploaded?: boolean },
+  ) {
     const linked = Boolean(driver.companyId);
     const licenceOk =
       Boolean(driver.licenceClass) &&
       Boolean(driver.licenceExpiry) &&
       (driver.licenceExpiry as Date) > new Date();
     const nhvrOk = Boolean(driver.nhvrAcknowledgedAt);
+    const licenceDocumentUploaded = opts?.licenceDocumentUploaded ?? false;
     const active = driver.status === DriverStatus.ACTIVE;
     return {
       companyLinked: linked,
       licenceValid: licenceOk,
+      licenceDocumentUploaded,
       nhvrAcknowledged: nhvrOk,
       active,
-      canBeAssigned: linked && active && licenceOk && nhvrOk,
+      canBeAssigned: linked && active && licenceOk && nhvrOk && licenceDocumentUploaded,
       tripApisNote: 'Trip execution APIs return not-assigned until M8',
     };
   }
@@ -214,9 +223,23 @@ export class DriverService {
     this.ensureDatabase();
     const user = await this.requireDriver(principal);
     const driver = user.driver!;
-    const goNoGo = this.goNoGo(driver);
+    const licenceDocumentUploaded = await hasUsableDriverLicenceDocument(
+      this.prisma,
+      driver.id,
+    );
+    const goNoGo = this.goNoGo(driver, { licenceDocumentUploaded });
+    let step = this.wizardStep(driver);
+    // Stay on licence until a usable DRIVER_LICENCE file exists (even if fields + NHVR are set).
+    if (
+      !licenceDocumentUploaded &&
+      driver.inviteAcceptedAt &&
+      driver.status !== DriverStatus.SUSPENDED &&
+      step !== 'accept'
+    ) {
+      step = 'licence';
+    }
     return {
-      step: this.wizardStep(driver),
+      step,
       user: {
         id: user.id,
         email: user.email,
@@ -258,19 +281,22 @@ export class DriverService {
       throw new BadRequestException('licenceExpiry must be a future date');
     }
 
-    if (input.licenceDocumentId) {
-      const doc = await this.prisma.complianceDocument.findFirst({
-        where: {
-          id: input.licenceDocumentId,
-          driverId: driver.id,
-        },
+    const doc = await this.prisma.complianceDocument.findFirst({
+      where: {
+        id: input.licenceDocumentId,
+        driverId: driver.id,
+        docType: ComplianceDocType.DRIVER_LICENCE,
+        status: { in: USABLE_COMPLIANCE_DOC_STATUSES },
+      },
+    });
+    if (!doc) {
+      throw new BadRequestException({
+        message: 'Usable DRIVER_LICENCE document required before activation',
+        code: 'DRIVER_LICENCE_DOC_REQUIRED',
       });
-      if (!doc) {
-        throw new BadRequestException('licenceDocumentId not found for this driver');
-      }
     }
 
-    // Phase 1: auto-activate after licence + NHVR (no separate Ops queue for drivers)
+    // Phase 1: auto-activate after licence + NHVR + licence upload (no separate Ops queue for drivers)
     const updated = await this.prisma.driver.update({
       where: { id: driver.id },
       data: {
@@ -289,7 +315,7 @@ export class DriverService {
       entityId: driver.id,
       metadata: {
         licenceClass: input.licenceClass,
-        licenceDocumentId: input.licenceDocumentId ?? null,
+        licenceDocumentId: input.licenceDocumentId,
       },
     });
     await this.audit.recordPlatform({
@@ -306,7 +332,11 @@ export class DriverService {
   async getAssignability(principal: AuthenticatedPrincipal) {
     this.ensureDatabase();
     const user = await this.requireDriver(principal);
-    const goNoGo = this.goNoGo(user.driver!);
+    const licenceDocumentUploaded = await hasUsableDriverLicenceDocument(
+      this.prisma,
+      user.driver!.id,
+    );
+    const goNoGo = this.goNoGo(user.driver!, { licenceDocumentUploaded });
     return {
       canBeAssigned: goNoGo.canBeAssigned,
       goNoGo,
@@ -318,7 +348,9 @@ export class DriverService {
             ? 'LICENCE_INVALID'
             : !goNoGo.nhvrAcknowledged
               ? 'NHVR_REQUIRED'
-              : null,
+              : !goNoGo.licenceDocumentUploaded
+                ? 'DRIVER_LICENCE_DOC_REQUIRED'
+                : null,
     };
   }
 

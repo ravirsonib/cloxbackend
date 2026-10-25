@@ -61,6 +61,11 @@ import {
   formatJourneyForTable,
   formatPodDateTime,
 } from './pod-journey.util';
+import {
+  assertAssignmentCompliance,
+  evaluateAssignmentCompliance,
+  type DriverAssignmentFields,
+} from '../jobs/assignment-gates';
 import { createReadStream, type ReadStream } from 'fs';
 import { access, readFile } from 'fs/promises';
 import { extname, join } from 'path';
@@ -393,20 +398,23 @@ export class TripsService {
       waivedAt: Date | null;
       createdAt: Date;
     }>;
-  }) {
+  }, opts?: { complianceOk?: boolean }) {
     const pendingMass = this.hasPendingMass(trip.surcharges);
     const pendingSurcharges = this.hasPendingPaymentSurcharge(trip.surcharges);
     const massOk = trip.massCheckOk && !pendingMass;
+    const complianceOk = opts?.complianceOk ?? true;
     const gates = {
       paid: trip.assignment?.status === AssignmentStatus.LOCKED,
       safetyOk: Boolean(trip.safetyPassedAt) && !trip.safetyFailedAt,
       massOk,
+      complianceOk,
       canStart:
         trip.assignment?.status === AssignmentStatus.LOCKED &&
         Boolean(trip.safetyPassedAt) &&
         !trip.safetyFailedAt &&
         massOk &&
         !pendingMass &&
+        complianceOk &&
         !trip.startedAt,
       /** POD capture/finalize only when no PENDING_PAYMENT surcharges remain. */
       canFinalizePod: !pendingSurcharges,
@@ -493,13 +501,36 @@ export class TripsService {
   async listDriverTrips(principal: AuthenticatedPrincipal) {
     this.ensureDatabase();
     const user = await this.requireDriver(principal);
+    const driver = user.driver!;
     const trips = await this.prisma.trip.findMany({
-      where: { assignment: { driverId: user.driver!.id } },
+      where: { assignment: { driverId: driver.id } },
       include: this.tripInclude(),
       orderBy: { createdAt: 'desc' },
       take: 30,
     });
-    return trips.map((t) => this.mapTrip(t));
+    return Promise.all(
+      trips.map(async (t) => {
+        const complianceOk = await this.tripComplianceOk(driver, t);
+        return this.mapTrip(t, { complianceOk });
+      }),
+    );
+  }
+
+  private async tripComplianceOk(
+    driver: DriverAssignmentFields,
+    trip: {
+      assignment?: {
+        vehicleId?: string | null;
+        vehicle?: { vehicleClass?: string | null } | null;
+      } | null;
+    },
+  ): Promise<boolean> {
+    const result = await evaluateAssignmentCompliance(this.prisma, {
+      driver,
+      vehicleId: trip.assignment?.vehicleId,
+      vehicleClass: trip.assignment?.vehicle?.vehicleClass,
+    });
+    return result.ok;
   }
 
   /** M10 — scoped POD package status for driver / sender / carrier. */
@@ -581,7 +612,8 @@ export class TripsService {
     this.ensureDatabase();
     const user = await this.requireDriver(principal);
     const trip = await this.loadTripForDriver(user.driver!.id, tripId);
-    const mapped = this.mapTrip(trip);
+    const complianceOk = await this.tripComplianceOk(user.driver!, trip);
+    const mapped = this.mapTrip(trip, { complianceOk });
     const openException = await this.prisma.tripException.findFirst({
       where: {
         tripId: trip.id,
@@ -835,7 +867,7 @@ export class TripsService {
     if (trip.assignment.vehicleId) {
       const vehicle = await this.prisma.vehicle.findUnique({
         where: { id: trip.assignment.vehicleId },
-        select: { status: true },
+        select: { status: true, vehicleClass: true },
       });
       if (!vehicle || vehicle.status !== VehicleStatus.ACTIVE) {
         throw new ForbiddenException({
@@ -843,9 +875,28 @@ export class TripsService {
           code: 'VEHICLE_NOT_ACTIVE',
         });
       }
+      await assertAssignmentCompliance(
+        this.prisma,
+        {
+          driver: user.driver!,
+          vehicleId: trip.assignment.vehicleId,
+          vehicleClass: vehicle.vehicleClass,
+        },
+        'forbidden',
+      );
+    } else {
+      await assertAssignmentCompliance(
+        this.prisma,
+        {
+          driver: user.driver!,
+          vehicleId: null,
+          vehicleClass: trip.assignment.vehicle?.vehicleClass ?? null,
+        },
+        'forbidden',
+      );
     }
     if (trip.startedAt) {
-      return this.mapTrip(trip);
+      return this.mapTrip(trip, { complianceOk: true });
     }
 
     const updated = await this.prisma.$transaction(async (tx) => {
@@ -879,7 +930,7 @@ export class TripsService {
       metadata: { event: 'trip_started', channel: 'FCM/APNs stub' },
     });
 
-    return this.mapTrip(updated);
+    return this.mapTrip(updated, { complianceOk: true });
   }
 
   /** Carrier/driver legacy path by jobId */

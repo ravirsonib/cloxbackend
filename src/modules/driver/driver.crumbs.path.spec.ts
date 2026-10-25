@@ -103,7 +103,7 @@ describe('DriverService crumb branch leftovers', () => {
     expect(onboarding.company).toBeNull();
   });
 
-  it('submitProfile ISO licenceExpiry + omitted licenceDocumentId metadata', async () => {
+  it('submitProfile ISO licenceExpiry + licenceDocumentId metadata', async () => {
     const prisma = {
       isConnected: () => true,
       user: {
@@ -144,6 +144,9 @@ describe('DriverService crumb branch leftovers', () => {
             },
           }),
       },
+      complianceDocument: {
+        findFirst: jest.fn().mockResolvedValue({ id: 'doc-lic' }),
+      },
       driver: {
         update: jest.fn().mockResolvedValue({ id: 'drv-1', status: DriverStatus.ACTIVE }),
       },
@@ -153,10 +156,11 @@ describe('DriverService crumb branch leftovers', () => {
       licenceClass: 'C',
       licenceExpiry: '2030-06-01T12:00:00.000Z',
       nhvrAcknowledged: true,
+      licenceDocumentId: 'doc-lic',
     });
     expect(audit.recordPlatform).toHaveBeenCalledWith(
       expect.objectContaining({
-        metadata: expect.objectContaining({ licenceDocumentId: null }),
+        metadata: expect.objectContaining({ licenceDocumentId: 'doc-lic' }),
       }),
     );
   });

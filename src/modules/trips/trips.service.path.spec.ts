@@ -179,7 +179,7 @@ prisma as never,
       });
       expect(prisma.vehicle.findUnique).toHaveBeenCalledWith({
         where: { id: 'veh-1' },
-        select: { status: true },
+        select: { status: true, vehicleClass: true },
       });
     });
   });

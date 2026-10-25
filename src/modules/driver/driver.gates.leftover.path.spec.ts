@@ -51,7 +51,7 @@ describe('DriverService gate leftovers', () => {
     ).rejects.toBeInstanceOf(NotFoundException);
   });
 
-  it('wizardStep returns complete when licence+nhvr filled but not ACTIVE', async () => {
+  it('wizard stays on licence until DRIVER_LICENCE document is uploaded', async () => {
     const prisma = {
       isConnected: () => true,
       user: {
@@ -72,6 +72,6 @@ describe('DriverService gate leftovers', () => {
       },
     };
     const result = await makeService(prisma).getOnboarding(driverPrincipal);
-    expect(result.step).toBe('complete');
+    expect(result.step).toBe('licence');
   });
 });

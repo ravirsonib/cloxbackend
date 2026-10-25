@@ -9,6 +9,7 @@ import {
   LeadType,
   type AdminAuditQuery,
   type AdminCompanyListQuery,
+  type AdminJobListQuery,
   type AdminLeadExportQuery,
   type AdminLeadListQuery,
   type CreateLeadNoteInput,
@@ -17,11 +18,15 @@ import {
 } from '../../shared/types';
 import {
   AdminUserStatus,
+  AssignmentStatus,
   CompanyStatus,
   CompanyType,
   ComplianceCaseStatus,
   DriverStatus,
+  JobStatus,
   Prisma,
+  ProposalStatus,
+  TripStatus,
   UserStatus,
   VehicleStatus,
 } from '@prisma/client';
@@ -845,6 +850,290 @@ export class AdminService {
       pageSize: query.pageSize,
       total,
       totalPages: Math.max(1, Math.ceil(total / query.pageSize)),
+    };
+  }
+
+  private canHardDeleteJob(status: JobStatus) {
+    return (
+      status === JobStatus.DRAFT ||
+      status === JobStatus.CANCELLED ||
+      status === JobStatus.EXPIRED
+    );
+  }
+
+  private canSoftDeleteJob(status: JobStatus) {
+    return (
+      status !== JobStatus.CANCELLED &&
+      status !== JobStatus.EXPIRED &&
+      status !== JobStatus.COMPLETED
+    );
+  }
+
+  async listJobs(query: AdminJobListQuery) {
+    this.ensureDatabase();
+    const where: Prisma.JobWhereInput = {};
+    if (query.status) where.status = query.status as JobStatus;
+    if (query.q) {
+      const q = query.q;
+      where.OR = [
+        { title: { contains: q, mode: 'insensitive' } },
+        { receiverName: { contains: q, mode: 'insensitive' } },
+        { receiverEmail: { contains: q, mode: 'insensitive' } },
+        { senderCompany: { legalName: { contains: q, mode: 'insensitive' } } },
+        { senderCompany: { email: { contains: q, mode: 'insensitive' } } },
+        { id: { equals: q } },
+      ];
+    }
+
+    const skip = (query.page - 1) * query.pageSize;
+    const [rows, total] = await Promise.all([
+      this.prisma.job.findMany({
+        where,
+        orderBy: { createdAt: 'desc' },
+        skip,
+        take: query.pageSize,
+        select: {
+          id: true,
+          status: true,
+          title: true,
+          pricingModel: true,
+          receiverName: true,
+          receiverEmail: true,
+          estimateIncGstCents: true,
+          createdAt: true,
+          updatedAt: true,
+          publishedAt: true,
+          senderCompany: {
+            select: { id: true, legalName: true, email: true, type: true },
+          },
+          assignment: {
+            select: {
+              id: true,
+              status: true,
+              lockedAt: true,
+              carrierCompany: { select: { id: true, legalName: true } },
+            },
+          },
+          trip: { select: { id: true, status: true, startedAt: true, completedAt: true } },
+          _count: { select: { proposals: true } },
+        },
+      }),
+      this.prisma.job.count({ where }),
+    ]);
+
+    return {
+      items: rows.map((j) => ({
+        id: j.id,
+        status: j.status,
+        title: j.title,
+        pricingModel: j.pricingModel,
+        receiverName: j.receiverName,
+        receiverEmail: j.receiverEmail,
+        estimateIncGstCents: j.estimateIncGstCents,
+        createdAt: j.createdAt,
+        updatedAt: j.updatedAt,
+        publishedAt: j.publishedAt,
+        senderCompany: j.senderCompany,
+        assignment: j.assignment,
+        trip: j.trip,
+        proposalCount: j._count.proposals,
+        canHardDelete: this.canHardDeleteJob(j.status),
+        canSoftDelete: this.canSoftDeleteJob(j.status),
+      })),
+      page: query.page,
+      pageSize: query.pageSize,
+      total,
+      totalPages: Math.max(1, Math.ceil(total / query.pageSize)),
+    };
+  }
+
+  async getJob(id: string) {
+    this.ensureDatabase();
+    const job = await this.prisma.job.findUnique({
+      where: { id },
+      include: {
+        senderCompany: {
+          select: { id: true, legalName: true, email: true, type: true, status: true },
+        },
+        stops: { orderBy: { sequence: 'asc' } },
+        proposals: {
+          orderBy: { createdAt: 'desc' },
+          take: 20,
+          select: {
+            id: true,
+            status: true,
+            amountIncGstCents: true,
+            etaMinutes: true,
+            createdAt: true,
+            carrierCompany: { select: { id: true, legalName: true } },
+          },
+        },
+        assignment: {
+          include: {
+            carrierCompany: { select: { id: true, legalName: true } },
+            vehicle: { select: { id: true, registration: true, vehicleClass: true } },
+            driver: {
+              select: {
+                id: true,
+                user: { select: { email: true, name: true } },
+              },
+            },
+          },
+        },
+        trip: {
+          select: {
+            id: true,
+            status: true,
+            startedAt: true,
+            completedAt: true,
+            safetyPassedAt: true,
+            massCheckOk: true,
+          },
+        },
+        paymentEvents: {
+          orderBy: { createdAt: 'desc' },
+          take: 5,
+          select: {
+            id: true,
+            status: true,
+            amountIncGstCents: true,
+            stripePaymentIntentId: true,
+            createdAt: true,
+          },
+        },
+      },
+    });
+    if (!job) throw new NotFoundException('Job not found');
+    return {
+      ...job,
+      canHardDelete: this.canHardDeleteJob(job.status),
+      canSoftDelete: this.canSoftDeleteJob(job.status),
+    };
+  }
+
+  async hardDeleteJob(id: string, actorId: string) {
+    this.ensureDatabase();
+    const job = await this.prisma.job.findUnique({
+      where: { id },
+      include: {
+        trip: { select: { id: true } },
+        assignment: { select: { id: true, proposalId: true } },
+      },
+    });
+    if (!job) throw new NotFoundException('Job not found');
+    if (!this.canHardDeleteJob(job.status)) {
+      throw new BadRequestException({
+        message:
+          'Hard delete is only for draft, cancelled, or expired jobs. Use soft delete instead.',
+        code: 'JOB_HARD_DELETE_NOT_ALLOWED',
+        status: job.status,
+      });
+    }
+
+    await this.prisma.$transaction(async (tx) => {
+      if (job.trip) {
+        await tx.surcharge.deleteMany({ where: { tripId: job.trip.id } });
+        await tx.tripLocationSample.deleteMany({ where: { tripId: job.trip.id } });
+        await tx.tripStopProgress.deleteMany({ where: { tripId: job.trip.id } });
+        await tx.tripException.updateMany({
+          where: { tripId: job.trip.id },
+          data: { tripId: null },
+        });
+        await tx.trip.delete({ where: { id: job.trip.id } });
+      }
+      await tx.tripException.deleteMany({ where: { jobId: id } });
+      await tx.surcharge.deleteMany({ where: { jobId: id } });
+      if (job.assignment) {
+        await tx.assignment.delete({ where: { id: job.assignment.id } });
+      }
+      await tx.proposal.deleteMany({ where: { jobId: id } });
+      await tx.paymentEvent.deleteMany({ where: { jobId: id } });
+      await tx.settlementLine.deleteMany({ where: { jobId: id } });
+      await tx.job.delete({ where: { id } });
+    });
+
+    await this.audit.recordPlatform({
+      action: AuditAction.JOB_DELETED,
+      actorAdminId: actorId,
+      entityType: 'Job',
+      entityId: id,
+      metadata: {
+        previousStatus: job.status,
+        title: job.title,
+        senderCompanyId: job.senderCompanyId,
+        hard: true,
+      },
+    });
+
+    return { id, deleted: true as const, mode: 'hard' as const };
+  }
+
+  async softDeleteJob(id: string, actorId: string) {
+    this.ensureDatabase();
+    const job = await this.prisma.job.findUnique({
+      where: { id },
+      include: {
+        trip: { select: { id: true, status: true } },
+        assignment: { select: { id: true, status: true } },
+      },
+    });
+    if (!job) throw new NotFoundException('Job not found');
+    if (!this.canSoftDeleteJob(job.status)) {
+      throw new BadRequestException({
+        message: 'Job is already closed and cannot be soft-deleted',
+        code: 'JOB_SOFT_DELETE_NOT_ALLOWED',
+        status: job.status,
+      });
+    }
+
+    await this.prisma.$transaction(async (tx) => {
+      await tx.proposal.updateMany({
+        where: { jobId: id, status: ProposalStatus.SUBMITTED },
+        data: { status: ProposalStatus.EXPIRED },
+      });
+      if (
+        job.assignment &&
+        job.assignment.status !== AssignmentStatus.CANCELLED &&
+        job.assignment.status !== AssignmentStatus.COMPLETED
+      ) {
+        await tx.assignment.update({
+          where: { id: job.assignment.id },
+          data: { status: AssignmentStatus.CANCELLED },
+        });
+      }
+      if (
+        job.trip &&
+        job.trip.status !== TripStatus.COMPLETED &&
+        job.trip.status !== TripStatus.CANCELLED
+      ) {
+        await tx.trip.update({
+          where: { id: job.trip.id },
+          data: { status: TripStatus.CANCELLED },
+        });
+      }
+      await tx.job.update({
+        where: { id },
+        data: { status: JobStatus.CANCELLED },
+      });
+    });
+
+    await this.audit.recordPlatform({
+      action: AuditAction.JOB_CANCELLED,
+      actorAdminId: actorId,
+      entityType: 'Job',
+      entityId: id,
+      metadata: {
+        previousStatus: job.status,
+        title: job.title,
+        soft: true,
+      },
+    });
+
+    return {
+      id,
+      deleted: false as const,
+      mode: 'soft' as const,
+      status: JobStatus.CANCELLED,
     };
   }
 }

@@ -183,6 +183,9 @@ describe('CarrierService.reassignAssignment', () => {
           nhvrAcknowledgedAt: new Date('2026-01-01'),
         }),
       },
+      complianceDocument: {
+        findFirst: jest.fn().mockResolvedValue({ id: 'doc-ok' }),
+      },
       trip: { update: tripUpdate },
       $transaction: jest.fn(async (fn: (tx: unknown) => Promise<unknown>) =>
         fn({

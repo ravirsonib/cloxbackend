@@ -28,8 +28,12 @@ import {
   type TripExceptionReleaseInput,
 } from '../../shared/types';
 import {
+  evaluateDriverLicenceFields,
+  hasUsableDriverLicenceDocument,
+  hasUsableVehicleRwcDocument,
+} from '../jobs/assignment-gates';
+import {
   isVehicleClassAdequate,
-  licenceCoversVehicleClass,
   vehicleClassRank,
 } from '../jobs/job-pricing.util';
 import { PrismaService } from '../../prisma/prisma.service';
@@ -1112,6 +1116,7 @@ export class ExceptionsService {
         where: { companyId: params.companyId, status: DriverStatus.ACTIVE },
         select: {
           id: true,
+          status: true,
           licenceClass: true,
           licenceExpiry: true,
           nhvrAcknowledgedAt: true,
@@ -1136,6 +1141,18 @@ export class ExceptionsService {
       (job?.stops[0]?.lng != null ? Number(job.stops[0].lng) : null);
 
     const driverIds = drivers.map((d) => d.id);
+    const driversWithLicenceDoc = new Set<string>();
+    for (const d of drivers) {
+      if (await hasUsableDriverLicenceDocument(this.prisma, d.id, now)) {
+        driversWithLicenceDoc.add(d.id);
+      }
+    }
+    const vehiclesWithRwc = new Set<string>();
+    for (const v of vehicles) {
+      if (await hasUsableVehicleRwcDocument(this.prisma, v.id, now)) {
+        vehiclesWithRwc.add(v.id);
+      }
+    }
     const latestByDriver = new Map<string, { lat: number; lng: number }>();
     if (originLat != null && originLng != null && driverIds.length > 0) {
       const recentTrips = await this.prisma.trip.findMany({
@@ -1167,6 +1184,7 @@ export class ExceptionsService {
     const candidates: RescueCandidate[] = [];
     for (const vehicle of vehicles) {
       if (excludeVehicleId && vehicle.id === excludeVehicleId) continue;
+      if (!vehiclesWithRwc.has(vehicle.id)) continue;
       if (!isVehicleClassAdequate(vehicle.vehicleClass, minClass)) continue;
       const classDelta = Math.max(
         0,
@@ -1175,11 +1193,9 @@ export class ExceptionsService {
       const classScore = Math.max(20, 100 - classDelta * 12);
 
       for (const driver of drivers) {
-        if (!driver.licenceExpiry || driver.licenceExpiry <= now) continue;
-        if (!driver.nhvrAcknowledgedAt) continue;
-        if (!licenceCoversVehicleClass(driver.licenceClass, vehicle.vehicleClass)) {
-          continue;
-        }
+        if (!driversWithLicenceDoc.has(driver.id)) continue;
+        const licenceGate = evaluateDriverLicenceFields(driver, vehicle.vehicleClass, now);
+        if (!licenceGate.ok) continue;
         if (
           assignment?.vehicleId === vehicle.id &&
           assignment?.driverId === driver.id
