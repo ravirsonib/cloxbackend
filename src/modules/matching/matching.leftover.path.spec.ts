@@ -69,6 +69,8 @@ function boardJob(partial: {
     billableHours: null,
     estimateIncGstCents:
       partial.estimateIncGstCents === undefined ? 10_000 : partial.estimateIncGstCents,
+    marketplacePriority: false,
+    rescueDiscountPercent: null,
     pickupAt: new Date('2026-10-10T10:00:00.000Z'),
     publishedAt: new Date('2026-10-06T10:00:00.000Z'),
     originRegion: partial.originRegionCode
@@ -199,6 +201,10 @@ describe('MatchingService leftover paths', () => {
       vehicle: { findFirst: jest.fn() },
       driver: { findFirst: jest.fn() },
       proposal: { findFirst: jest.fn(), create: jest.fn() },
+      assignment: { findFirst: jest.fn().mockResolvedValue(null) },
+      complianceDocument: {
+        findFirst: jest.fn().mockResolvedValue({ id: 'doc-ok' }),
+      },
       job: { update: jest.fn() },
     };
     const carrierService = {
@@ -257,8 +263,11 @@ describe('MatchingService leftover paths', () => {
     }
     expect(jobsService.getMinBaseCents).toHaveBeenCalledWith('HOURLY');
 
-    // Duplicate proposal
-    prisma.proposal.findFirst.mockResolvedValue({ id: 'prop-old' });
+    // Duplicate proposal (null open bids elsewhere, then same-job SUBMITTED)
+    prisma.proposal.findFirst
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({ id: 'prop-old' });
     await expect(
       service.submitProposal(carrierPrincipal, {
         ...baseInput,

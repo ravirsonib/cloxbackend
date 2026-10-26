@@ -115,6 +115,9 @@ describe('ExceptionsService rescue candidates + release', () => {
         ]),
       },
       trip: { findMany: jest.fn().mockResolvedValue([]) },
+      complianceDocument: {
+        findFirst: jest.fn().mockResolvedValue({ id: 'doc-ok' }),
+      },
     };
 
     const result = await makeService(prisma).listRescueCandidates(
@@ -128,7 +131,7 @@ describe('ExceptionsService rescue candidates + release', () => {
     expect(result.items).toHaveLength(1);
   });
 
-  it('release cancels trip/assignment/job and notifies', async () => {
+  it('release re-lists job to marketplace with priority and discount', async () => {
     const openRow = {
       id: 'ex-1',
       jobId: 'job-1',
@@ -148,21 +151,38 @@ describe('ExceptionsService rescue candidates + release', () => {
       escalatedAt: new Date(),
       resolvedAt: null,
       resolutionNote: null,
-      job: { id: 'job-1', title: 'Load' },
+      job: { id: 'job-1', title: 'Load', rescueDiscountPercent: null, marketplacePriority: false },
       assignment: { vehicle: null, driver: null },
     };
     const tripUpdate = jest.fn();
     const assignmentUpdate = jest.fn();
+    const proposalUpdateMany = jest.fn();
     const jobUpdate = jest.fn();
     const exceptionUpdate = jest.fn().mockResolvedValue({
       ...openRow,
-      status: TripExceptionStatus.RESOLVED_CANCELLED,
+      status: TripExceptionStatus.RESOLVED_RELISTED,
       resolvedAt: new Date(),
       resolutionNote: 'Cannot rescue',
+      job: {
+        id: 'job-1',
+        title: 'Load',
+        rescueDiscountPercent: 10,
+        marketplacePriority: true,
+      },
     });
+    const companyUpdate = jest.fn();
 
     const prisma = {
       isConnected: () => true,
+      platformSettings: {
+        upsert: jest.fn().mockResolvedValue({
+          id: 'default',
+          rescueDiscountPercent: 10,
+          marketplaceRelistSlaMs: 300_000,
+          driverUnavailableScoreDelta: 5,
+          carrierMarketplaceReleaseScoreDelta: 10,
+        }),
+      },
       user: {
         findUnique: jest
           .fn()
@@ -174,10 +194,14 @@ describe('ExceptionsService rescue candidates + release', () => {
         update: exceptionUpdate,
       },
       company: {
-        findUnique: jest.fn().mockResolvedValue({
-          email: 'c@yopmail.com',
-          users: [{ email: 'c@yopmail.com' }],
-        }),
+        findUnique: jest
+          .fn()
+          .mockResolvedValueOnce({ reliabilityScore: 100 })
+          .mockResolvedValueOnce({
+            email: 'c@yopmail.com',
+            users: [{ email: 'c@yopmail.com' }],
+          }),
+        update: companyUpdate,
       },
       job: {
         findUnique: jest.fn().mockResolvedValue({
@@ -191,6 +215,7 @@ describe('ExceptionsService rescue candidates + release', () => {
         fn({
           trip: { update: tripUpdate },
           assignment: { update: assignmentUpdate },
+          proposal: { updateMany: proposalUpdateMany },
           job: { update: jobUpdate },
           tripException: { update: exceptionUpdate },
         }),
@@ -203,15 +228,69 @@ describe('ExceptionsService rescue candidates + release', () => {
       { note: 'Cannot rescue' },
     );
 
-    expect(result.exception.status).toBe(TripExceptionStatus.RESOLVED_CANCELLED);
-    expect(result.stripeAdjustment.status).toBe('STUB_NOT_IMPLEMENTED');
+    expect(result.exception.status).toBe(TripExceptionStatus.RESOLVED_RELISTED);
+    expect(result.marketplaceRelease.reListJob).toBe(true);
+    expect(result.marketplaceRelease.discountPercent).toBe(10);
+    expect(result.stripeAdjustment?.status).toBe('STUB_NOT_IMPLEMENTED');
+    expect(jobUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: 'job-1' },
+        data: expect.objectContaining({
+          status: 'BIDDING',
+          marketplacePriority: true,
+          rescueDiscountPercent: 10,
+          rescuedFromExceptionId: 'ex-1',
+        }),
+      }),
+    );
     expect(tripUpdate).toHaveBeenCalledWith({
       where: { id: 'trip-1' },
-      data: { status: TripStatus.CANCELLED },
+      data: { status: TripStatus.CANCELLED, onBreak: false, breakStartedAt: null },
     });
     expect(notifications.notifyTripExceptionReleased).toHaveBeenCalled();
+    expect(companyUpdate).toHaveBeenCalledWith({
+      where: { id: 'co-c' },
+      data: { reliabilityScore: 90 },
+    });
     expect(audit.recordPlatform).toHaveBeenCalledWith(
-      expect.objectContaining({ action: 'exception.performance_stub' }),
+      expect.objectContaining({ action: 'exception.relisted' }),
     );
+  });
+
+  it('watchdog auto-relists pre-trip AWAITING_CARRIER past SLA', async () => {
+    const releaseSpy = jest.spyOn(ExceptionsService.prototype, 'releaseToMarketplace');
+    releaseSpy.mockResolvedValue({
+      exception: { id: 'ex-due', status: TripExceptionStatus.RESOLVED_RELISTED } as never,
+      marketplaceRelease: {
+        status: 'RELISTED',
+        reListJob: true,
+        marketplacePriority: true,
+        discountPercent: 10,
+        message: 'ok',
+      },
+      stripeAdjustment: { status: 'STUB_NOT_IMPLEMENTED', amountCents: null },
+    });
+
+    const prisma = {
+      isConnected: () => true,
+      platformSettings: {
+        upsert: jest.fn().mockResolvedValue({
+          marketplaceRelistSlaMs: 300_000,
+        }),
+      },
+      tripException: {
+        findMany: jest.fn().mockResolvedValue([{ id: 'ex-due' }]),
+      },
+    };
+
+    const result = await makeService(prisma).runEscalationWatchdog();
+    expect(result).toMatchObject({ scanned: 1, relisted: 1, escalated: 0 });
+    expect(releaseSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: 'admin', role: 'SUPER_ADMIN' }),
+      'ex-due',
+      expect.objectContaining({ note: expect.stringContaining('Auto re-listed') }),
+      { automatic: true },
+    );
+    releaseSpy.mockRestore();
   });
 });

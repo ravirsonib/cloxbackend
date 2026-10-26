@@ -34,6 +34,10 @@ export class NotificationsService {
       port: this.config.get('SMTP_PORT', { infer: true }),
       secure: this.config.get('SMTP_SECURE', { infer: true }),
       auth: { user, pass },
+      // Bound hangs so trip location / POD flows are not blocked for minutes.
+      connectionTimeout: 10_000,
+      greetingTimeout: 10_000,
+      socketTimeout: 15_000,
     });
 
     return this.transporter;

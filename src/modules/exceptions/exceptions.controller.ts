@@ -129,10 +129,10 @@ export class ExceptionsController {
   @Post(':id/release')
   @ApiBearerAuth()
   @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles(AppRole.TRANSPORT_COMPANY)
+  @Roles(AppRole.TRANSPORT_COMPANY, AdminRole.SUPER_ADMIN)
   @ApiOperation({
     summary:
-      'Explicit marketplace release / cancel (never silent; Stripe adjustment stub for M10)',
+      'Release to marketplace (priority re-list + configurable carrier discount; Super or carrier)',
   })
   release(
     @CurrentPrincipal() principal: AuthenticatedPrincipal,

@@ -21,6 +21,7 @@ import {
   adminLeadListQuerySchema,
   createLeadNoteSchema,
   disableCompanySchema,
+  platformSettingsPatchSchema,
   updateLeadSchema,
   type AdminAuditQuery,
   type AdminCompanyListQuery,
@@ -29,6 +30,7 @@ import {
   type AdminLeadListQuery,
   type CreateLeadNoteInput,
   type DisableCompanyInput,
+  type PlatformSettingsPatchInput,
   type UpdateLeadInput,
 } from '../../shared/types';
 import { CurrentAdmin } from '../../common/decorators/current-admin.decorator';
@@ -185,5 +187,22 @@ export class AdminController {
     @Query(new ZodValidationPipe(adminAuditQuerySchema)) query: AdminAuditQuery,
   ) {
     return this.adminService.listAudit(query);
+  }
+
+  @Get('platform-settings')
+  @ApiOperation({
+    summary: 'Marketplace rescue discount / SLA / reliability deltas (Super Admin)',
+  })
+  getPlatformSettings() {
+    return this.adminService.getPlatformSettings();
+  }
+
+  @Patch('platform-settings')
+  @ApiOperation({ summary: 'Update platform rescue settings (Super Admin)' })
+  patchPlatformSettings(
+    @Body(new ZodValidationPipe(platformSettingsPatchSchema)) body: PlatformSettingsPatchInput,
+    @CurrentAdmin() admin: AuthenticatedAdmin,
+  ) {
+    return this.adminService.patchPlatformSettings(body, admin.id);
   }
 }

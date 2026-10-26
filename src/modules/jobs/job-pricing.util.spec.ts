@@ -1,5 +1,8 @@
 import {
+  MAX_JOB_CHARGEABLE_WEIGHT_KG,
   chargeableWeightKg,
+  isJobCargoOverLimit,
+  isVehicleAdequateForJob,
   isVehicleClassAdequate,
   licenceCoversVehicleClass,
   recommendVehicleClass,
@@ -13,14 +16,50 @@ describe('job-pricing.util', () => {
     ).toBe(500);
   });
 
+  it('flags cargo over the 50 t chargeable cap', () => {
+    expect(
+      isJobCargoOverLimit({
+        deadWeightKg: MAX_JOB_CHARGEABLE_WEIGHT_KG + 1,
+        lengthCm: 120,
+        widthCm: 80,
+        heightCm: 80,
+      }),
+    ).toBe(true);
+    expect(
+      isJobCargoOverLimit({
+        deadWeightKg: 100,
+        lengthCm: 2000,
+        widthCm: 500,
+        heightCm: 500,
+      }),
+    ).toBe(true);
+    expect(
+      isJobCargoOverLimit({
+        deadWeightKg: 800,
+        lengthCm: 120,
+        widthCm: 80,
+        heightCm: 80,
+      }),
+    ).toBe(false);
+  });
+
   it('recommends class from weight', () => {
     expect(recommendVehicleClass(400)).toBe('UTE');
+    expect(recommendVehicleClass(800)).toBe('UTE');
+    expect(recommendVehicleClass(1000)).toBe('UTE');
+    expect(recommendVehicleClass(1001)).toBe('VAN');
     expect(recommendVehicleClass(2000)).toBe('RIGID_1_2T');
   });
 
   it('blocks undersize', () => {
     expect(isVehicleClassAdequate('UTE', 'RIGID_1_2T')).toBe(false);
     expect(isVehicleClassAdequate('SEMI', 'RIGID_1_2T')).toBe(true);
+  });
+
+  it('allows UTE for 800 kg even when stored minClass is VAN (legacy ladder)', () => {
+    expect(isVehicleAdequateForJob('UTE', 'VAN', 800)).toBe(true);
+    expect(isVehicleAdequateForJob('UTE', 'SEMI', 800)).toBe(false);
+    expect(isVehicleAdequateForJob('UTE', 'VAN', 1200)).toBe(false);
   });
 
   it('licence must cover vehicle class', () => {

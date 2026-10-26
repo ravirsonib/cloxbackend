@@ -30,6 +30,7 @@ import { assertAssignmentCompliance } from '../jobs/assignment-gates';
 import {
   carrierNetPayoutCents,
   gstSplitFromIncCents,
+  isVehicleAdequateForJob,
   isVehicleClassAdequate,
 } from '../jobs/job-pricing.util';
 
@@ -86,6 +87,7 @@ export class MatchingService {
       requiresReefer: boolean;
       requiresOversize: boolean;
       minVehicleClass: string | null;
+      chargeableWeightKg?: number | null;
       originRegion: { code: string } | null;
     },
   ) {
@@ -100,7 +102,11 @@ export class MatchingService {
     const hasAdequateVehicle = company.vehicles.some(
       (v) =>
         v.status === VehicleStatus.ACTIVE &&
-        isVehicleClassAdequate(v.vehicleClass, job.minVehicleClass),
+        isVehicleAdequateForJob(
+          v.vehicleClass,
+          job.minVehicleClass,
+          job.chargeableWeightKg,
+        ),
     );
     return hasAdequateVehicle;
   }
@@ -131,7 +137,7 @@ export class MatchingService {
           take: 1,
         },
       },
-      orderBy: { publishedAt: 'desc' },
+      orderBy: [{ marketplacePriority: 'desc' }, { publishedAt: 'desc' }],
       take: 50,
     });
 
@@ -139,29 +145,39 @@ export class MatchingService {
 
     return {
       netPayoutHint: '70% of gross (platform share stub)',
-      jobs: visible.map((j) => ({
-        id: j.id,
-        title: j.title,
-        status: j.status,
-        pricingModel: j.pricingModel,
-        minVehicleClass: j.minVehicleClass,
-        requiresDg: j.requiresDg,
-        requiresReefer: j.requiresReefer,
-        requiresOversize: j.requiresOversize,
-        chargeableWeightKg: j.chargeableWeightKg,
-        routeDistanceKm: j.routeDistanceKm,
-        routeDurationMinutes: j.routeDurationMinutes,
-        routeFatigueBreakMinutes: j.routeFatigueBreakMinutes,
-        billableHours: j.billableHours,
-        estimateIncGstCents: j.estimateIncGstCents,
-        estimateNetToCarrierCents: j.estimateIncGstCents
-          ? carrierNetPayoutCents(j.estimateIncGstCents)
-          : null,
-        pickupAt: j.pickupAt,
-        publishedAt: j.publishedAt,
-        alreadyBid: j.proposals.length > 0,
-        stopsSummary: j.stops.map((s) => `${s.stopType}:${s.suburb ?? ''}`).join(' → '),
-      })),
+      jobs: visible.map((j) => {
+        const discount = j.rescueDiscountPercent ?? 0;
+        const discountedEstimate =
+          j.estimateIncGstCents != null && discount > 0
+            ? Math.floor((j.estimateIncGstCents * (100 - discount)) / 100)
+            : j.estimateIncGstCents;
+        return {
+          id: j.id,
+          title: j.title,
+          status: j.status,
+          pricingModel: j.pricingModel,
+          minVehicleClass: j.minVehicleClass,
+          requiresDg: j.requiresDg,
+          requiresReefer: j.requiresReefer,
+          requiresOversize: j.requiresOversize,
+          chargeableWeightKg: j.chargeableWeightKg,
+          routeDistanceKm: j.routeDistanceKm,
+          routeDurationMinutes: j.routeDurationMinutes,
+          routeFatigueBreakMinutes: j.routeFatigueBreakMinutes,
+          billableHours: j.billableHours,
+          estimateIncGstCents: j.estimateIncGstCents,
+          estimateNetToCarrierCents: discountedEstimate
+            ? carrierNetPayoutCents(discountedEstimate)
+            : null,
+          marketplacePriority: j.marketplacePriority,
+          rescueDiscountPercent: j.rescueDiscountPercent,
+          minBidIncGstCents: discountedEstimate,
+          pickupAt: j.pickupAt,
+          publishedAt: j.publishedAt,
+          alreadyBid: j.proposals.length > 0,
+          stopsSummary: j.stops.map((s) => `${s.stopType}:${s.suburb ?? ''}`).join(' → '),
+        };
+      }),
     };
   }
 
@@ -199,7 +215,13 @@ export class MatchingService {
         code: 'VEHICLE_NOT_ACTIVE',
       });
     }
-    if (!isVehicleClassAdequate(vehicle.vehicleClass, job.minVehicleClass)) {
+    if (
+      !isVehicleAdequateForJob(
+        vehicle.vehicleClass,
+        job.minVehicleClass,
+        job.chargeableWeightKg,
+      )
+    ) {
       throw new BadRequestException({
         message: `Vehicle class ${vehicle.vehicleClass} undersized for min ${job.minVehicleClass}`,
         code: 'VEHICLE_CLASS_UNDERSIZE',
@@ -300,12 +322,18 @@ export class MatchingService {
       });
     }
 
-    const minBase = await this.jobsService.getMinBaseCents(
+    const policyMin = await this.jobsService.getMinBaseCents(
       job.pricingModel === 'HOURLY' ? 'HOURLY' : 'PER_KM',
     );
+    const discount = job.rescueDiscountPercent ?? 0;
+    let minBase = policyMin;
+    if (discount > 0 && job.estimateIncGstCents != null) {
+      // Rescue listing: carrier may bid down to discounted sender estimate.
+      minBase = Math.floor((job.estimateIncGstCents * (100 - discount)) / 100);
+    }
     if (input.amountIncGstCents < minBase) {
       throw new BadRequestException({
-        message: `Bid below Super minimum base (${minBase} cents)`,
+        message: `Bid below minimum (${minBase} cents)`,
         code: 'BID_BELOW_MIN_BASE',
         minBaseCents: minBase,
       });

@@ -14,6 +14,7 @@ import {
   ComplianceCaseType,
   ComplianceDocStatus,
   ComplianceDocType,
+  DriverStatus,
   LeadStatus,
   PlatformRole,
   UserStatus,
@@ -144,19 +145,31 @@ export class ComplianceService {
       : CompanyStatus.BID_ELIGIBLE;
   }
 
-  /** Admin partner KYB: Super Admin only (G0-4 — State must not approve peers). */
-  private assertCanDecidePartnerKyb(
+  /**
+   * Super-only case types: partner KYB + post-KYB fleet/driver asset review
+   * (State Master must not decide peers or asset activation).
+   */
+  private assertCanDecideCase(
     principal: AuthenticatedPrincipal,
     caseType: ComplianceCaseType,
   ) {
     this.assertCanDecide(principal);
-    if (caseType === ComplianceCaseType.ADMIN_PARTNER_KYB) {
-      if (principal.role !== AdminRole.SUPER_ADMIN) {
-        throw new ForbiddenException(
-          'Only Super Admin may decide ADMIN_PARTNER_KYB cases',
-        );
-      }
+    const superOnly =
+      caseType === ComplianceCaseType.ADMIN_PARTNER_KYB ||
+      caseType === ComplianceCaseType.CARRIER_FLEET_RWC ||
+      caseType === ComplianceCaseType.CARRIER_DRIVER_LICENCE;
+    if (superOnly && principal.role !== AdminRole.SUPER_ADMIN) {
+      throw new ForbiddenException(
+        `Only Super Admin may decide ${caseType} cases`,
+      );
     }
+  }
+
+  private isAssetReviewCase(caseType: ComplianceCaseType): boolean {
+    return (
+      caseType === ComplianceCaseType.CARRIER_FLEET_RWC ||
+      caseType === ComplianceCaseType.CARRIER_DRIVER_LICENCE
+    );
   }
 
   private async loadCaseForAdmin(principal: AuthenticatedPrincipal, caseId: string) {
@@ -384,22 +397,48 @@ export class ComplianceService {
           .filter((id): id is string => Boolean(id)),
       ),
     ];
+    const driverIds = [
+      ...new Set(
+        complianceCase.documents
+          .map((d) => d.driverId)
+          .filter((id): id is string => Boolean(id)),
+      ),
+    ];
     const vehicles =
       vehicleIds.length === 0
         ? []
         : await this.prisma.vehicle.findMany({
             where: { id: { in: vehicleIds }, companyId: complianceCase.companyId },
-            select: { id: true, registration: true, label: true },
+            select: { id: true, registration: true, label: true, status: true },
+          });
+    const drivers =
+      driverIds.length === 0
+        ? []
+        : await this.prisma.driver.findMany({
+            where: { id: { in: driverIds }, companyId: complianceCase.companyId },
+            select: {
+              id: true,
+              status: true,
+              licenceClass: true,
+              user: { select: { email: true, name: true } },
+            },
           });
     const vehicleById = new Map(vehicles.map((v) => [v.id, v]));
+    const driverById = new Map(drivers.map((d) => [d.id, d]));
     const documents = [...complianceCase.documents]
       .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
       .map((doc) => {
         const vehicle = doc.vehicleId ? vehicleById.get(doc.vehicleId) : undefined;
+        const driver = doc.driverId ? driverById.get(doc.driverId) : undefined;
         return {
           ...doc,
           vehicleRegistration: vehicle?.registration ?? null,
           vehicleLabel: vehicle?.label ?? null,
+          vehicleStatus: vehicle?.status ?? null,
+          driverEmail: driver?.user.email ?? null,
+          driverName: driver?.user.name ?? null,
+          driverLicenceClass: driver?.licenceClass ?? null,
+          driverStatus: driver?.status ?? null,
           isNewSinceInfoRequest:
             infoRequestedMs != null && doc.createdAt.getTime() > infoRequestedMs,
         };
@@ -424,15 +463,29 @@ export class ComplianceService {
   ) {
     this.ensureDatabase();
     const complianceCase = await this.loadCaseForAdmin(principal, caseId);
-    this.assertCanDecidePartnerKyb(principal, complianceCase.caseType);
+    this.assertCanDecideCase(principal, complianceCase.caseType);
     this.assertCaseActionable(complianceCase.status);
 
     if (complianceCase.caseType === ComplianceCaseType.ADMIN_PARTNER_KYB) {
       return this.approveAdminPartnerKyb(principal, caseId, complianceCase, input);
     }
 
-    // Fleet RWC review: approve docs only — keep company BID_ELIGIBLE (or current status).
-    if (complianceCase.caseType === ComplianceCaseType.CARRIER_FLEET_RWC) {
+    // Fleet RWC / driver licence: approve docs + activate linked PENDING_REVIEW assets.
+    if (this.isAssetReviewCase(complianceCase.caseType)) {
+      const vehicleIds = [
+        ...new Set(
+          complianceCase.documents
+            .map((d) => d.vehicleId)
+            .filter((id): id is string => Boolean(id)),
+        ),
+      ];
+      const driverIds = [
+        ...new Set(
+          complianceCase.documents
+            .map((d) => d.driverId)
+            .filter((id): id is string => Boolean(id)),
+        ),
+      ];
       await this.prisma.$transaction(async (tx) => {
         await tx.complianceCase.update({
           where: { id: caseId },
@@ -447,6 +500,32 @@ export class ComplianceService {
           where: { caseId },
           data: { status: ComplianceDocStatus.APPROVED, reviewedAt: new Date() },
         });
+        if (
+          complianceCase.caseType === ComplianceCaseType.CARRIER_FLEET_RWC &&
+          vehicleIds.length
+        ) {
+          await tx.vehicle.updateMany({
+            where: {
+              id: { in: vehicleIds },
+              companyId: complianceCase.companyId,
+              status: VehicleStatus.PENDING_REVIEW,
+            },
+            data: { status: VehicleStatus.ACTIVE },
+          });
+        }
+        if (
+          complianceCase.caseType === ComplianceCaseType.CARRIER_DRIVER_LICENCE &&
+          driverIds.length
+        ) {
+          await tx.driver.updateMany({
+            where: {
+              id: { in: driverIds },
+              companyId: complianceCase.companyId,
+              status: DriverStatus.PENDING_REVIEW,
+            },
+            data: { status: DriverStatus.ACTIVE },
+          });
+        }
       });
       await this.audit.recordPlatform({
         action: AuditAction.COMPLIANCE_APPROVED,
@@ -456,9 +535,25 @@ export class ComplianceService {
         metadata: {
           nextCompanyStatus: complianceCase.company.status,
           note: input.note ?? null,
-          caseType: ComplianceCaseType.CARRIER_FLEET_RWC,
+          caseType: complianceCase.caseType,
+          activatedVehicleIds: vehicleIds,
+          activatedDriverIds: driverIds,
         },
       });
+      if (
+        complianceCase.caseType === ComplianceCaseType.CARRIER_DRIVER_LICENCE &&
+        driverIds.length
+      ) {
+        for (const driverId of driverIds) {
+          await this.audit.recordPlatform({
+            action: AuditAction.DRIVER_ACTIVATED,
+            actorAdminId: principal.id,
+            entityType: 'Driver',
+            entityId: driverId,
+            metadata: { caseId, auto: false },
+          });
+        }
+      }
       return {
         id: caseId,
         status: ComplianceCaseStatus.APPROVED,
@@ -741,12 +836,12 @@ export class ComplianceService {
   ) {
     this.ensureDatabase();
     const complianceCase = await this.loadCaseForAdmin(principal, caseId);
-    this.assertCanDecidePartnerKyb(principal, complianceCase.caseType);
+    this.assertCanDecideCase(principal, complianceCase.caseType);
     this.assertCaseActionable(complianceCase.status);
 
-    // Fleet RWC / profile change / post-ops KYB re-review: close case only — keep company status.
+    // Fleet/driver asset / profile change / post-ops KYB re-review: close case only — keep company status.
     const preserveCompanyOnReject =
-      complianceCase.caseType === ComplianceCaseType.CARRIER_FLEET_RWC ||
+      this.isAssetReviewCase(complianceCase.caseType) ||
       complianceCase.caseType === ComplianceCaseType.COMPANY_PROFILE_CHANGE ||
       this.isPostOpsOperationalStatus(complianceCase.company.status);
 
@@ -762,7 +857,7 @@ export class ComplianceService {
           },
         });
         if (
-          complianceCase.caseType === ComplianceCaseType.CARRIER_FLEET_RWC ||
+          this.isAssetReviewCase(complianceCase.caseType) ||
           this.isPostOpsOperationalStatus(complianceCase.company.status)
         ) {
           await tx.complianceDocument.updateMany({
@@ -865,12 +960,12 @@ export class ComplianceService {
   ) {
     this.ensureDatabase();
     const complianceCase = await this.loadCaseForAdmin(principal, caseId);
-    this.assertCanDecidePartnerKyb(principal, complianceCase.caseType);
+    this.assertCanDecideCase(principal, complianceCase.caseType);
     this.assertCaseActionable(complianceCase.status);
 
-    // Fleet RWC / post-ops KYB re-review: request info without demoting company.
+    // Fleet/driver asset / post-ops KYB re-review: request info without demoting company.
     if (
-      complianceCase.caseType === ComplianceCaseType.CARRIER_FLEET_RWC ||
+      this.isAssetReviewCase(complianceCase.caseType) ||
       this.isPostOpsOperationalStatus(complianceCase.company.status)
     ) {
       const infoRequestedAt = new Date();
@@ -889,7 +984,7 @@ export class ComplianceService {
         entityId: caseId,
         metadata: { note: input.note ?? null, caseType: complianceCase.caseType },
       });
-      if (complianceCase.caseType !== ComplianceCaseType.CARRIER_FLEET_RWC) {
+      if (!this.isAssetReviewCase(complianceCase.caseType)) {
         void this.notifyCompanyDecision({
           kind: 'info_requested',
           companyId: complianceCase.companyId,

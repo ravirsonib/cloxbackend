@@ -39,10 +39,11 @@ describe('job-pricing.util branch leftovers', () => {
 
   it('recommendVehicleClass covers every weight band', () => {
     expect(recommendVehicleClass(0)).toBe('UTE');
-    expect(recommendVehicleClass(500)).toBe('UTE');
-    expect(recommendVehicleClass(501)).toBe('VAN');
-    expect(recommendVehicleClass(1200)).toBe('VAN');
-    expect(recommendVehicleClass(1201)).toBe('RIGID_1_2T');
+    expect(recommendVehicleClass(800)).toBe('UTE');
+    expect(recommendVehicleClass(1000)).toBe('UTE');
+    expect(recommendVehicleClass(1001)).toBe('VAN');
+    expect(recommendVehicleClass(1500)).toBe('VAN');
+    expect(recommendVehicleClass(1501)).toBe('RIGID_1_2T');
     expect(recommendVehicleClass(2500)).toBe('RIGID_1_2T');
     expect(recommendVehicleClass(2501)).toBe('RIGID_3_4T');
     expect(recommendVehicleClass(5000)).toBe('RIGID_3_4T');

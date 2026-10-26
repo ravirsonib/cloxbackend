@@ -10,6 +10,7 @@ import {
   AssignmentStatus,
   DriverStatus,
   JobStatus,
+  ProposalStatus,
   TripExceptionKind,
   TripExceptionPhase,
   TripExceptionStatus,
@@ -20,6 +21,7 @@ import {
 import type { AuthenticatedPrincipal } from '../../common/guards/jwt-auth.guard';
 import type { AppEnv } from '../../config/env.validation';
 import {
+  AdminRole,
   AuditAction,
   type TripExceptionContinueInput,
   type TripExceptionEscalateInput,
@@ -111,7 +113,12 @@ export class ExceptionsService {
     escalatedAt: Date | null;
     resolvedAt: Date | null;
     resolutionNote: string | null;
-    job?: { id: string; title: string | null } | null;
+    job?: {
+      id: string;
+      title: string | null;
+      rescueDiscountPercent?: number | null;
+      marketplacePriority?: boolean;
+    } | null;
     assignment?: {
       vehicle?: { id: string; registration: string | null; vehicleClass: string | null } | null;
       driver?: {
@@ -140,7 +147,14 @@ export class ExceptionsService {
       escalatedAt: row.escalatedAt,
       resolvedAt: row.resolvedAt,
       resolutionNote: row.resolutionNote,
-      job: row.job ?? null,
+      job: row.job
+        ? {
+            id: row.job.id,
+            title: row.job.title,
+            rescueDiscountPercent: row.job.rescueDiscountPercent ?? null,
+            marketplacePriority: row.job.marketplacePriority ?? false,
+          }
+        : null,
       vehicle: row.assignment?.vehicle ?? null,
       driver: row.assignment?.driver
         ? {
@@ -154,7 +168,14 @@ export class ExceptionsService {
 
   private detailInclude() {
     return {
-      job: { select: { id: true, title: true } },
+      job: {
+        select: {
+          id: true,
+          title: true,
+          rescueDiscountPercent: true,
+          marketplacePriority: true,
+        },
+      },
       assignment: {
         select: {
           vehicle: {
@@ -331,6 +352,10 @@ export class ExceptionsService {
       },
     });
 
+    if (forceOffline && user.driver?.id) {
+      await this.applyDriverReliabilityDelta(user.driver.id, created.id, user.id);
+    }
+
     const carrierEmails = [
       ...trip.assignment.carrierCompany.users.map((u) => u.email),
       ...(trip.assignment.carrierCompany.email
@@ -459,7 +484,15 @@ export class ExceptionsService {
       orderBy: { openedAt: 'desc' },
       take: 50,
     });
-    return { items: rows.map((r) => this.mapException(r)) };
+    const settings = await this.prisma.platformSettings.upsert({
+      where: { id: 'default' },
+      create: { id: 'default' },
+      update: {},
+    });
+    return {
+      items: rows.map((r) => this.mapException(r)),
+      marketplaceRelistSlaMs: settings.marketplaceRelistSlaMs,
+    };
   }
 
   async getForPrincipal(principal: AuthenticatedPrincipal, id: string) {
@@ -492,7 +525,15 @@ export class ExceptionsService {
       throw new ForbiddenException();
     }
 
-    return this.mapException(row);
+    const settings = await this.prisma.platformSettings.upsert({
+      where: { id: 'default' },
+      create: { id: 'default' },
+      update: {},
+    });
+    return {
+      ...this.mapException(row),
+      marketplaceRelistSlaMs: settings.marketplaceRelistSlaMs,
+    };
   }
 
   async reassign(
@@ -740,42 +781,105 @@ export class ExceptionsService {
   }
 
   /**
-   * Explicit marketplace release / cancel — never silent.
-   * Stripe adjustment is an M10 stub (no charge/refund executed here).
+   * Explicit marketplace re-list — cancels current assignment/trip, reopens job for bidding
+   * with priority + Super-configured carrier discount. Sender estimate unchanged.
    */
   async releaseToMarketplace(
     principal: AuthenticatedPrincipal,
     id: string,
     input: TripExceptionReleaseInput,
+    options?: { automatic?: boolean },
   ) {
     this.ensureDatabase();
-    if (principal.kind !== 'user' || principal.role !== 'TRANSPORT_COMPANY') {
-      throw new ForbiddenException('Carrier required');
+    const automatic = options?.automatic === true;
+    const isSuper =
+      principal.kind === 'admin' && principal.role === AdminRole.SUPER_ADMIN;
+    const isCarrier =
+      principal.kind === 'user' && principal.role === 'TRANSPORT_COMPANY';
+
+    let row: Awaited<ReturnType<ExceptionsService['loadExceptionRow']>>;
+    let actorUserId: string | undefined;
+    let actorAdminId: string | undefined;
+
+    if (automatic) {
+      row = await this.loadExceptionRow(id);
+      if (row.status === TripExceptionStatus.RESOLVED_RELISTED) {
+        return {
+          exception: this.mapException(row),
+          marketplaceRelease: {
+            status: 'ALREADY_RELISTED',
+            reListJob: true,
+            marketplacePriority: true,
+            discountPercent: row.job?.rescueDiscountPercent ?? null,
+          },
+        };
+      }
+      if (
+        row.status !== TripExceptionStatus.AWAITING_CARRIER ||
+        row.phase !== TripExceptionPhase.PRE_TRIP
+      ) {
+        throw new BadRequestException('Exception cannot be auto-relisted');
+      }
+    } else if (isSuper) {
+      actorAdminId = principal.id;
+      row = await this.loadExceptionRow(id);
+      if (!OPEN_STATUSES.includes(row.status)) {
+        throw new BadRequestException('Exception is already resolved');
+      }
+    } else if (isCarrier) {
+      actorUserId = principal.id;
+      row = await this.loadOpenExceptionForCarrier(principal.id, id);
+    } else {
+      throw new ForbiddenException('Carrier or Super Admin required');
     }
-    const row = await this.loadOpenExceptionForCarrier(principal.id, id);
-    const note = input.note.trim();
+
+    const note =
+      input.note?.trim() ||
+      (automatic
+        ? 'Auto re-listed to marketplace: no carrier rescue within SLA'
+        : 'Released to marketplace');
+
+    const settings = await this.prisma.platformSettings.upsert({
+      where: { id: 'default' },
+      create: { id: 'default' },
+      update: {},
+    });
+    const discountPercent = Math.min(50, Math.max(0, settings.rescueDiscountPercent));
 
     const resolved = await this.prisma.$transaction(async (tx) => {
       if (row.tripId) {
         await tx.trip.update({
           where: { id: row.tripId },
-          data: { status: TripStatus.CANCELLED },
+          data: { status: TripStatus.CANCELLED, onBreak: false, breakStartedAt: null },
         });
       }
       await tx.assignment.update({
         where: { id: row.assignmentId },
         data: { status: AssignmentStatus.CANCELLED },
       });
+      await tx.proposal.updateMany({
+        where: {
+          jobId: row.jobId,
+          status: ProposalStatus.SUBMITTED,
+        },
+        data: { status: ProposalStatus.EXPIRED },
+      });
       await tx.job.update({
         where: { id: row.jobId },
-        data: { status: JobStatus.CANCELLED },
+        data: {
+          status: JobStatus.BIDDING,
+          publishedAt: new Date(),
+          marketplacePriority: true,
+          rescueDiscountPercent: discountPercent,
+          rescuedFromExceptionId: id,
+        },
       });
       return tx.tripException.update({
         where: { id },
         data: {
-          status: TripExceptionStatus.RESOLVED_CANCELLED,
+          status: TripExceptionStatus.RESOLVED_RELISTED,
           resolvedAt: new Date(),
-          resolvedByUserId: principal.id,
+          resolvedByUserId: actorUserId ?? null,
           resolutionNote: note,
         },
         include: this.detailInclude(),
@@ -784,23 +888,45 @@ export class ExceptionsService {
 
     await this.audit.recordPlatform({
       action: AuditAction.EXCEPTION_RELEASED,
-      actorUserId: principal.id,
+      actorUserId,
+      actorAdminId,
       entityType: 'TripException',
       entityId: id,
       metadata: {
-        outcome: 'RESOLVED_CANCELLED',
-        marketplaceRelease: 'EXPLICIT',
-        stripeAdjustment: 'STUB_NOT_IMPLEMENTED',
+        outcome: 'RESOLVED_RELISTED',
+        marketplaceRelease: automatic ? 'AUTOMATIC_SLA' : 'EXPLICIT',
+        discountPercent,
+        marketplacePriority: true,
+      },
+    });
+    await this.audit.recordPlatform({
+      action: AuditAction.EXCEPTION_RELISTED,
+      actorUserId,
+      actorAdminId,
+      entityType: 'Job',
+      entityId: row.jobId,
+      metadata: {
+        exceptionId: id,
+        discountPercent,
+        automatic,
       },
     });
     await this.audit.recordPlatform({
       action: AuditAction.EXCEPTION_RESOLVED,
-      actorUserId: principal.id,
+      actorUserId,
+      actorAdminId,
       entityType: 'TripException',
       entityId: id,
-      metadata: { outcome: 'RESOLVED_CANCELLED' },
+      metadata: { outcome: 'RESOLVED_RELISTED' },
     });
-    await this.recordPerformanceStub(principal.id, id, 'RESOLVED_CANCELLED');
+
+    await this.applyCarrierReliabilityDelta(
+      row.companyId,
+      id,
+      settings.carrierMarketplaceReleaseScoreDelta,
+      actorUserId,
+      actorAdminId,
+    );
 
     const notify = await this.loadNotifyTargets(row);
     await this.notifications.notifyTripExceptionReleased({
@@ -810,7 +936,7 @@ export class ExceptionsService {
       opsEmail: this.config.get('NOTIFY_EMAIL', { infer: true }) ?? null,
       jobTitle: notify.jobTitle,
       jobId: notify.jobId,
-      note,
+      note: `${note} (priority marketplace · ${discountPercent}% carrier discount; customer price unchanged)`,
       exceptionId: id,
       phase: row.phase,
     });
@@ -818,10 +944,12 @@ export class ExceptionsService {
     return {
       exception: this.mapException(resolved),
       marketplaceRelease: {
-        status: 'STUB_PENDING_M10',
-        reListJob: false,
+        status: 'RELISTED',
+        reListJob: true,
+        marketplacePriority: true,
+        discountPercent,
         message:
-          'Explicit release recorded. Marketplace re-list + Stripe adjustment hooks land in M10 — not silent.',
+          'Job re-listed on marketplace with priority. Sender estimate unchanged; carrier bid floor discounted.',
       },
       stripeAdjustment: {
         status: 'STUB_NOT_IMPLEMENTED',
@@ -1058,7 +1186,78 @@ export class ExceptionsService {
       metadata: {
         outcome,
         score: null,
-        note: 'Performance score stub (X3) — scoring engine later',
+        note: 'Non-score outcome recorded (reassign/continue)',
+      },
+    });
+  }
+
+  private clampScore(value: number) {
+    return Math.max(0, Math.min(100, value));
+  }
+
+  private async applyDriverReliabilityDelta(
+    driverId: string,
+    exceptionId: string,
+    actorUserId: string,
+  ) {
+    const settings = await this.prisma.platformSettings.upsert({
+      where: { id: 'default' },
+      create: { id: 'default' },
+      update: {},
+    });
+    const delta = settings.driverUnavailableScoreDelta;
+    const driver = await this.prisma.driver.findUnique({
+      where: { id: driverId },
+      select: { reliabilityScore: true },
+    });
+    if (!driver) return;
+    const nextScore = this.clampScore(driver.reliabilityScore - delta);
+    await this.prisma.driver.update({
+      where: { id: driverId },
+      data: { reliabilityScore: nextScore },
+    });
+    await this.audit.recordPlatform({
+      action: AuditAction.EXCEPTION_PERFORMANCE_STUB,
+      actorUserId,
+      entityType: 'Driver',
+      entityId: driverId,
+      metadata: {
+        exceptionId,
+        outcome: 'DRIVER_UNAVAILABLE',
+        delta: -delta,
+        nextScore,
+      },
+    });
+  }
+
+  private async applyCarrierReliabilityDelta(
+    companyId: string,
+    exceptionId: string,
+    delta: number,
+    actorUserId?: string,
+    actorAdminId?: string,
+  ) {
+    const company = await this.prisma.company.findUnique({
+      where: { id: companyId },
+      select: { reliabilityScore: true },
+    });
+    if (!company) return;
+    const nextScore = this.clampScore(company.reliabilityScore - delta);
+    await this.prisma.company.update({
+      where: { id: companyId },
+      data: { reliabilityScore: nextScore },
+    });
+    await this.audit.recordPlatform({
+      action: AuditAction.EXCEPTION_PERFORMANCE_STUB,
+      actorUserId,
+      actorAdminId,
+      entityType: 'Company',
+      entityId: companyId,
+      metadata: {
+        exceptionId,
+        outcome: 'MARKETPLACE_RELEASE',
+        delta: -delta,
+        nextScore,
       },
     });
   }
@@ -1249,14 +1448,24 @@ export class ExceptionsService {
     };
   }
 
-  /** Pre-trip AWAITING_CARRIER past SLA → escalate + notify (never silent). */
+  /**
+   * Pre-trip AWAITING_CARRIER past marketplace SLA → re-list to marketplace (never silent).
+   * Carrier Escalate remains an explicit Ops handoff without re-list.
+   */
   async runEscalationWatchdog() {
     if (!this.prisma.isConnected()) {
-      return { scanned: 0, escalated: 0 };
+      return { scanned: 0, escalated: 0, relisted: 0 };
     }
-    const slaMs = this.config.get('EXCEPTION_ESCALATION_MS', { infer: true });
+    const settings = await this.prisma.platformSettings.upsert({
+      where: { id: 'default' },
+      create: { id: 'default' },
+      update: {},
+    });
+    const slaMs =
+      settings.marketplaceRelistSlaMs ||
+      this.config.get('EXCEPTION_ESCALATION_MS', { infer: true });
     if (!slaMs || slaMs <= 0) {
-      return { scanned: 0, escalated: 0, disabled: true as const };
+      return { scanned: 0, escalated: 0, relisted: 0, disabled: true as const };
     }
     const cutoff = new Date(Date.now() - slaMs);
     const due = await this.prisma.tripException.findMany({
@@ -1269,28 +1478,28 @@ export class ExceptionsService {
       take: 25,
     });
 
-    let escalated = 0;
+    let relisted = 0;
     for (const item of due) {
       try {
-        const result = await this.escalate(
+        await this.releaseToMarketplace(
           {
             id: 'system',
             email: 'system@clox.local',
-            role: 'SUPER_ADMIN',
+            role: AdminRole.SUPER_ADMIN,
             kind: 'admin',
             regionCodes: [],
             territoryCodes: [],
           },
           item.id,
-          { note: 'Auto-escalated: no carrier action within SLA' },
+          { note: 'Auto re-listed to marketplace: no carrier rescue within SLA' },
           { automatic: true },
         );
-        if (!result.alreadyEscalated) escalated += 1;
+        relisted += 1;
       } catch {
         // continue other rows
       }
     }
-    return { scanned: due.length, escalated };
+    return { scanned: due.length, escalated: 0, relisted };
   }
 
   private async loadExceptionRow(id: string) {

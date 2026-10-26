@@ -186,6 +186,14 @@ describe('DriverService invite + assignability paths', () => {
     const service = makeService(prisma);
     await expect(
       service.submitProfile(driverPrincipal, {
+        name: 'Driver One',
+        phone: '0412345678',
+        emergencyContactName: 'Emergency Contact',
+        emergencyContactPhone: '0498765432',
+        addressLine1: '12 Test Street',
+        suburb: 'Richmond',
+        state: 'VIC',
+        postcode: '3121',
         licenceNo: 'L1',
         licenceClass: 'HC',
         licenceExpiry: '2030-01-01',

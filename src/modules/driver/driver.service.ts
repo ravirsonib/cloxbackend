@@ -6,7 +6,16 @@ import {
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { ComplianceDocType, DriverStatus, UserStatus } from '@prisma/client';
+import {
+  CompanyStatus,
+  CompanyType,
+  ComplianceCaseStatus,
+  ComplianceCaseType,
+  ComplianceDocStatus,
+  ComplianceDocType,
+  DriverStatus,
+  UserStatus,
+} from '@prisma/client';
 import { randomBytes } from 'crypto';
 import type { AppEnv } from '../../config/env.validation';
 import type { AuthenticatedPrincipal } from '../../common/guards/jwt-auth.guard';
@@ -72,18 +81,55 @@ export class DriverService {
     });
   }
 
-  private wizardStep(driver: {
-    status: DriverStatus;
-    inviteAcceptedAt: Date | null;
-    licenceNo: string | null;
-    licenceClass: string | null;
-    licenceExpiry: Date | null;
-    nhvrAcknowledgedAt: Date | null;
+  private hasPersonalDetails(driver: {
+    emergencyContactName: string | null;
+    emergencyContactPhone: string | null;
+    addressLine1: string | null;
+    suburb: string | null;
+    state: string | null;
+    postcode: string | null;
   }) {
+    return Boolean(
+      driver.emergencyContactName?.trim() &&
+        driver.emergencyContactPhone?.trim() &&
+        driver.addressLine1?.trim() &&
+        driver.suburb?.trim() &&
+        driver.state?.trim() &&
+        driver.postcode?.trim(),
+    );
+  }
+
+  private wizardStep(
+    driver: {
+      status: DriverStatus;
+      inviteAcceptedAt: Date | null;
+      licenceNo: string | null;
+      licenceClass: string | null;
+      licenceExpiry: Date | null;
+      nhvrAcknowledgedAt: Date | null;
+      emergencyContactName: string | null;
+      emergencyContactPhone: string | null;
+      addressLine1: string | null;
+      suburb: string | null;
+      state: string | null;
+      postcode: string | null;
+    },
+    user: { name: string | null; phone: string | null },
+  ) {
     if (driver.status === DriverStatus.ACTIVE) return 'complete';
     if (driver.status === DriverStatus.SUSPENDED) return 'suspended';
     if (!driver.inviteAcceptedAt) return 'accept';
-    if (!driver.licenceNo || !driver.licenceClass || !driver.licenceExpiry || !driver.nhvrAcknowledgedAt) {
+    const personalOk =
+      Boolean(user.name?.trim()) &&
+      Boolean(user.phone?.trim()) &&
+      this.hasPersonalDetails(driver);
+    if (
+      !personalOk ||
+      !driver.licenceNo ||
+      !driver.licenceClass ||
+      !driver.licenceExpiry ||
+      !driver.nhvrAcknowledgedAt
+    ) {
       return 'licence';
     }
     return 'complete';
@@ -96,8 +142,18 @@ export class DriverService {
       licenceClass: string | null;
       licenceExpiry: Date | null;
       nhvrAcknowledgedAt: Date | null;
+      emergencyContactName: string | null;
+      emergencyContactPhone: string | null;
+      addressLine1: string | null;
+      suburb: string | null;
+      state: string | null;
+      postcode: string | null;
     },
-    opts?: { licenceDocumentUploaded?: boolean },
+    opts?: {
+      licenceDocumentUploaded?: boolean;
+      userName?: string | null;
+      userPhone?: string | null;
+    },
   ) {
     const linked = Boolean(driver.companyId);
     const licenceOk =
@@ -106,13 +162,19 @@ export class DriverService {
       (driver.licenceExpiry as Date) > new Date();
     const nhvrOk = Boolean(driver.nhvrAcknowledgedAt);
     const licenceDocumentUploaded = opts?.licenceDocumentUploaded ?? false;
+    const personalDetailsComplete =
+      Boolean(opts?.userName?.trim()) &&
+      Boolean(opts?.userPhone?.trim()) &&
+      this.hasPersonalDetails(driver);
     const active = driver.status === DriverStatus.ACTIVE;
     return {
       companyLinked: linked,
       licenceValid: licenceOk,
       licenceDocumentUploaded,
       nhvrAcknowledged: nhvrOk,
+      personalDetailsComplete,
       active,
+      // Personal details are mandatory on submitProfile; already-ACTIVE drivers stay assignable.
       canBeAssigned: linked && active && licenceOk && nhvrOk && licenceDocumentUploaded,
       tripApisNote: 'Trip execution APIs return not-assigned until M8',
     };
@@ -227,8 +289,12 @@ export class DriverService {
       this.prisma,
       driver.id,
     );
-    const goNoGo = this.goNoGo(driver, { licenceDocumentUploaded });
-    let step = this.wizardStep(driver);
+    const goNoGo = this.goNoGo(driver, {
+      licenceDocumentUploaded,
+      userName: user.name,
+      userPhone: user.phone,
+    });
+    let step = this.wizardStep(driver, { name: user.name, phone: user.phone });
     // Stay on licence until a usable DRIVER_LICENCE file exists (even if fields + NHVR are set).
     if (
       !licenceDocumentUploaded &&
@@ -254,6 +320,12 @@ export class DriverService {
         licenceExpiry: driver.licenceExpiry,
         nhvrAcknowledgedAt: driver.nhvrAcknowledgedAt,
         inviteAcceptedAt: driver.inviteAcceptedAt,
+        emergencyContactName: driver.emergencyContactName,
+        emergencyContactPhone: driver.emergencyContactPhone,
+        addressLine1: driver.addressLine1,
+        suburb: driver.suburb,
+        state: driver.state,
+        postcode: driver.postcode,
       },
       company: driver.company
         ? { id: driver.company.id, legalName: driver.company.legalName, status: driver.company.status }
@@ -296,17 +368,42 @@ export class DriverService {
       });
     }
 
-    // Phase 1: auto-activate after licence + NHVR + licence upload (no separate Ops queue for drivers)
-    const updated = await this.prisma.driver.update({
-      where: { id: driver.id },
-      data: {
-        licenceNo: input.licenceNo,
-        licenceClass: input.licenceClass,
-        licenceExpiry: expiry,
-        nhvrAcknowledgedAt: new Date(),
-        status: DriverStatus.ACTIVE,
-      },
+    const company = await this.prisma.company.findUnique({
+      where: { id: driver.companyId },
+      select: { id: true, status: true, homeRegionId: true, type: true },
     });
+    const needsSuperReview =
+      company?.type === CompanyType.CARRIER &&
+      company.status === CompanyStatus.BID_ELIGIBLE;
+    const nextStatus = needsSuperReview
+      ? DriverStatus.PENDING_REVIEW
+      : DriverStatus.ACTIVE;
+
+    const [updated] = await this.prisma.$transaction([
+      this.prisma.driver.update({
+        where: { id: driver.id },
+        data: {
+          licenceNo: input.licenceNo,
+          licenceClass: input.licenceClass,
+          licenceExpiry: expiry,
+          nhvrAcknowledgedAt: new Date(),
+          emergencyContactName: input.emergencyContactName,
+          emergencyContactPhone: input.emergencyContactPhone,
+          addressLine1: input.addressLine1,
+          suburb: input.suburb,
+          state: input.state,
+          postcode: input.postcode,
+          status: nextStatus,
+        },
+      }),
+      this.prisma.user.update({
+        where: { id: user.id },
+        data: {
+          name: input.name,
+          phone: input.phone,
+        },
+      }),
+    ]);
 
     await this.audit.recordPlatform({
       action: AuditAction.DRIVER_PROFILE_SUBMITTED,
@@ -316,17 +413,94 @@ export class DriverService {
       metadata: {
         licenceClass: input.licenceClass,
         licenceDocumentId: input.licenceDocumentId,
+        status: nextStatus,
+        state: input.state,
+        postcode: input.postcode,
       },
     });
-    await this.audit.recordPlatform({
-      action: AuditAction.DRIVER_ACTIVATED,
-      actorUserId: user.id,
-      entityType: 'Driver',
-      entityId: updated.id,
-      metadata: { auto: true },
-    });
+
+    if (needsSuperReview && company) {
+      await this.attachDriverLicenceToReviewCase(
+        company,
+        driver.id,
+        input.licenceDocumentId,
+      );
+    } else {
+      await this.audit.recordPlatform({
+        action: AuditAction.DRIVER_ACTIVATED,
+        actorUserId: user.id,
+        entityType: 'Driver',
+        entityId: updated.id,
+        metadata: { auto: true },
+      });
+    }
 
     return this.getOnboarding(principal);
+  }
+
+  /**
+   * Post-KYB driver licence opens/joins CARRIER_DRIVER_LICENCE for Super Admin review.
+   * Does not change company BID_ELIGIBLE.
+   */
+  private async attachDriverLicenceToReviewCase(
+    company: { id: string; homeRegionId: string | null },
+    driverId: string,
+    documentId: string,
+  ) {
+    let reviewCase = await this.prisma.complianceCase.findFirst({
+      where: {
+        companyId: company.id,
+        caseType: ComplianceCaseType.CARRIER_DRIVER_LICENCE,
+        status: {
+          in: [
+            ComplianceCaseStatus.OPEN,
+            ComplianceCaseStatus.INFO_REQUESTED,
+            ComplianceCaseStatus.ESCALATED,
+          ],
+        },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    if (!reviewCase) {
+      reviewCase = await this.prisma.complianceCase.create({
+        data: {
+          companyId: company.id,
+          caseType: ComplianceCaseType.CARRIER_DRIVER_LICENCE,
+          status: ComplianceCaseStatus.OPEN,
+          regionId: company.homeRegionId,
+        },
+      });
+    } else if (reviewCase.status === ComplianceCaseStatus.INFO_REQUESTED) {
+      reviewCase = await this.prisma.complianceCase.update({
+        where: { id: reviewCase.id },
+        data: {
+          status: ComplianceCaseStatus.OPEN,
+          decisionNote: null,
+        },
+      });
+    }
+
+    const orphanLicences = await this.prisma.complianceDocument.findMany({
+      where: {
+        companyId: company.id,
+        docType: ComplianceDocType.DRIVER_LICENCE,
+        driverId: { not: null },
+        status: {
+          in: [ComplianceDocStatus.UPLOADED, ComplianceDocStatus.UNDER_REVIEW],
+        },
+        OR: [{ caseId: null }, { id: documentId }, { driverId }],
+      },
+      select: { id: true },
+    });
+    const ids = [...new Set([documentId, ...orphanLicences.map((d) => d.id)])];
+    await this.prisma.complianceDocument.updateMany({
+      where: { id: { in: ids } },
+      data: {
+        caseId: reviewCase.id,
+        status: ComplianceDocStatus.UNDER_REVIEW,
+      },
+    });
   }
 
   async getAssignability(principal: AuthenticatedPrincipal) {
@@ -336,7 +510,11 @@ export class DriverService {
       this.prisma,
       user.driver!.id,
     );
-    const goNoGo = this.goNoGo(user.driver!, { licenceDocumentUploaded });
+    const goNoGo = this.goNoGo(user.driver!, {
+      licenceDocumentUploaded,
+      userName: user.name,
+      userPhone: user.phone,
+    });
     return {
       canBeAssigned: goNoGo.canBeAssigned,
       goNoGo,

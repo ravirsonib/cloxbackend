@@ -442,9 +442,10 @@ export class DocumentsService {
     if (!mimeMatchesIntent(doc.mimeType, file.mimetype)) {
       throw new BadRequestException('Content-Type does not match upload intent');
     }
-    const maxBytes = doc.sizeBytes ?? 10 * 1024 * 1024;
+    // Platform ceiling is 10MB; declared intent size is advisory (clients may recompress).
+    const maxBytes = 10 * 1024 * 1024;
     if (file.size > maxBytes) {
-      throw new BadRequestException('Upload exceeded declared size');
+      throw new BadRequestException('File exceeds 10MB limit');
     }
 
     const fullPath = this.absolutePath(doc.storageKey);

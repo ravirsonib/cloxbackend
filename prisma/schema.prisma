@@ -363,6 +363,8 @@ model Company {
   referredByAdminUser   AdminUser? @relation("CompanyReferredBy", fields: [referredByAdminUserId], references: [id], onDelete: SetNull)
   /// First attribution timestamp (kept across reassign; history in audit)
   referredAt            DateTime?
+  /// Reliability 0–100 (exception / marketplace release impacts)
+  reliabilityScore      Int           @default(100)
   createdAt             DateTime      @default(now())
   updatedAt             DateTime      @updatedAt
 
@@ -495,6 +497,8 @@ enum ComplianceCaseType {
   CARRIER_KYB
   /// Post-KYB fleet RWC review (does not change company BID_ELIGIBLE)
   CARRIER_FLEET_RWC
+  /// Post-KYB driver licence review (Super Admin only; activates Driver)
+  CARRIER_DRIVER_LICENCE
   /// Post-approval company profile field changes (Ops must approve KYB fields)
   COMPANY_PROFILE_CHANGE
   ADMIN_PARTNER_KYB
@@ -546,6 +550,14 @@ model Driver {
   licenceClass String?
   licenceExpiry DateTime?
   nhvrAcknowledgedAt DateTime?
+  /// Personal / emergency (mandatory at profile submit)
+  emergencyContactName  String?
+  emergencyContactPhone String?
+  /// Residential address (AU structured)
+  addressLine1 String?
+  suburb       String?
+  state        String?
+  postcode     String?
   /// SHA-256 of raw invite token (single-use until accept)
   inviteTokenHash String?
   inviteExpiresAt DateTime?
@@ -553,6 +565,8 @@ model Driver {
   disabledAt     DateTime?
   disabledReason String?
   disabledNote   String?
+  /// Reliability 0–100 (unavailability impacts)
+  reliabilityScore Int @default(100)
   createdAt DateTime     @default(now())
   updatedAt DateTime     @updatedAt
 
@@ -714,6 +728,11 @@ model Job {
   /// Hourly billable hours (floor 4.0)
   billableHours        Float?
   publishedAt          DateTime?
+  /// Exception rescue: sort / badge on market board
+  marketplacePriority    Boolean @default(false)
+  /// Carrier-facing bid discount % (sender estimate unchanged)
+  rescueDiscountPercent  Int?
+  rescuedFromExceptionId String?
   createdAt            DateTime        @default(now())
   updatedAt            DateTime        @updatedAt
 
@@ -729,6 +748,7 @@ model Job {
   @@index([senderCompanyId, status])
   @@index([originRegionId])
   @@index([status, publishedAt])
+  @@index([marketplacePriority, status, publishedAt])
 }
 
 model JobStop {
@@ -870,7 +890,22 @@ enum TripExceptionStatus {
   RESOLVED_REASSIGNED
   RESOLVED_CONTINUED
   RESOLVED_CANCELLED
+  /// Job re-listed to marketplace after carrier could not replace
+  RESOLVED_RELISTED
   CLOSED
+}
+
+/// Singleton platform knobs (id = "default")
+model PlatformSettings {
+  id                                 String   @id @default("default")
+  /// Carrier-facing discount % on marketplace rescue re-list (0–50)
+  rescueDiscountPercent              Int      @default(10)
+  /// Auto re-list after this many ms in AWAITING_CARRIER (pre-trip)
+  marketplaceRelistSlaMs             Int      @default(300000)
+  driverUnavailableScoreDelta        Int      @default(5)
+  carrierMarketplaceReleaseScoreDelta Int     @default(10)
+  updatedAt                          DateTime @updatedAt
+  createdAt                          DateTime @default(now())
 }
 
 model TripException {

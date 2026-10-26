@@ -850,6 +850,7 @@ export class CarrierService {
           licenceNo: d.licenceNo,
           licenceClass: d.licenceClass,
           licenceExpiry: d.licenceExpiry,
+          reliabilityScore: d.reliabilityScore,
           inviteAcceptedAt: d.inviteAcceptedAt,
           inviteExpiresAt: d.inviteExpiresAt,
           disabledAt: d.disabledAt,
@@ -868,10 +869,15 @@ export class CarrierService {
     const user = await this.requireCarrier(principal);
     const company = user.company!;
     this.assertCanManageFleet(company);
+    // Post-KYB adds need Super Admin approve before bid use; onboarding seed stays ACTIVE.
+    const status =
+      company.status === CompanyStatus.BID_ELIGIBLE
+        ? VehicleStatus.PENDING_REVIEW
+        : VehicleStatus.ACTIVE;
     const vehicle = await this.prisma.vehicle.create({
       data: {
         companyId: company.id,
-        status: VehicleStatus.ACTIVE,
+        status,
         label: input.label,
         registration: input.registration.toUpperCase(),
         vehicleClass: input.vehicleClass.toUpperCase(),
@@ -885,6 +891,7 @@ export class CarrierService {
       actorUserId: user.id,
       entityType: 'Vehicle',
       entityId: vehicle.id,
+      metadata: { status },
     });
     return this.getOnboarding(principal);
   }

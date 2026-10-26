@@ -341,6 +341,7 @@ export class TripsService {
       siteFacility: string | null;
       deadWeightKg: number | null;
       chargeableWeightKg: number | null;
+      routeFatigueBreakMinutes?: number | null;
       stops?: Array<{
         id?: string;
         sequence: number;
@@ -434,6 +435,10 @@ export class TripsService {
       massOverDeclared: trip.massOverDeclared,
       onBreak: trip.onBreak,
       breakStartedAt: trip.breakStartedAt,
+      suggestedBreakMinutes:
+        trip.job?.routeFatigueBreakMinutes != null && trip.job.routeFatigueBreakMinutes > 0
+          ? trip.job.routeFatigueBreakMinutes
+          : 15,
       startedAt: trip.startedAt,
       completedAt: trip.completedAt,
       podStorageKey: trip.podStorageKey ?? null,
@@ -1079,11 +1084,10 @@ export class TripsService {
             where: { id: trip.id },
             data: { status: TripStatus.AT_DROPOFF },
           });
-          try {
-            await this.notifyAtDropoffIfNeeded(trip.id, activeStop.id, actorUserId);
-          } catch {
-            // Never block geofence progress on notify/mail failures
-          }
+          // Fire-and-forget: SMTP hangs must not delay location response / POD UI.
+          void this.notifyAtDropoffIfNeeded(trip.id, activeStop.id, actorUserId).catch(
+            () => undefined,
+          );
         }
         await this.audit.recordPlatform({
           action: AuditAction.TRIP_GEOFENCE_ENTER,
@@ -1657,15 +1661,12 @@ export class TripsService {
       user.id,
     );
 
-    try {
-      await this.maybeAutoNotifyApproaching(
-        trip.id,
-        { lat: input.lat, lng: input.lng },
-        user.id,
-      );
-    } catch {
-      // Auto ETA notify must never fail location ingest.
-    }
+    // Never await mail here — SMTP latency must not delay mock/real location → POD.
+    void this.maybeAutoNotifyApproaching(
+      trip.id,
+      { lat: input.lat, lng: input.lng },
+      user.id,
+    ).catch(() => undefined);
 
     return {
       id: sample.id,
@@ -1846,17 +1847,7 @@ export class TripsService {
     const progress = await this.ensureStopProgress(tripId, jobStopId);
     if (progress.atDropoffNotifiedAt) return;
 
-    const parties = await this.resolveNotifyParties(tripId, jobStopId);
-    await this.notifications.notifyTripAtDropoff({
-      senderEmails: parties.senderEmails,
-      carrierEmails: parties.carrierEmails,
-      receiverEmail: parties.receiverEmail,
-      jobId: parties.jobId,
-      jobTitle: parties.jobTitle,
-      dropSuburb: parties.dropSuburb,
-      dropAddress: parties.dropAddress,
-    });
-
+    // Mark POD-ready before SMTP so a slow mail host cannot stall arrival state.
     await this.prisma.tripStopProgress.update({
       where: { id: progress.id },
       data: {
@@ -1865,6 +1856,21 @@ export class TripsService {
           progress.podStatus === 'PENDING' ? 'AWAITING_SIGNATURE' : progress.podStatus,
       },
     });
+
+    const parties = await this.resolveNotifyParties(tripId, jobStopId);
+    try {
+      await this.notifications.notifyTripAtDropoff({
+        senderEmails: parties.senderEmails,
+        carrierEmails: parties.carrierEmails,
+        receiverEmail: parties.receiverEmail,
+        jobId: parties.jobId,
+        jobTitle: parties.jobTitle,
+        dropSuburb: parties.dropSuburb,
+        dropAddress: parties.dropAddress,
+      });
+    } catch {
+      // Email is best-effort after arrival is recorded.
+    }
 
     await this.audit.recordPlatform({
       action: AuditAction.TRIP_AT_DROPOFF_NOTIFIED,
@@ -1949,18 +1955,7 @@ export class TripsService {
       return { alreadyArrived: true as const };
     }
 
-    const parties = await this.resolveNotifyParties(params.tripId, params.jobStopId);
-    const mail = await this.notifications.notifyTripApproaching({
-      senderEmails: parties.senderEmails,
-      receiverEmail: parties.receiverEmail,
-      jobId: parties.jobId,
-      jobTitle: parties.jobTitle,
-      dropSuburb: parties.dropSuburb,
-      dropAddress: parties.dropAddress,
-      etaLabel: params.etaLabel,
-      source: params.source,
-    });
-
+    // Persist notify flag before SMTP so driver UI can advance without waiting on mail.
     await this.prisma.tripStopProgress.update({
       where: { id: progress.id },
       data: {
@@ -1968,6 +1963,24 @@ export class TripsService {
         approachingSource: params.source,
       },
     });
+
+    const parties = await this.resolveNotifyParties(params.tripId, params.jobStopId);
+    let sentTo: string[] = [];
+    try {
+      const mail = await this.notifications.notifyTripApproaching({
+        senderEmails: parties.senderEmails,
+        receiverEmail: parties.receiverEmail,
+        jobId: parties.jobId,
+        jobTitle: parties.jobTitle,
+        dropSuburb: parties.dropSuburb,
+        dropAddress: parties.dropAddress,
+        etaLabel: params.etaLabel,
+        source: params.source,
+      });
+      sentTo = mail.sentTo;
+    } catch {
+      // Best-effort email after state is recorded.
+    }
 
     await this.audit.recordPlatform({
       action: AuditAction.TRIP_APPROACHING_NOTIFIED,
@@ -1978,11 +1991,11 @@ export class TripsService {
         jobStopId: params.jobStopId,
         source: params.source,
         etaLabel: params.etaLabel,
-        sentTo: mail.sentTo,
+        sentTo,
       },
     });
 
-    return { alreadySent: false as const, sentTo: mail.sentTo };
+    return { alreadySent: false as const, sentTo };
   }
 
   async notifyApproaching(

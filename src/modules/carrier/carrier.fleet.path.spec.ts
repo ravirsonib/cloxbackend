@@ -169,7 +169,7 @@ describe('CarrierService resend / vehicle / capabilities leftovers', () => {
     expect(result).toMatchObject({ step: expect.any(String) });
   });
 
-  it('addVehicle allows BID_ELIGIBLE and rejects SUSPENDED', async () => {
+  it('addVehicle BID_ELIGIBLE creates PENDING_REVIEW; rejects SUSPENDED', async () => {
     const eligibleCompany = carrierCompany({ status: CompanyStatus.BID_ELIGIBLE });
     const eligiblePrisma = {
       isConnected: () => true,
@@ -182,7 +182,7 @@ describe('CarrierService resend / vehicle / capabilities leftovers', () => {
           phone: null,
           company: {
             ...eligibleCompany,
-            vehicles: [],
+            vehicles: [{ id: 'veh-old', status: VehicleStatus.ACTIVE }],
             drivers: [],
           },
         }),
@@ -201,6 +201,12 @@ describe('CarrierService resend / vehicle / capabilities leftovers', () => {
         gcmKg: 1,
       } as never),
     ).resolves.toMatchObject({ step: expect.any(String) });
+    expect(eligiblePrisma.vehicle.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        status: VehicleStatus.PENDING_REVIEW,
+        registration: 'X1',
+      }),
+    });
 
     const suspendedPrisma = {
       isConnected: () => true,

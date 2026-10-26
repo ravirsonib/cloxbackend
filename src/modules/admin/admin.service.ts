@@ -14,6 +14,7 @@ import {
   type AdminLeadListQuery,
   type CreateLeadNoteInput,
   type DisableCompanyInput,
+  type PlatformSettingsPatchInput,
   type UpdateLeadInput,
 } from '../../shared/types';
 import {
@@ -241,6 +242,7 @@ export class AdminService {
           suspendedReason: true,
           suspendedNote: true,
           statusBeforeSuspend: true,
+          reliabilityScore: true,
           createdAt: true,
           updatedAt: true,
           homeRegion: { select: { code: true, name: true } },
@@ -347,7 +349,10 @@ export class AdminService {
       });
 
       const vehiclesSuspended = await tx.vehicle.updateMany({
-        where: { companyId: id, status: VehicleStatus.ACTIVE },
+        where: {
+          companyId: id,
+          status: { in: [VehicleStatus.ACTIVE, VehicleStatus.PENDING_REVIEW] },
+        },
         data: { status: VehicleStatus.SUSPENDED },
       });
 
@@ -1134,6 +1139,64 @@ export class AdminService {
       deleted: false as const,
       mode: 'soft' as const,
       status: JobStatus.CANCELLED,
+    };
+  }
+
+  private async ensurePlatformSettings() {
+    return this.prisma.platformSettings.upsert({
+      where: { id: 'default' },
+      create: { id: 'default' },
+      update: {},
+    });
+  }
+
+  async getPlatformSettings() {
+    this.ensureDatabase();
+    const row = await this.ensurePlatformSettings();
+    return {
+      id: row.id,
+      rescueDiscountPercent: row.rescueDiscountPercent,
+      marketplaceRelistSlaMs: row.marketplaceRelistSlaMs,
+      driverUnavailableScoreDelta: row.driverUnavailableScoreDelta,
+      carrierMarketplaceReleaseScoreDelta: row.carrierMarketplaceReleaseScoreDelta,
+      updatedAt: row.updatedAt,
+    };
+  }
+
+  async patchPlatformSettings(input: PlatformSettingsPatchInput, actorAdminId: string) {
+    this.ensureDatabase();
+    await this.ensurePlatformSettings();
+    const data: Prisma.PlatformSettingsUpdateInput = {};
+    if (input.rescueDiscountPercent !== undefined) {
+      data.rescueDiscountPercent = input.rescueDiscountPercent;
+    }
+    if (input.marketplaceRelistSlaMs !== undefined) {
+      data.marketplaceRelistSlaMs = input.marketplaceRelistSlaMs;
+    }
+    if (input.driverUnavailableScoreDelta !== undefined) {
+      data.driverUnavailableScoreDelta = input.driverUnavailableScoreDelta;
+    }
+    if (input.carrierMarketplaceReleaseScoreDelta !== undefined) {
+      data.carrierMarketplaceReleaseScoreDelta = input.carrierMarketplaceReleaseScoreDelta;
+    }
+    const updated = await this.prisma.platformSettings.update({
+      where: { id: 'default' },
+      data,
+    });
+    await this.audit.recordPlatform({
+      action: AuditAction.PLATFORM_SETTINGS_UPDATED,
+      actorAdminId,
+      entityType: 'PlatformSettings',
+      entityId: 'default',
+      metadata: input,
+    });
+    return {
+      id: updated.id,
+      rescueDiscountPercent: updated.rescueDiscountPercent,
+      marketplaceRelistSlaMs: updated.marketplaceRelistSlaMs,
+      driverUnavailableScoreDelta: updated.driverUnavailableScoreDelta,
+      carrierMarketplaceReleaseScoreDelta: updated.carrierMarketplaceReleaseScoreDelta,
+      updatedAt: updated.updatedAt,
     };
   }
 }

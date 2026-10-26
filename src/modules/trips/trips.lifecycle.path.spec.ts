@@ -321,7 +321,12 @@ prisma as never,
 
     it('toggleBreak sets onBreak when started', async () => {
       const trip = baseTrip({ startedAt: new Date() });
-      const updated = { ...trip, onBreak: true, breakStartedAt: new Date() };
+      const updated = {
+        ...trip,
+        onBreak: true,
+        breakStartedAt: new Date(),
+        job: { ...trip.job, routeFatigueBreakMinutes: 20 },
+      };
       const prisma = {
         isConnected: () => true,
         user: {
@@ -340,6 +345,30 @@ prisma as never,
         onBreak: true,
       });
       expect(result.onBreak).toBe(true);
+      expect(result.suggestedBreakMinutes).toBe(20);
+    });
+
+    it('toggleBreak defaults suggestedBreakMinutes to 15', async () => {
+      const trip = baseTrip({ startedAt: new Date() });
+      const updated = { ...trip, onBreak: true, breakStartedAt: new Date() };
+      const prisma = {
+        isConnected: () => true,
+        user: {
+          findUnique: jest.fn().mockResolvedValue({
+            id: 'user-driver',
+            driver: { id: 'drv-1' },
+          }),
+        },
+        trip: {
+          findFirst: jest.fn().mockResolvedValue(trip),
+          update: jest.fn().mockResolvedValue(updated),
+        },
+      };
+      const service = makeService(prisma);
+      const result = await service.toggleBreak(driverPrincipal, 'trip-1', {
+        onBreak: true,
+      });
+      expect(result.suggestedBreakMinutes).toBe(15);
     });
 
     it('postLocation rejects when trip not started', async () => {

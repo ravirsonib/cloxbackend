@@ -1,4 +1,4 @@
-import { DriverStatus } from '@prisma/client';
+import { CompanyStatus, CompanyType, DriverStatus } from '@prisma/client';
 import type { AuthenticatedPrincipal } from '../../common/guards/jwt-auth.guard';
 import { hashValue } from '../../common/utils/crypto';
 import { DriverService } from './driver.service';
@@ -124,13 +124,19 @@ describe('DriverService crumb branch leftovers', () => {
               licenceExpiry: null,
               nhvrAcknowledgedAt: null,
               inviteAcceptedAt: new Date(),
+              emergencyContactName: null,
+              emergencyContactPhone: null,
+              addressLine1: null,
+              suburb: null,
+              state: null,
+              postcode: null,
             },
           })
           .mockResolvedValueOnce({
             id: 'user-driver',
             email: 'driver@yopmail.com',
-            name: 'D',
-            phone: null,
+            name: 'Driver One',
+            phone: '0412345678',
             driver: {
               id: 'drv-1',
               status: DriverStatus.ACTIVE,
@@ -141,8 +147,23 @@ describe('DriverService crumb branch leftovers', () => {
               licenceExpiry: new Date('2030-06-01T12:00:00.000Z'),
               nhvrAcknowledgedAt: new Date(),
               inviteAcceptedAt: new Date(),
+              emergencyContactName: 'Emergency Contact',
+              emergencyContactPhone: '0498765432',
+              addressLine1: '12 Test Street',
+              suburb: 'Richmond',
+              state: 'VIC',
+              postcode: '3121',
             },
           }),
+        update: jest.fn().mockResolvedValue({}),
+      },
+      company: {
+        findUnique: jest.fn().mockResolvedValue({
+          id: 'co-c',
+          status: CompanyStatus.ACTIVE,
+          homeRegionId: null,
+          type: CompanyType.CARRIER,
+        }),
       },
       complianceDocument: {
         findFirst: jest.fn().mockResolvedValue({ id: 'doc-lic' }),
@@ -150,8 +171,17 @@ describe('DriverService crumb branch leftovers', () => {
       driver: {
         update: jest.fn().mockResolvedValue({ id: 'drv-1', status: DriverStatus.ACTIVE }),
       },
+      $transaction: jest.fn(async (ops: unknown[]) => ops),
     };
     await makeService(prisma).submitProfile(driverPrincipal, {
+      name: 'Driver One',
+      phone: '0412345678',
+      emergencyContactName: 'Emergency Contact',
+      emergencyContactPhone: '0498765432',
+      addressLine1: '12 Test Street',
+      suburb: 'Richmond',
+      state: 'VIC',
+      postcode: '3121',
       licenceNo: 'L1',
       licenceClass: 'C',
       licenceExpiry: '2030-06-01T12:00:00.000Z',

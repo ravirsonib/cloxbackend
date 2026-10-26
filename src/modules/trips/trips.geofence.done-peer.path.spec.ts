@@ -20,6 +20,7 @@ describe('TripsService geofence fully-done peer leftover', () => {
       ...progress,
       currentlyInside: false,
       exitedAt: new Date('2026-01-01T13:00:00Z'),
+      podStatus: 'FINALIZED',
     };
     const tripForComplete = {
       id: 'trip-1',
@@ -45,7 +46,7 @@ describe('TripsService geofence fully-done peer leftover', () => {
           waitOverageMinutes: 0,
           arrivalRecorded: true,
         },
-        afterExit,
+        { ...afterExit, podStatus: 'FINALIZED' },
       ],
       assignment: { id: 'asg-1' },
       surcharges: [],
@@ -88,7 +89,7 @@ describe('TripsService geofence fully-done peer leftover', () => {
                 waitOverageMinutes: 0,
                 arrivalRecorded: true,
               },
-              progress,
+              { ...progress, podStatus: 'FINALIZED' },
             ],
           })
           .mockResolvedValueOnce(tripForComplete),

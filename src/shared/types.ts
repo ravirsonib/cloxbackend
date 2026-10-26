@@ -1,4 +1,12 @@
 import { z } from 'zod';
+import {
+  MAX_JOB_CHARGEABLE_WEIGHT_KG,
+  MAX_JOB_DEAD_WEIGHT_KG,
+  MAX_JOB_HEIGHT_CM,
+  MAX_JOB_LENGTH_CM,
+  MAX_JOB_WIDTH_CM,
+  chargeableWeightKg,
+} from './job-cargo.limits';
 
 export const LeadType = {
   REGISTRY_SENDER: 'REGISTRY_SENDER',
@@ -157,6 +165,8 @@ export const AuditAction = {
   EXCEPTION_RELEASED: 'exception.released',
   EXCEPTION_RESOLVED: 'exception.resolved',
   EXCEPTION_PERFORMANCE_STUB: 'exception.performance_stub',
+  EXCEPTION_RELISTED: 'exception.relisted',
+  PLATFORM_SETTINGS_UPDATED: 'platform.settings_updated',
   REFUND_STUB: 'payment.refund_stub',
   TRIP_CREATED: 'trip.created',
   TRIP_SAFETY_PASSED: 'trip.safety_passed',
@@ -711,6 +721,7 @@ export const submitComplianceSchema = z.object({
     'SENDER_KYC',
     'CARRIER_KYB',
     'CARRIER_FLEET_RWC',
+    'CARRIER_DRIVER_LICENCE',
     'COMPANY_PROFILE_CHANGE',
     'ADMIN_PARTNER_KYB',
   ]),
@@ -731,6 +742,7 @@ export const complianceCaseListQuerySchema = z.object({
       'SENDER_KYC',
       'CARRIER_KYB',
       'CARRIER_FLEET_RWC',
+      'CARRIER_DRIVER_LICENCE',
       'COMPANY_PROFILE_CHANGE',
       'ADMIN_PARTNER_KYB',
     ])
@@ -1154,7 +1166,28 @@ export const driverAcceptInviteSchema = z.object({
 
 export type DriverAcceptInviteInput = z.infer<typeof driverAcceptInviteSchema>;
 
+const auStateField = z
+  .string()
+  .trim()
+  .toUpperCase()
+  .regex(/^(NSW|VIC|QLD|SA|WA|TAS|NT|ACT)$/, 'Invalid AU state');
+
+const auPostcodeField = z
+  .string()
+  .trim()
+  .regex(/^\d{4}$/, 'Postcode must be 4 digits');
+
 export const driverProfileSchema = z.object({
+  /** Legal / preferred name — stored on User */
+  name: personNameField(2, 120),
+  /** Personal mobile — stored on User.phone */
+  phone: phoneField,
+  emergencyContactName: personNameField(2, 120),
+  emergencyContactPhone: phoneField,
+  addressLine1: z.string().trim().min(3).max(200),
+  suburb: z.string().trim().min(2).max(100),
+  state: auStateField,
+  postcode: auPostcodeField,
   licenceNo: z.string().trim().min(3).max(40),
   licenceClass: z
     .string()
@@ -1219,6 +1252,37 @@ function refineJobStops(
   }
 }
 
+const jobCargoFieldsSchema = z.object({
+  deadWeightKg: z.number().positive().max(MAX_JOB_DEAD_WEIGHT_KG),
+  lengthCm: z.number().positive().max(MAX_JOB_LENGTH_CM),
+  widthCm: z.number().positive().max(MAX_JOB_WIDTH_CM),
+  heightCm: z.number().positive().max(MAX_JOB_HEIGHT_CM),
+});
+
+function refineJobCargoChargeable(
+  val: {
+    deadWeightKg: number;
+    lengthCm: number;
+    widthCm: number;
+    heightCm: number;
+  },
+  ctx: z.RefinementCtx,
+) {
+  const chargeable = chargeableWeightKg(val);
+  if (chargeable > MAX_JOB_CHARGEABLE_WEIGHT_KG) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: `Chargeable weight ${chargeable.toFixed(1)} kg exceeds the ${MAX_JOB_CHARGEABLE_WEIGHT_KG} kg (50 t) platform limit. Reduce dead weight or dimensions.`,
+      path: ['deadWeightKg'],
+    });
+  }
+}
+
+/** Preview recommend — same cargo caps as job create (no BDOUBLE for over-limit input). */
+export const jobRecommendSchema = jobCargoFieldsSchema.superRefine(refineJobCargoChargeable);
+
+export type JobRecommendInput = z.infer<typeof jobRecommendSchema>;
+
 export const jobCreateSchema = z
   .object({
     title: z.string().trim().min(2).max(160).optional(),
@@ -1228,10 +1292,10 @@ export const jobCreateSchema = z
     receiverName: z.string().trim().min(2).max(120),
     receiverEmail: z.string().trim().email(),
     receiverPhone: z.string().trim().min(8).max(32).optional(),
-    deadWeightKg: z.number().positive().max(50_000),
-    lengthCm: z.number().positive().max(2000),
-    widthCm: z.number().positive().max(500),
-    heightCm: z.number().positive().max(500),
+    deadWeightKg: z.number().positive().max(MAX_JOB_DEAD_WEIGHT_KG),
+    lengthCm: z.number().positive().max(MAX_JOB_LENGTH_CM),
+    widthCm: z.number().positive().max(MAX_JOB_WIDTH_CM),
+    heightCm: z.number().positive().max(MAX_JOB_HEIGHT_CM),
     /** Sender-entered route distance; must be a real positive km (never null/0). */
     distanceKm: z.number().positive().max(20_000),
     loadTypes: z
@@ -1251,6 +1315,7 @@ export const jobCreateSchema = z
       requireHourlyPattern: true,
       hourlyPattern: val.hourlyPattern,
     });
+    refineJobCargoChargeable(val, ctx);
   });
 
 export type JobCreateInput = z.infer<typeof jobCreateSchema>;
@@ -1382,4 +1447,13 @@ export const tripPodFinalizeSchema = z.object({
 });
 
 export type TripPodFinalizeInput = z.infer<typeof tripPodFinalizeSchema>;
+
+export const platformSettingsPatchSchema = z.object({
+  rescueDiscountPercent: z.number().int().min(0).max(50).optional(),
+  marketplaceRelistSlaMs: z.number().int().min(60_000).max(3_600_000).optional(),
+  driverUnavailableScoreDelta: z.number().int().min(0).max(50).optional(),
+  carrierMarketplaceReleaseScoreDelta: z.number().int().min(0).max(50).optional(),
+});
+
+export type PlatformSettingsPatchInput = z.infer<typeof platformSettingsPatchSchema>;
 

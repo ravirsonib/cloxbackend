@@ -12,9 +12,11 @@ import {
   AppRole,
   jobCreateSchema,
   jobReceiverUpdateSchema,
+  jobRecommendSchema,
   jobRouteEstimateSchema,
   type JobCreateInput,
   type JobReceiverUpdateInput,
+  type JobRecommendInput,
   type JobRouteEstimateInput,
 } from '../../shared/types';
 import { CurrentPrincipal } from '../../common/decorators/current-admin.decorator';
@@ -24,9 +26,10 @@ import { RolesGuard } from '../../common/guards/roles.guard';
 import { ZodValidationPipe } from '../../common/pipes/zod-validation.pipe';
 import { JobsService } from './jobs.service';
 import {
+  MAX_JOB_CHARGEABLE_WEIGHT_KG,
+  VEHICLE_CLASS_RANK,
   chargeableWeightKg,
   recommendVehicleClass,
-  VEHICLE_CLASS_RANK,
 } from './job-pricing.util';
 
 @ApiTags('jobs')
@@ -51,14 +54,17 @@ export class JobsController {
   }
 
   @Post('meta/recommend')
-  @ApiOperation({ summary: 'Recommend vehicle class from dimensions' })
-  recommend(
-    @Body()
-    body: { deadWeightKg: number; lengthCm: number; widthCm: number; heightCm: number },
-  ) {
+  @ApiOperation({
+    summary: 'Recommend vehicle class from dead weight + dimensions (50 t chargeable cap)',
+  })
+  recommend(@Body(new ZodValidationPipe(jobRecommendSchema)) body: JobRecommendInput) {
     const chargeable = chargeableWeightKg(body);
     const recommended = recommendVehicleClass(chargeable);
-    return { chargeableWeightKg: chargeable, recommendedVehicleClass: recommended };
+    return {
+      chargeableWeightKg: chargeable,
+      recommendedVehicleClass: recommended,
+      maxChargeableWeightKg: MAX_JOB_CHARGEABLE_WEIGHT_KG,
+    };
   }
 
   @Post('route-estimate')

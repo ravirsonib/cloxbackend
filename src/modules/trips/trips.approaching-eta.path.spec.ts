@@ -153,6 +153,9 @@ describe('TripsService Phase E auto ETA approaching', () => {
       lat: driverLat,
       lng: driverLng,
     });
+    // Auto-notify is fire-and-forget on the location path — flush microtasks.
+    await new Promise((resolve) => setImmediate(resolve));
+    await Promise.resolve();
 
     expect(notifications.notifyTripApproaching).toHaveBeenCalledWith(
       expect.objectContaining({
