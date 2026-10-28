@@ -96,19 +96,32 @@ export class StripeService {
       this.logger.warn(`STRIPE_MOCK: Connect account ${id}`);
       return { id, mock: true as const };
     }
-    const account = await this.getClient().accounts.create({
-      type: 'express',
-      country: 'AU',
-      email: params.email,
-      business_type: 'company',
-      company: { name: params.businessName },
-      capabilities: {
-        card_payments: { requested: true },
-        transfers: { requested: true },
-      },
-      metadata: params.metadata,
-    });
-    return { id: account.id, mock: false as const };
+    try {
+      const account = await this.getClient().accounts.create({
+        type: 'express',
+        country: 'AU',
+        email: params.email,
+        business_type: 'company',
+        company: { name: params.businessName },
+        capabilities: {
+          card_payments: { requested: true },
+          transfers: { requested: true },
+        },
+        metadata: params.metadata,
+      });
+      return { id: account.id, mock: false as const };
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (/signed up for Connect|EnableConnect|enable_connect|dashboard\.stripe\.com\/connect/i.test(message)) {
+        this.logger.error(
+          'Stripe Connect is not enabled on this platform Stripe account. Enable Connect in the Stripe Dashboard (https://dashboard.stripe.com/connect) for the same mode as STRIPE_SECRET_KEY (test vs live).',
+        );
+        throw new Error(
+          'Stripe Connect is not enabled on the platform account. An admin must enable Connect in the Stripe Dashboard (Connect → Get started), then retry payout setup.',
+        );
+      }
+      throw error;
+    }
   }
 
   async createAccountLink(params: {

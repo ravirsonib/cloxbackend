@@ -408,11 +408,20 @@ export class CarrierService {
     }
     let accountId = company.stripeConnectAccountId;
     if (!accountId) {
-      const account = await this.stripe.createConnectAccount({
-        email: user.email,
-        businessName: company.legalName,
-        metadata: { companyId: company.id },
-      });
+      let account: { id: string };
+      try {
+        account = await this.stripe.createConnectAccount({
+          email: user.email,
+          businessName: company.legalName,
+          metadata: { companyId: company.id },
+        });
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (/Stripe Connect is not enabled/i.test(message)) {
+          throw new BadRequestException(message);
+        }
+        throw error;
+      }
       accountId = account.id;
       await this.prisma.company.update({
         where: { id: company.id },
