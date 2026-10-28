@@ -294,6 +294,7 @@ prisma as never,
       const service = makeService(prisma);
       const result = await service.startTrip(driverPrincipal, 'trip-1', {
         online: true,
+        odometerStartKm: 12000,
       });
       expect(result.status).toBe(TripStatus.IN_TRANSIT);
       expect(result.gates.canStart).toBe(false);
@@ -407,7 +408,7 @@ prisma as never,
             id: 'user-carrier',
           },
           'job-1',
-          { online: true },
+          { online: true, odometerStartKm: 12000 },
         ),
       ).rejects.toMatchObject({
         message: 'Carrier cannot start trip — driver must start',
@@ -427,7 +428,7 @@ prisma as never,
       };
       const service = makeService(prisma);
       await expect(
-        service.startByJobId(driverPrincipal, 'job-1', { online: true }),
+        service.startByJobId(driverPrincipal, 'job-1', { online: true, odometerStartKm: 12000 }),
       ).rejects.toBeInstanceOf(NotFoundException);
     });
   });

@@ -1253,6 +1253,97 @@ export class NotificationsService {
     return results;
   }
 
+  async notifyTripExceptionReplacementProposed(params: {
+    carrierEmails: string[];
+    senderEmail: string | null;
+    jobTitle: string;
+    jobId: string;
+    vehicleLabel: string;
+    driverName: string;
+    exceptionId: string;
+    note: string | null;
+  }) {
+    const details: EmailDetailRow[] = [
+      { label: 'Job', value: params.jobTitle || params.jobId.slice(0, 8) },
+      { label: 'Proposed vehicle', value: params.vehicleLabel },
+      { label: 'Proposed driver', value: params.driverName },
+      { label: 'Exception ID', value: params.exceptionId },
+    ];
+    if (params.note) details.push({ label: 'Note', value: params.note });
+    const targets = new Set(
+      [...params.carrierEmails, params.senderEmail].filter(
+        (e): e is string => Boolean(e),
+      ),
+    );
+    const results = [];
+    for (const to of targets) {
+      const isSender = to === params.senderEmail;
+      results.push(
+        await this.sendBranded({
+          to,
+          subject: isSender
+            ? 'CLOX — approve replacement crew for your job'
+            : 'CLOX — replacement proposed (awaiting sender)',
+          text: `Job ${params.jobTitle || params.jobId}: proposed ${params.driverName} / ${params.vehicleLabel}. Sender must approve.`,
+          eyebrow: 'Exception',
+          title: isSender ? 'Approve replacement?' : 'Replacement proposed',
+          intro: isSender
+            ? 'Your carrier proposed a replacement vehicle/driver. Open CLOX to Approve (continue) or Reject (cancel + refund).'
+            : 'Replacement crew proposed. Waiting for the sender to Approve or Reject.',
+          details,
+          cta: {
+            label: 'Open CLOX →',
+            href: this.adminAppUrl(),
+          },
+        }),
+      );
+    }
+    return results;
+  }
+
+  async notifyTripExceptionReplacementRejected(params: {
+    carrierEmails: string[];
+    senderEmail: string | null;
+    driverEmail: string | null;
+    jobTitle: string;
+    jobId: string;
+    note: string;
+    exceptionId: string;
+  }) {
+    const details: EmailDetailRow[] = [
+      { label: 'Job', value: params.jobTitle || params.jobId.slice(0, 8) },
+      { label: 'Reason', value: params.note },
+      { label: 'Exception ID', value: params.exceptionId },
+    ];
+    const targets = new Set(
+      [
+        params.senderEmail,
+        params.driverEmail,
+        ...params.carrierEmails,
+      ].filter((e): e is string => Boolean(e)),
+    );
+    const results = [];
+    for (const to of targets) {
+      results.push(
+        await this.sendBranded({
+          to,
+          subject: 'CLOX — replacement rejected · job cancelled',
+          text: `Job ${params.jobTitle || params.jobId} cancelled: sender rejected the proposed replacement.`,
+          eyebrow: 'Exception',
+          title: 'Replacement rejected',
+          intro:
+            'The sender rejected the proposed replacement. The job has been cancelled and a refund will be processed per payment policy.',
+          details,
+          cta: {
+            label: 'Open CLOX →',
+            href: this.adminAppUrl(),
+          },
+        }),
+      );
+    }
+    return results;
+  }
+
   async notifyTripExceptionReassigned(params: {
     driverEmail: string | null;
     previousDriverEmail: string | null;

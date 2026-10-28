@@ -23,11 +23,22 @@ describe('ExceptionsService rescue candidates + release', () => {
   const notifications = {
     notifyTripExceptionOpened: jest.fn(),
     notifyTripExceptionReassigned: jest.fn(),
+    notifyTripExceptionReplacementProposed: jest.fn().mockResolvedValue([]),
+    notifyTripExceptionReplacementRejected: jest.fn().mockResolvedValue([]),
     notifyTripExceptionContinued: jest.fn(),
     notifyTripExceptionEscalated: jest.fn(),
     notifyTripExceptionReleased: jest.fn().mockResolvedValue([]),
   };
   const carrier = { reassignAssignment: jest.fn() };
+  const payments = {
+    adjustForMarketplaceRelease: jest.fn().mockResolvedValue({
+      status: 'HELD',
+      amountCents: 10000,
+      transferId: null,
+      reversalId: null,
+      message: 'Fare held on platform',
+    }),
+  };
   const config = {
     get: (key: string) => {
       if (key === 'NOTIFY_EMAIL') return 'ops@yopmail.com';
@@ -42,6 +53,7 @@ describe('ExceptionsService rescue candidates + release', () => {
       audit as never,
       notifications as never,
       carrier as never,
+      payments as never,
       config as never,
     );
   }
@@ -231,7 +243,8 @@ describe('ExceptionsService rescue candidates + release', () => {
     expect(result.exception.status).toBe(TripExceptionStatus.RESOLVED_RELISTED);
     expect(result.marketplaceRelease.reListJob).toBe(true);
     expect(result.marketplaceRelease.discountPercent).toBe(10);
-    expect(result.stripeAdjustment?.status).toBe('STUB_NOT_IMPLEMENTED');
+    expect(result.stripeAdjustment?.status).toBe('HELD');
+    expect(payments.adjustForMarketplaceRelease).toHaveBeenCalledWith('job-1');
     expect(jobUpdate).toHaveBeenCalledWith(
       expect.objectContaining({
         where: { id: 'job-1' },
@@ -268,7 +281,7 @@ describe('ExceptionsService rescue candidates + release', () => {
         discountPercent: 10,
         message: 'ok',
       },
-      stripeAdjustment: { status: 'STUB_NOT_IMPLEMENTED', amountCents: null },
+      stripeAdjustment: { status: 'HELD', amountCents: 10000 },
     });
 
     const prisma = {

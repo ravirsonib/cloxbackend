@@ -253,7 +253,73 @@ export class StripeService {
     }
   }
 
-  /** M10/M12 full path — stub for cancel recovery in M7. */
+  /**
+   * Separate charges + transfers (G0-10): move carrier share from platform balance
+   * to Express connected account.
+   */
+  async createTransfer(params: {
+    amountCents: number;
+    destinationAccountId: string;
+    idempotencyKey: string;
+    transferGroup?: string;
+    metadata?: Record<string, string>;
+    currency?: string;
+  }) {
+    const currency = params.currency ?? 'aud';
+    if (this.isMockMode()) {
+      const id = `tr_mock_${params.idempotencyKey.replace(/[^a-z0-9]/gi, '').slice(-20)}`;
+      this.logger.warn(
+        `STRIPE_MOCK: Transfer ${id} amount=${params.amountCents} → ${params.destinationAccountId}`,
+      );
+      return { id, status: 'paid' as const, mock: true as const };
+    }
+    const transfer = await this.getClient().transfers.create(
+      {
+        amount: params.amountCents,
+        currency,
+        destination: params.destinationAccountId,
+        transfer_group: params.transferGroup,
+        metadata: params.metadata,
+      },
+      { idempotencyKey: params.idempotencyKey },
+    );
+    return {
+      id: transfer.id,
+      status: (transfer.reversed ? 'reversed' : 'paid') as 'paid' | 'reversed',
+      mock: false as const,
+    };
+  }
+
+  /** Reverse a Connect Transfer (marketplace release / reassignment). */
+  async createTransferReversal(params: {
+    transferId: string;
+    amountCents?: number;
+    idempotencyKey: string;
+    metadata?: Record<string, string>;
+  }) {
+    if (this.isMockMode() || params.transferId.startsWith('tr_mock_')) {
+      const id = `trr_mock_${params.idempotencyKey.replace(/[^a-z0-9]/gi, '').slice(-18)}`;
+      this.logger.warn(
+        `STRIPE_MOCK: TransferReversal ${id} of ${params.transferId}`,
+      );
+      return { id, status: 'succeeded' as const, mock: true as const };
+    }
+    const reversal = await this.getClient().transfers.createReversal(
+      params.transferId,
+      {
+        amount: params.amountCents,
+        metadata: params.metadata,
+      },
+      { idempotencyKey: params.idempotencyKey },
+    );
+    return {
+      id: reversal.id,
+      status: 'succeeded' as const,
+      mock: false as const,
+    };
+  }
+
+  /** Full refund path (cancel / ACL). Mock when no secret key. */
   async createRefundStub(params: {
     paymentIntentId: string;
     amountCents?: number;

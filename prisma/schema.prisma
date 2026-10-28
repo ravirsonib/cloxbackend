@@ -534,6 +534,7 @@ model Vehicle {
   assignments Assignment[]
   proposals   Proposal[]
   complianceDocuments ComplianceDocument[]
+  proposedOnExceptions TripException[] @relation("ExceptionProposedVehicle")
 
   @@index([companyId, status])
 }
@@ -573,6 +574,7 @@ model Driver {
   assignments Assignment[]
   proposals   Proposal[]
   complianceDocuments ComplianceDocument[]
+  proposedOnExceptions TripException[] @relation("ExceptionProposedDriver")
 
   @@index([companyId, status])
   @@index([inviteTokenHash])
@@ -851,6 +853,13 @@ model Trip {
   breakStartedAt   DateTime?
   startedAt    DateTime?
   completedAt  DateTime?
+  /// M10 — manual odometer (km) at trip start / final dropoff (hourly run sheet)
+  odometerStartKm          Float?
+  odometerEndKm            Float?
+  /// GPS path distance (km) from TripLocationSample chain; used for >10% check
+  odometerGpsDistanceKm    Float?
+  /// True when |odoDelta − gpsKm| / gpsKm > 10% (Super Admin review)
+  odometerDiscrepancyFlag  Boolean  @default(false)
   /// SOG POD metadata refs (blob keys) — evidence validation in M9/M10
   podStorageKey String?
   podCapturedAt DateTime?
@@ -886,6 +895,8 @@ enum TripExceptionStatus {
   OPEN
   AWAITING_CARRIER
   REASSIGN_IN_PROGRESS
+  /// Carrier proposed replacement crew — waiting for sender Approve/Reject
+  AWAITING_SENDER_APPROVAL
   ESCALATED
   RESOLVED_REASSIGNED
   RESOLVED_CONTINUED
@@ -929,6 +940,13 @@ model TripException {
   photoDocumentId  String?
   /// M10 Phase D — driver breakdown / exception report PDF
   breakdownPdfStorageKey String?
+  /// Propose-then-commit replacement (awaiting sender approval)
+  proposedVehicleId String?
+  proposedVehicle   Vehicle? @relation("ExceptionProposedVehicle", fields: [proposedVehicleId], references: [id], onDelete: SetNull)
+  proposedDriverId  String?
+  proposedDriver    Driver?  @relation("ExceptionProposedDriver", fields: [proposedDriverId], references: [id], onDelete: SetNull)
+  proposedAt        DateTime?
+  proposedByUserId  String?
   openedAt         DateTime            @default(now())
   escalatedAt      DateTime?
   resolvedAt       DateTime?

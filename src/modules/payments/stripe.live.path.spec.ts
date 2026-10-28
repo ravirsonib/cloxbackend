@@ -17,6 +17,7 @@ jest.mock('stripe', () => {
       cancel: jest.fn(),
     },
     refunds: { create: jest.fn() },
+    transfers: { create: jest.fn(), createReversal: jest.fn() },
     webhooks: { constructEvent: jest.fn() },
   };
   const StripeCtor = jest.fn().mockImplementation(() => instance);
@@ -51,6 +52,7 @@ function stripeMock() {
     accountLinks: { create: jest.Mock };
     paymentIntents: { create: jest.Mock; retrieve: jest.Mock; cancel: jest.Mock };
     refunds: { create: jest.Mock };
+    transfers: { create: jest.Mock; createReversal: jest.Mock };
     webhooks: { constructEvent: jest.Mock };
   } }).__instance;
 }
@@ -233,5 +235,53 @@ describe('StripeService live SDK paths (mocked Stripe client)', () => {
     await expect(svc.retrievePaymentIntentStatus('pi_mock_x')).resolves.toBe('succeeded');
     await expect(svc.cancelPaymentIntent('pi_mock_x')).resolves.toBeUndefined();
     expect(stripeMock().paymentIntents.cancel).not.toHaveBeenCalled();
+  });
+
+  it('live createTransfer to connected account', async () => {
+    const api = stripeMock();
+    api.transfers.create.mockResolvedValue({ id: 'tr_live_1', reversed: false });
+    const svc = new StripeService(liveConfig());
+    await expect(
+      svc.createTransfer({
+        amountCents: 7000,
+        destinationAccountId: 'acct_1',
+        idempotencyKey: 'carrier-transfer:job:line',
+        transferGroup: 'job',
+        metadata: { jobId: 'job' },
+      }),
+    ).resolves.toEqual({ id: 'tr_live_1', status: 'paid', mock: false });
+    expect(api.transfers.create).toHaveBeenCalled();
+  });
+
+  it('live createTransferReversal', async () => {
+    const api = stripeMock();
+    api.transfers.createReversal.mockResolvedValue({ id: 'trr_live_1' });
+    const svc = new StripeService(liveConfig());
+    await expect(
+      svc.createTransferReversal({
+        transferId: 'tr_live_1',
+        amountCents: 7000,
+        idempotencyKey: 'transfer-reversal:job:tr_live_1',
+        metadata: { jobId: 'job', reason: 'marketplace_release' },
+      }),
+    ).resolves.toEqual({ id: 'trr_live_1', status: 'succeeded', mock: false });
+    expect(api.transfers.createReversal).toHaveBeenCalledWith(
+      'tr_live_1',
+      expect.objectContaining({ amount: 7000 }),
+      expect.objectContaining({ idempotencyKey: 'transfer-reversal:job:tr_live_1' }),
+    );
+  });
+
+  it('tr_mock_ ids short-circuit createTransferReversal even with live config', async () => {
+    const api = stripeMock();
+    const svc = new StripeService(liveConfig());
+    const reversal = await svc.createTransferReversal({
+      transferId: 'tr_mock_x',
+      amountCents: 100,
+      idempotencyKey: 'transfer-reversal:job:tr_mock_x',
+    });
+    expect(reversal.mock).toBe(true);
+    expect(reversal.id.startsWith('trr_mock_')).toBe(true);
+    expect(api.transfers.createReversal).not.toHaveBeenCalled();
   });
 });

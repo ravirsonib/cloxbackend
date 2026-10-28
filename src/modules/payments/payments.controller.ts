@@ -104,6 +104,20 @@ export class PaymentsController {
     return this.payments.getJobPaymentStatus(principal, jobId);
   }
 
+  @Post('jobs/:jobId/sync')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(AppRole.SENDER)
+  @ApiOperation({
+    summary: 'Sync PaymentIntent from Stripe after SCA (lock if succeeded)',
+  })
+  syncJobPayment(
+    @CurrentPrincipal() principal: AuthenticatedPrincipal,
+    @Param('jobId') jobId: string,
+  ) {
+    return this.payments.syncJobPayment(principal, jobId);
+  }
+
   @Get('assignments')
   @ApiBearerAuth()
   @UseGuards(JwtAuthGuard, RolesGuard)

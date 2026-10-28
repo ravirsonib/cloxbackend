@@ -3,6 +3,7 @@ import {
   ForbiddenException,
   Inject,
   Injectable,
+  Logger,
   NotFoundException,
   ServiceUnavailableException,
   forwardRef,
@@ -12,11 +13,20 @@ import {
   AssignmentStatus,
   JobPricingModel,
   JobStatus,
+  Prisma,
   SurchargeKind,
   SurchargeStatus,
   TripStatus,
   VehicleStatus,
 } from '@prisma/client';
+
+/** Scalar odometer fields on Trip (avoid stale IDE Prisma payload gaps mid-migrate). */
+type TripOdometerFields = {
+  odometerStartKm: number | null;
+  odometerEndKm: number | null;
+  odometerGpsDistanceKm: number | null;
+  odometerDiscrepancyFlag: boolean;
+};
 import type { AuthenticatedPrincipal } from '../../common/guards/jwt-auth.guard';
 import type { AppEnv } from '../../config/env.validation';
 import {
@@ -72,6 +82,8 @@ import { extname, join } from 'path';
 
 @Injectable()
 export class TripsService {
+  private readonly logger = new Logger(TripsService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
@@ -249,6 +261,84 @@ export class TripsService {
     }
   }
 
+  private asTripOdometer(trip: object): TripOdometerFields {
+    const row = trip as Partial<TripOdometerFields>;
+    return {
+      odometerStartKm: row.odometerStartKm ?? null,
+      odometerEndKm: row.odometerEndKm ?? null,
+      odometerGpsDistanceKm: row.odometerGpsDistanceKm ?? null,
+      odometerDiscrepancyFlag: Boolean(row.odometerDiscrepancyFlag),
+    };
+  }
+
+  /** Sum consecutive haversine segments (km) from location pings, oldest → newest. */
+  private async gpsPathDistanceKm(tripId: string): Promise<number> {
+    const samples = await this.prisma.tripLocationSample.findMany({
+      where: { tripId },
+      orderBy: { recordedAt: 'asc' },
+      select: { lat: true, lng: true },
+      take: 5_000,
+    });
+    if (samples.length < 2) return 0;
+    let meters = 0;
+    for (let i = 1; i < samples.length; i++) {
+      const aLat = Number(samples[i - 1].lat);
+      const aLng = Number(samples[i - 1].lng);
+      const bLat = Number(samples[i].lat);
+      const bLng = Number(samples[i].lng);
+      meters += haversineMeters(aLat, aLng, bLat, bLng);
+    }
+    return meters / 1000;
+  }
+
+  /**
+   * Persist end odometer on last dropoff finalize; flag Super Admin when
+   * |odoDelta − gpsKm| / gpsKm > 10% (clox-run-sheet.md).
+   */
+  private async captureEndOdometer(params: {
+    tripId: string;
+    actorUserId: string;
+    odometerStartKm: number | null | undefined;
+    odometerEndKm: number;
+  }) {
+    const startKm = params.odometerStartKm;
+    if (startKm != null && params.odometerEndKm < startKm) {
+      throw new BadRequestException(
+        'End odometer must be greater than or equal to start odometer',
+      );
+    }
+    const gpsKm = await this.gpsPathDistanceKm(params.tripId);
+    const odoDelta =
+      startKm != null ? params.odometerEndKm - startKm : null;
+    let discrepancy = false;
+    if (odoDelta != null && gpsKm >= 1) {
+      discrepancy = Math.abs(odoDelta - gpsKm) / gpsKm > 0.1;
+    }
+    await this.prisma.trip.update({
+      where: { id: params.tripId },
+      data: {
+        odometerEndKm: params.odometerEndKm,
+        odometerGpsDistanceKm: gpsKm > 0 ? gpsKm : null,
+        odometerDiscrepancyFlag: discrepancy,
+      } as Prisma.TripUncheckedUpdateInput,
+    });
+    if (discrepancy) {
+      await this.audit.recordPlatform({
+        action: AuditAction.TRIP_ODOMETER_DISCREPANCY,
+        actorUserId: params.actorUserId,
+        entityType: 'Trip',
+        entityId: params.tripId,
+        metadata: {
+          odometerStartKm: startKm,
+          odometerEndKm: params.odometerEndKm,
+          odoDeltaKm: odoDelta,
+          gpsKm,
+          threshold: '10%',
+        },
+      });
+    }
+  }
+
   /**
    * POD is only allowed after pending surcharges are cleared.
    * Tries to settle deferred WAITING first; any remaining PENDING_PAYMENT blocks POD.
@@ -331,6 +421,10 @@ export class TripsService {
     breakStartedAt: Date | null;
     startedAt: Date | null;
     completedAt: Date | null;
+    odometerStartKm?: number | null;
+    odometerEndKm?: number | null;
+    odometerGpsDistanceKm?: number | null;
+    odometerDiscrepancyFlag?: boolean;
     podStorageKey?: string | null;
     taxInvoiceStorageKey?: string | null;
     runSheetStorageKey?: string | null;
@@ -441,6 +535,10 @@ export class TripsService {
           : 15,
       startedAt: trip.startedAt,
       completedAt: trip.completedAt,
+      odometerStartKm: trip.odometerStartKm ?? null,
+      odometerEndKm: trip.odometerEndKm ?? null,
+      odometerGpsDistanceKm: trip.odometerGpsDistanceKm ?? null,
+      odometerDiscrepancyFlag: Boolean(trip.odometerDiscrepancyFlag),
       podStorageKey: trip.podStorageKey ?? null,
       taxInvoiceStorageKey: trip.taxInvoiceStorageKey ?? null,
       runSheetStorageKey: trip.runSheetStorageKey ?? null,
@@ -539,8 +637,14 @@ export class TripsService {
   }
 
   /** M10 — scoped POD package status for driver / sender / carrier. */
-  async getTripPod(principal: AuthenticatedPrincipal, tripId: string) {
-    this.ensureDatabase();
+  /**
+   * ACL for trip POD / completion documents (M10 §11):
+   * assigned driver · sender company · assigned carrier · admin.
+   */
+  private async loadTripForDocumentAccess(
+    principal: AuthenticatedPrincipal,
+    tripId: string,
+  ) {
     const trip = await this.prisma.trip.findUnique({
       where: { id: tripId },
       include: {
@@ -581,6 +685,13 @@ export class TripsService {
       throw new ForbiddenException();
     }
 
+    return trip;
+  }
+
+  async getTripPod(principal: AuthenticatedPrincipal, tripId: string) {
+    this.ensureDatabase();
+    const trip = await this.loadTripForDocumentAccess(principal, tripId);
+
     const byStop = new Map(trip.stopProgress.map((p) => [p.jobStopId, p]));
     const dropoffs = trip.job.stops
       .filter((s) => s.stopType === 'DROPOFF')
@@ -609,7 +720,92 @@ export class TripsService {
       podStorageKey: trip.podStorageKey,
       taxInvoiceStorageKey: trip.taxInvoiceStorageKey,
       runSheetStorageKey: trip.runSheetStorageKey,
-      dropoffs,
+      /** Relative download paths for authenticated GET (M10 PDF ACL). */
+      downloads: {
+        pod: trip.podStorageKey ? `trips/${trip.id}/documents/pod` : null,
+        taxInvoice: trip.taxInvoiceStorageKey
+          ? `trips/${trip.id}/documents/tax-invoice`
+          : null,
+        runSheet: trip.runSheetStorageKey
+          ? `trips/${trip.id}/documents/run-sheet`
+          : null,
+      },
+      dropoffs: dropoffs.map((d) => ({
+        ...d,
+        downloads: {
+          podPackage: d.podPackageStorageKey
+            ? `trips/${trip.id}/documents/stops/${d.jobStopId}/pod-package`
+            : null,
+          signaturePdf: d.signaturePdfStorageKey
+            ? `trips/${trip.id}/documents/stops/${d.jobStopId}/signature-pdf`
+            : null,
+        },
+      })),
+    };
+  }
+
+  /**
+   * Stream a completion / POD PDF blob with party ACL (sender / carrier / driver / admin).
+   */
+  async getTripDocument(
+    principal: AuthenticatedPrincipal,
+    tripId: string,
+    kind: 'pod' | 'tax-invoice' | 'run-sheet' | 'pod-package' | 'signature-pdf',
+    jobStopId?: string,
+  ): Promise<{ stream: ReadStream; mimeType: string; filename: string }> {
+    this.ensureDatabase();
+    const trip = await this.loadTripForDocumentAccess(principal, tripId);
+
+    let storageKey: string | null = null;
+    let filename = 'document.pdf';
+
+    if (kind === 'pod') {
+      storageKey = trip.podStorageKey;
+      filename = `CLOX-pod-${trip.jobId.slice(0, 8)}.pdf`;
+    } else if (kind === 'tax-invoice') {
+      storageKey = trip.taxInvoiceStorageKey;
+      filename = `CLOX-tax-invoice-${trip.jobId.slice(0, 8)}.pdf`;
+    } else if (kind === 'run-sheet') {
+      storageKey = trip.runSheetStorageKey;
+      filename = `CLOX-run-sheet-${trip.jobId.slice(0, 8)}.pdf`;
+    } else {
+      if (!jobStopId) {
+        throw new BadRequestException('jobStopId required for stop document');
+      }
+      const stop = trip.job.stops.find((s) => s.id === jobStopId);
+      if (!stop || stop.stopType !== 'DROPOFF') {
+        throw new NotFoundException('POD stop not found');
+      }
+      const progress = trip.stopProgress.find((p) => p.jobStopId === jobStopId);
+      if (!progress) throw new NotFoundException('POD progress not found');
+      if (kind === 'pod-package') {
+        storageKey = progress.podPackageStorageKey;
+        filename = `CLOX-pod-package-${jobStopId.slice(0, 8)}.pdf`;
+      } else {
+        storageKey = progress.signaturePdfStorageKey;
+        filename = `CLOX-signature-${jobStopId.slice(0, 8)}.pdf`;
+      }
+    }
+
+    if (
+      !storageKey ||
+      storageKey.includes('..') ||
+      !storageKey.startsWith(`trips/${trip.id}/`)
+    ) {
+      throw new NotFoundException('Document not found');
+    }
+
+    const fullPath = join(this.storageRoot(), storageKey);
+    try {
+      await access(fullPath);
+    } catch {
+      throw new NotFoundException('Document file missing from storage');
+    }
+
+    return {
+      stream: createReadStream(fullPath),
+      mimeType: 'application/pdf',
+      filename,
     };
   }
 
@@ -911,7 +1107,8 @@ export class TripsService {
           status: TripStatus.IN_TRANSIT,
           startedAt: new Date(),
           onBreak: false,
-        },
+          odometerStartKm: input.odometerStartKm,
+        } as Prisma.TripUncheckedUpdateInput,
         include: this.tripInclude(),
       });
       await tx.job.update({
@@ -926,6 +1123,7 @@ export class TripsService {
       actorUserId: user.id,
       entityType: 'Trip',
       entityId: trip.id,
+      metadata: { odometerStartKm: input.odometerStartKm },
     });
     await this.audit.recordPlatform({
       action: AuditAction.PUSH_STUB,
@@ -1195,8 +1393,8 @@ export class TripsService {
   }
 
   /**
-   * Mark trip/job/assignment COMPLETED when every DROPOFF POD is FINALIZED.
-   * POD is the operational end of the trip (geofence exit not required).
+   * Mark trip/job/assignment COMPLETED when P8 gates clear:
+   * every stop geofence-done (arrivalRecorded + exitedAt) AND every DROPOFF POD FINALIZED.
    * Pending surcharges are gated at POD capture — by the time POD is FINALIZED
    * they should already be paid/waived.
    */
@@ -1214,6 +1412,12 @@ export class TripsService {
     if (trip.job.stops.length < 1) return;
 
     const byStop = new Map(trip.stopProgress.map((p) => [p.jobStopId, p]));
+    const geofenceDone = trip.job.stops.every((s) => {
+      const p = byStop.get(s.id);
+      return Boolean(p?.arrivalRecorded && p.exitedAt);
+    });
+    if (!geofenceDone) return;
+
     const dropoffs = trip.job.stops.filter((s) => s.stopType === 'DROPOFF');
     if (dropoffs.length < 1) return;
     const dropoffsReady = dropoffs.every(
@@ -1254,6 +1458,20 @@ export class TripsService {
       await this.generateCompletionDocuments(trip.id, actorUserId);
     } catch {
       // Completion must not roll back if PDF/email fails.
+    }
+
+    // M12 — carrier Transfer after clearing (0 days = immediate in local/test).
+    try {
+      const result = await this.payments.tryDisburseCarrierTransfer(trip.jobId);
+      if (result.transferred) {
+        this.logger.log(
+          `Carrier transfer job=${trip.jobId} transfer=${result.transferId} mock=${result.mock}`,
+        );
+      }
+    } catch (err) {
+      this.logger.warn(
+        `Carrier transfer skipped job=${trip.jobId}: ${err instanceof Error ? err.message : String(err)}`,
+      );
     }
   }
 
@@ -1513,7 +1731,24 @@ export class TripsService {
               rows: tableRows,
             },
             paragraphs: [
-              'Odometer: not captured (manual input pending).',
+              (() => {
+                const odo = this.asTripOdometer(trip);
+                const start = odo.odometerStartKm;
+                const end = odo.odometerEndKm;
+                const gps = odo.odometerGpsDistanceKm;
+                const delta =
+                  start != null && end != null ? (end - start).toFixed(1) : null;
+                const parts = [
+                  `Start odometer: ${start != null ? `${start} km` : 'not captured'}`,
+                  `End odometer: ${end != null ? `${end} km` : 'not captured'}`,
+                  delta != null ? `Odo distance: ${delta} km` : null,
+                  gps != null ? `GPS path: ${gps.toFixed(1)} km` : null,
+                  odo.odometerDiscrepancyFlag
+                    ? 'FLAG: odometer vs GPS discrepancy > 10% — Super Admin review'
+                    : null,
+                ].filter(Boolean);
+                return parts.join(' | ');
+              })(),
             ],
           },
           {
@@ -1703,17 +1938,20 @@ export class TripsService {
         message: 'Tracking visible only after Trip_Started',
         code: 'TRACKING_NOT_LIVE',
         jobId,
+        tripId: trip.id,
         tripStatus: trip.status,
         stopsProgress: this.mapStopProgress(trip.stopProgress),
         surcharges: this.mapSurcharges(trip.surcharges),
         taxInvoiceStorageKey: trip.taxInvoiceStorageKey,
         runSheetStorageKey: trip.runSheetStorageKey,
+        podStorageKey: trip.podStorageKey,
       };
     }
 
     const samples = trip.onBreak ? [] : trip.locations;
     return {
       visible: true,
+      tripId: trip.id,
       onBreak: trip.onBreak,
       etaPaused: trip.onBreak,
       tripStatus: trip.status,
@@ -1745,6 +1983,7 @@ export class TripsService {
       surcharges: this.mapSurcharges(trip.surcharges),
       taxInvoiceStorageKey: trip.taxInvoiceStorageKey,
       runSheetStorageKey: trip.runSheetStorageKey,
+      podStorageKey: trip.podStorageKey,
     };
   }
 
@@ -2257,6 +2496,30 @@ export class TripsService {
       : [];
     if (photos.length < 1) {
       throw new BadRequestException('At least one goods photo is required');
+    }
+
+    const dropoffs = (trip.job.stops ?? []).filter((s) => s.stopType === 'DROPOFF');
+    const alreadyFinalized = new Set(
+      (trip.stopProgress ?? [])
+        .filter((p) => p.podStatus === 'FINALIZED')
+        .map((p) => p.jobStopId),
+    );
+    const remainingOther = dropoffs.filter(
+      (s) => s.id !== stop.id && !alreadyFinalized.has(s.id),
+    );
+    const isLastDropoff = remainingOther.length === 0;
+    if (isLastDropoff) {
+      if (input.odometerEndKm == null) {
+        throw new BadRequestException(
+          'Final odometer reading (km) is required on the last dropoff',
+        );
+      }
+      await this.captureEndOdometer({
+        tripId: trip.id,
+        actorUserId: user.id,
+        odometerStartKm: this.asTripOdometer(trip).odometerStartKm,
+        odometerEndKm: input.odometerEndKm,
+      });
     }
 
     const parties = await this.resolveNotifyParties(trip.id, stop.id);

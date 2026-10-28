@@ -88,7 +88,7 @@ prisma as never,
       service.startByJobId(
         { ...driverPrincipal, role: 'SENDER', id: 'user-sender' },
         'job-1',
-        { online: true },
+        { online: true, odometerStartKm: 12000 },
       ),
     ).rejects.toBeInstanceOf(ForbiddenException);
   });
@@ -140,6 +140,7 @@ prisma as never,
 
     const result = await makeService(prisma).startByJobId(driverPrincipal, 'job-1', {
       online: true,
+      odometerStartKm: 12000,
     });
     expect(result.status).toBe(TripStatus.IN_TRANSIT);
     expect(audit.recordPlatform).toHaveBeenCalled();
@@ -157,7 +158,7 @@ prisma as never,
       trip: { findFirst: jest.fn().mockResolvedValue(null) },
     };
     await expect(
-      makeService(prisma).startByJobId(driverPrincipal, 'job-missing', { online: true }),
+      makeService(prisma).startByJobId(driverPrincipal, 'job-missing', { online: true, odometerStartKm: 12000 }),
     ).rejects.toBeInstanceOf(NotFoundException);
   });
 });

@@ -299,6 +299,7 @@ export class JobsService {
             TripExceptionStatus.OPEN,
             TripExceptionStatus.AWAITING_CARRIER,
             TripExceptionStatus.REASSIGN_IN_PROGRESS,
+            TripExceptionStatus.AWAITING_SENDER_APPROVAL,
             TripExceptionStatus.ESCALATED,
           ],
         },
@@ -312,6 +313,23 @@ export class JobsService {
         note: true,
         openedAt: true,
         escalatedAt: true,
+        proposedVehicleId: true,
+        proposedDriverId: true,
+        proposedAt: true,
+        proposedVehicle: {
+          select: {
+            id: true,
+            registration: true,
+            label: true,
+            vehicleClass: true,
+          },
+        },
+        proposedDriver: {
+          select: {
+            id: true,
+            user: { select: { email: true, name: true } },
+          },
+        },
       },
     });
     const mapped = this.mapJob(job);
@@ -346,6 +364,17 @@ export class JobsService {
             note: openException.note,
             openedAt: openException.openedAt,
             escalatedAt: openException.escalatedAt,
+            proposedVehicleId: openException.proposedVehicleId,
+            proposedDriverId: openException.proposedDriverId,
+            proposedAt: openException.proposedAt,
+            proposedVehicle: openException.proposedVehicle,
+            proposedDriver: openException.proposedDriver
+              ? {
+                  id: openException.proposedDriver.id,
+                  email: openException.proposedDriver.user?.email ?? null,
+                  name: openException.proposedDriver.user?.name ?? null,
+                }
+              : null,
           }
         : null,
     };

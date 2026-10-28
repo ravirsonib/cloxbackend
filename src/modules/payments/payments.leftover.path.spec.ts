@@ -45,6 +45,11 @@ describe('PaymentsService leftover list/pay/refund/fail paths', () => {
     createPaymentIntent: jest.fn(),
     cancelPaymentIntent: jest.fn().mockResolvedValue(undefined),
     createRefundStub: jest.fn().mockResolvedValue({ id: 're_1', mock: true }),
+    createTransferReversal: jest.fn().mockResolvedValue({
+      id: 'trr_1',
+      status: 'succeeded',
+      mock: true,
+    }),
     publishableKey: jest.fn().mockReturnValue('pk_test'),
     isMockMode: jest.fn().mockReturnValue(true),
   };
@@ -350,6 +355,16 @@ describe('PaymentsService leftover list/pay/refund/fail paths', () => {
 
   describe('refundStub', () => {
     it('records refund stub for succeeded charge', async () => {
+      const charge = {
+        id: 'pe-1',
+        stripePaymentIntentId: 'pi_1',
+        type: PaymentEventType.CHARGE,
+        status: PaymentEventStatus.SUCCEEDED,
+        amountExGstCents: 10000,
+        amountGstCents: 1000,
+        amountIncGstCents: 11000,
+        currency: 'aud',
+      };
       const prisma = {
         isConnected: () => true,
         user: {
@@ -362,13 +377,17 @@ describe('PaymentsService leftover list/pay/refund/fail paths', () => {
           findFirst: jest.fn().mockResolvedValue({ id: 'job-1' }),
         },
         paymentEvent: {
-          findFirst: jest.fn().mockResolvedValue({
-            id: 'pe-1',
-            stripePaymentIntentId: 'pi_1',
-            type: PaymentEventType.CHARGE,
-            status: PaymentEventStatus.SUCCEEDED,
-          }),
+          // adjust: charge, priorRev, transfer; refund: charge, existingRefund
+          findFirst: jest
+            .fn()
+            .mockResolvedValueOnce(charge)
+            .mockResolvedValueOnce(null)
+            .mockResolvedValueOnce(null)
+            .mockResolvedValueOnce(charge)
+            .mockResolvedValueOnce(null),
+          create: jest.fn().mockResolvedValue({ id: 'pe-refund' }),
         },
+        settlementLine: { updateMany: jest.fn().mockResolvedValue({ count: 0 }) },
       };
       const service = makeService(prisma);
       const result = await service.refundStub(senderPrincipal, 'job-1');
@@ -391,6 +410,7 @@ describe('PaymentsService leftover list/pay/refund/fail paths', () => {
         },
         job: { findFirst: jest.fn().mockResolvedValue({ id: 'job-1' }) },
         paymentEvent: { findFirst: jest.fn().mockResolvedValue(null) },
+        settlementLine: { updateMany: jest.fn() },
       };
       const service = makeService(prisma);
       await expect(
@@ -430,6 +450,7 @@ describe('PaymentsService leftover list/pay/refund/fail paths', () => {
         },
         paymentEvent: {
           findUnique: jest.fn().mockResolvedValue(null),
+          findFirst: jest.fn().mockResolvedValue(null),
           update: jest.fn(),
           delete: jest.fn(),
         },

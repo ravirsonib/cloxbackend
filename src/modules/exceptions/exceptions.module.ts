@@ -5,6 +5,7 @@ import { RolesGuard } from '../../common/guards/roles.guard';
 import { AuditModule } from '../audit/audit.module';
 import { CarrierModule } from '../carrier/carrier.module';
 import { NotificationsModule } from '../notifications/notifications.module';
+import { PaymentsModule } from '../payments/payments.module';
 import { ExceptionEscalationWatchdog } from './exception-escalation.watchdog';
 import { ExceptionsController } from './exceptions.controller';
 import { ExceptionsService } from './exceptions.service';
@@ -14,6 +15,7 @@ import { ExceptionsService } from './exceptions.service';
     JwtModule.register({}),
     AuditModule,
     NotificationsModule,
+    PaymentsModule,
     forwardRef(() => CarrierModule),
   ],
   controllers: [ExceptionsController],

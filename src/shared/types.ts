@@ -156,11 +156,17 @@ export const AuditAction = {
   PAYMENT_INTENT_CREATED: 'payment.intent_created',
   PAYMENT_SUCCEEDED: 'payment.succeeded',
   PAYMENT_FAILED: 'payment.failed',
+  PAYMENT_TRANSFER_CREATED: 'payment.transfer_created',
+  PAYMENT_TRANSFER_REVERSED: 'payment.transfer_reversed',
+  PAYMENT_REFUND_CREATED: 'payment.refund_created',
   ASSIGNMENT_LOCKED: 'assignment.locked',
   ASSIGNMENT_REASSIGNED: 'assignment.reassigned',
   EXCEPTION_OPENED: 'exception.opened',
   EXCEPTION_NOTIFIED: 'exception.notified',
   EXCEPTION_REASSIGNED: 'exception.reassigned',
+  EXCEPTION_REPLACEMENT_PROPOSED: 'exception.replacement_proposed',
+  EXCEPTION_REPLACEMENT_APPROVED: 'exception.replacement_approved',
+  EXCEPTION_REPLACEMENT_REJECTED: 'exception.replacement_rejected',
   EXCEPTION_ESCALATED: 'exception.escalated',
   EXCEPTION_RELEASED: 'exception.released',
   EXCEPTION_RESOLVED: 'exception.resolved',
@@ -173,6 +179,7 @@ export const AuditAction = {
   TRIP_SAFETY_FAILED: 'trip.safety_failed',
   TRIP_MASS_CHECKED: 'trip.mass_checked',
   TRIP_STARTED: 'trip.started',
+  TRIP_ODOMETER_DISCREPANCY: 'trip.odometer_discrepancy',
   TRIP_BREAK_TOGGLED: 'trip.break_toggled',
   TRIP_LOCATION: 'trip.location',
   TRIP_GEOFENCE_ENTER: 'trip.geofence_enter',
@@ -1099,13 +1106,21 @@ export const tripExceptionOpenSchema = z
   });
 export type TripExceptionOpenInput = z.infer<typeof tripExceptionOpenSchema>;
 
-/** Carrier resolves exception via intra-fleet reassign. */
+/** Carrier proposes intra-fleet replacement (sender must approve). */
 export const tripExceptionReassignSchema = z.object({
   vehicleId: z.string().uuid(),
   driverId: z.string().uuid(),
   note: z.string().trim().max(2000).optional(),
 });
 export type TripExceptionReassignInput = z.infer<typeof tripExceptionReassignSchema>;
+
+/** Sender approves or rejects a proposed replacement. */
+export const tripExceptionSenderDecisionSchema = z.object({
+  note: z.string().trim().max(2000).optional(),
+});
+export type TripExceptionSenderDecisionInput = z.infer<
+  typeof tripExceptionSenderDecisionSchema
+>;
 
 /** Carrier: repair & continue (no crew swap). */
 export const tripExceptionContinueSchema = z.object({
@@ -1399,6 +1414,8 @@ export type TripMassCheckInput = z.infer<typeof tripMassCheckSchema>;
 
 export const tripStartSchema = z.object({
   online: z.literal(true),
+  /** Manual start odometer (km) — required for run sheet / odo vs GPS check. */
+  odometerStartKm: z.number().positive().max(9_999_999),
 });
 
 export type TripStartInput = z.infer<typeof tripStartSchema>;
@@ -1444,6 +1461,11 @@ export type TripPodPhotoInput = z.infer<typeof tripPodPhotoSchema>;
 
 export const tripPodFinalizeSchema = z.object({
   jobStopId: z.string().uuid(),
+  /**
+   * Manual end odometer (km) — required when this is the last dropoff to finalize
+   * (run sheet + >10% GPS variance flag).
+   */
+  odometerEndKm: z.number().positive().max(9_999_999).optional(),
 });
 
 export type TripPodFinalizeInput = z.infer<typeof tripPodFinalizeSchema>;

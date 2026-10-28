@@ -42,6 +42,7 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { CarrierService } from '../carrier/carrier.service';
 import { NotificationsService } from '../notifications/notifications.service';
+import { PaymentsService } from '../payments/payments.service';
 import {
   buildBrandedPdf,
   loadCloxLogoBuffer,
@@ -84,6 +85,7 @@ export class ExceptionsService {
     private readonly audit: AuditService,
     private readonly notifications: NotificationsService,
     private readonly carrier: CarrierService,
+    private readonly payments: PaymentsService,
     private readonly config: ConfigService<AppEnv, true>,
   ) {}
 
@@ -109,6 +111,10 @@ export class ExceptionsService {
     gpsLng: number | null;
     photoDocumentId: string | null;
     breakdownPdfStorageKey?: string | null;
+    proposedVehicleId?: string | null;
+    proposedDriverId?: string | null;
+    proposedAt?: Date | null;
+    proposedByUserId?: string | null;
     openedAt: Date;
     escalatedAt: Date | null;
     resolvedAt: Date | null;
@@ -125,6 +131,16 @@ export class ExceptionsService {
         id: string;
         user?: { email: string; name: string | null } | null;
       } | null;
+    } | null;
+    proposedVehicle?: {
+      id: string;
+      registration: string | null;
+      label: string | null;
+      vehicleClass: string | null;
+    } | null;
+    proposedDriver?: {
+      id: string;
+      user?: { email: string; name: string | null } | null;
     } | null;
   }) {
     return {
@@ -143,6 +159,10 @@ export class ExceptionsService {
       gpsLng: row.gpsLng,
       photoDocumentId: row.photoDocumentId,
       breakdownPdfStorageKey: row.breakdownPdfStorageKey ?? null,
+      proposedVehicleId: row.proposedVehicleId ?? null,
+      proposedDriverId: row.proposedDriverId ?? null,
+      proposedAt: row.proposedAt ?? null,
+      proposedByUserId: row.proposedByUserId ?? null,
       openedAt: row.openedAt,
       escalatedAt: row.escalatedAt,
       resolvedAt: row.resolvedAt,
@@ -161,6 +181,21 @@ export class ExceptionsService {
             id: row.assignment.driver.id,
             email: row.assignment.driver.user?.email ?? null,
             name: row.assignment.driver.user?.name ?? null,
+          }
+        : null,
+      proposedVehicle: row.proposedVehicle
+        ? {
+            id: row.proposedVehicle.id,
+            registration: row.proposedVehicle.registration,
+            label: row.proposedVehicle.label,
+            vehicleClass: row.proposedVehicle.vehicleClass,
+          }
+        : null,
+      proposedDriver: row.proposedDriver
+        ? {
+            id: row.proposedDriver.id,
+            email: row.proposedDriver.user?.email ?? null,
+            name: row.proposedDriver.user?.name ?? null,
           }
         : null,
     };
@@ -187,6 +222,20 @@ export class ExceptionsService {
               user: { select: { email: true, name: true } },
             },
           },
+        },
+      },
+      proposedVehicle: {
+        select: {
+          id: true,
+          registration: true,
+          label: true,
+          vehicleClass: true,
+        },
+      },
+      proposedDriver: {
+        select: {
+          id: true,
+          user: { select: { email: true, name: true } },
         },
       },
     };
@@ -445,11 +494,11 @@ export class ExceptionsService {
               {
                 vehicleId: rescue.recommended.vehicleId,
                 driverId: rescue.recommended.driverId,
-                note: 'Auto-reassigned: single eligible crew',
+                note: 'Auto-proposed: single eligible crew',
               },
             );
             exceptionRow = auto.exception;
-            autoReassigned = true;
+            autoReassigned = true; // proposed → AWAITING_SENDER_APPROVAL
           }
         }
       } catch {
@@ -508,6 +557,15 @@ export class ExceptionsService {
       if (!user?.companyId || user.companyId !== row.companyId) {
         throw new ForbiddenException();
       }
+    } else if (principal.kind === 'user' && principal.role === 'SENDER') {
+      const user = await this.prisma.user.findUnique({ where: { id: principal.id } });
+      const job = await this.prisma.job.findUnique({
+        where: { id: row.jobId },
+        select: { senderCompanyId: true },
+      });
+      if (!user?.companyId || !job || user.companyId !== job.senderCompanyId) {
+        throw new ForbiddenException();
+      }
     } else if (principal.kind === 'user' && principal.role === 'DRIVER') {
       if (row.reportedByUserId !== principal.id) {
         const driver = await this.prisma.driver.findUnique({
@@ -536,6 +594,10 @@ export class ExceptionsService {
     };
   }
 
+  /**
+   * Carrier proposes replacement crew — does NOT swap assignment until sender approves.
+   * Re-propose while AWAITING_SENDER_APPROVAL overwrites the pending proposal.
+   */
   async reassign(
     principal: AuthenticatedPrincipal,
     id: string,
@@ -568,8 +630,6 @@ export class ExceptionsService {
         },
         assignment: {
           include: {
-            driver: { include: { user: { select: { email: true, name: true } } } },
-            vehicle: { select: { registration: true, label: true } },
             carrierCompany: {
               select: {
                 email: true,
@@ -593,23 +653,156 @@ export class ExceptionsService {
     if (!user?.companyId || user.companyId !== row.companyId) {
       throw new ForbiddenException();
     }
-    if (!OPEN_STATUSES.includes(row.status)) {
+    const canPropose =
+      OPEN_STATUSES.includes(row.status) ||
+      row.status === TripExceptionStatus.AWAITING_SENDER_APPROVAL;
+    if (!canPropose) {
       throw new BadRequestException('Exception is already resolved');
     }
+
+    const vehicle = await this.prisma.vehicle.findFirst({
+      where: {
+        id: input.vehicleId,
+        companyId: row.companyId,
+        status: VehicleStatus.ACTIVE,
+      },
+      select: { id: true, registration: true, label: true, vehicleClass: true },
+    });
+    if (!vehicle) {
+      throw new BadRequestException({
+        message: 'Active vehicle required',
+        code: 'VEHICLE_NOT_ACTIVE',
+      });
+    }
+    const driver = await this.prisma.driver.findFirst({
+      where: {
+        id: input.driverId,
+        companyId: row.companyId,
+        status: DriverStatus.ACTIVE,
+      },
+      include: { user: { select: { email: true, name: true } } },
+    });
+    if (!driver) {
+      throw new BadRequestException({
+        message: 'Active driver required',
+        code: 'DRIVER_NOT_ACTIVE',
+      });
+    }
+
+    const proposed = await this.prisma.tripException.update({
+      where: { id },
+      data: {
+        status: TripExceptionStatus.AWAITING_SENDER_APPROVAL,
+        proposedVehicleId: input.vehicleId,
+        proposedDriverId: input.driverId,
+        proposedAt: new Date(),
+        proposedByUserId: principal.id,
+        resolutionNote: input.note?.trim() || null,
+      },
+      include: this.detailInclude(),
+    });
+
+    await this.audit.recordPlatform({
+      action: AuditAction.EXCEPTION_REPLACEMENT_PROPOSED,
+      actorUserId: principal.id,
+      entityType: 'TripException',
+      entityId: id,
+      metadata: {
+        vehicleId: input.vehicleId,
+        driverId: input.driverId,
+        note: input.note?.trim() || null,
+      },
+    });
+
+    const carrierEmails = [
+      ...row.assignment.carrierCompany.users.map((u) => u.email),
+      ...(row.assignment.carrierCompany.email
+        ? [row.assignment.carrierCompany.email]
+        : []),
+    ];
+    const senderEmail =
+      row.job.receiverEmail ??
+      row.job.senderCompany.users[0]?.email ??
+      row.job.senderCompany.email ??
+      null;
+
+    await this.notifications.notifyTripExceptionReplacementProposed({
+      carrierEmails,
+      senderEmail,
+      jobTitle: row.job.title ?? '',
+      jobId: row.job.id,
+      vehicleLabel: vehicle.registration ?? vehicle.label ?? input.vehicleId.slice(0, 8),
+      driverName: driver.user.name ?? driver.user.email ?? input.driverId.slice(0, 8),
+      exceptionId: id,
+      note: input.note?.trim() || null,
+    });
+
+    return {
+      exception: this.mapException(proposed),
+      proposal: {
+        status: 'AWAITING_SENDER_APPROVAL' as const,
+        vehicleId: input.vehicleId,
+        driverId: input.driverId,
+        message: 'Replacement proposed — waiting for sender approval',
+      },
+    };
+  }
+
+  async approveReplacement(
+    principal: AuthenticatedPrincipal,
+    id: string,
+    input: { note?: string },
+  ) {
+    this.ensureDatabase();
+    if (principal.kind !== 'user' || principal.role !== 'SENDER') {
+      throw new ForbiddenException('Sender required');
+    }
+
+    const row = await this.loadExceptionPendingSenderApproval(principal.id, id);
+    if (!row.proposedVehicleId || !row.proposedDriverId || !row.proposedByUserId) {
+      throw new BadRequestException('No proposed replacement crew');
+    }
+
+    const proposer = await this.prisma.user.findUnique({
+      where: { id: row.proposedByUserId },
+      select: { id: true, email: true, companyId: true },
+    });
+    if (!proposer?.companyId || proposer.companyId !== row.companyId) {
+      throw new BadRequestException('Proposed-by carrier user missing');
+    }
+
+    const carrierPrincipal: AuthenticatedPrincipal = {
+      id: proposer.id,
+      email: proposer.email,
+      role: 'TRANSPORT_COMPANY',
+      kind: 'user',
+      regionCodes: [],
+      territoryCodes: [],
+    };
 
     await this.prisma.tripException.update({
       where: { id },
       data: { status: TripExceptionStatus.REASSIGN_IN_PROGRESS },
     });
 
-    const previousDriverEmail = row.assignment.driver?.user.email ?? null;
-
-    const reassigned = await this.carrier.reassignAssignment(principal, row.assignmentId, {
-      vehicleId: input.vehicleId,
-      driverId: input.driverId,
-      reason: `Exception ${row.kind}`,
-      note: input.note,
+    const previousDriver = await this.prisma.assignment.findUnique({
+      where: { id: row.assignmentId },
+      select: {
+        driver: { select: { user: { select: { email: true } } } },
+      },
     });
+    const previousDriverEmail = previousDriver?.driver?.user.email ?? null;
+
+    const reassigned = await this.carrier.reassignAssignment(
+      carrierPrincipal,
+      row.assignmentId,
+      {
+        vehicleId: row.proposedVehicleId,
+        driverId: row.proposedDriverId,
+        reason: `Exception ${row.kind}`,
+        note: input.note ?? row.resolutionNote ?? undefined,
+      },
+    );
 
     const resolved = await this.prisma.tripException.update({
       where: { id },
@@ -617,12 +810,14 @@ export class ExceptionsService {
         status: TripExceptionStatus.RESOLVED_REASSIGNED,
         resolvedAt: new Date(),
         resolvedByUserId: principal.id,
-        resolutionNote: input.note?.trim() || 'Intra-fleet reassign',
+        resolutionNote:
+          input.note?.trim() ||
+          row.resolutionNote ||
+          'Sender approved replacement',
       },
       include: this.detailInclude(),
     });
 
-    // Mid-trip breakdown → after reassign, leave trip for new driver gates if safety reset
     if (row.phase === TripExceptionPhase.MID_TRIP && row.tripId && reassigned.safetyReset) {
       await this.prisma.trip.update({
         where: { id: row.tripId },
@@ -640,13 +835,24 @@ export class ExceptionsService {
     }
 
     await this.audit.recordPlatform({
+      action: AuditAction.EXCEPTION_REPLACEMENT_APPROVED,
+      actorUserId: principal.id,
+      entityType: 'TripException',
+      entityId: id,
+      metadata: {
+        vehicleId: row.proposedVehicleId,
+        driverId: row.proposedDriverId,
+        safetyReset: reassigned.safetyReset,
+      },
+    });
+    await this.audit.recordPlatform({
       action: AuditAction.EXCEPTION_REASSIGNED,
       actorUserId: principal.id,
       entityType: 'TripException',
       entityId: id,
       metadata: {
-        vehicleId: input.vehicleId,
-        driverId: input.driverId,
+        vehicleId: row.proposedVehicleId,
+        driverId: row.proposedDriverId,
         safetyReset: reassigned.safetyReset,
       },
     });
@@ -659,35 +865,26 @@ export class ExceptionsService {
     });
     await this.recordPerformanceStub(principal.id, id, 'RESOLVED_REASSIGNED');
 
-    const newDriver = await this.prisma.driver.findUnique({
-      where: { id: input.driverId },
-      include: { user: { select: { email: true, name: true } } },
-    });
-    const vehicle = await this.prisma.vehicle.findUnique({
-      where: { id: input.vehicleId },
-      select: { registration: true, label: true },
-    });
-    const carrierEmails = [
-      ...row.assignment.carrierCompany.users.map((u) => u.email),
-      ...(row.assignment.carrierCompany.email
-        ? [row.assignment.carrierCompany.email]
-        : []),
-    ];
-    const senderEmail =
-      row.job.receiverEmail ??
-      row.job.senderCompany.users[0]?.email ??
-      row.job.senderCompany.email ??
-      null;
+    const notify = await this.loadNotifyTargets(row);
+    const vehicleLabel =
+      resolved.proposedVehicle?.registration ??
+      resolved.proposedVehicle?.label ??
+      row.proposedVehicleId.slice(0, 8);
+    const driverName =
+      resolved.proposedDriver?.user?.name ??
+      resolved.proposedDriver?.user?.email ??
+      row.proposedDriverId.slice(0, 8);
 
     await this.notifications.notifyTripExceptionReassigned({
-      driverEmail: newDriver?.user.email ?? null,
+      driverEmail:
+        resolved.proposedDriver?.user?.email ?? notify.driverEmail,
       previousDriverEmail,
-      carrierEmails,
-      senderEmail,
-      jobTitle: row.job.title ?? '',
-      jobId: row.job.id,
-      vehicleLabel: vehicle?.registration ?? vehicle?.label ?? input.vehicleId.slice(0, 8),
-      driverName: newDriver?.user.name ?? newDriver?.user.email ?? input.driverId.slice(0, 8),
+      carrierEmails: notify.carrierEmails,
+      senderEmail: notify.senderEmail,
+      jobTitle: notify.jobTitle,
+      jobId: notify.jobId,
+      vehicleLabel,
+      driverName,
       exceptionId: id,
     });
 
@@ -695,6 +892,114 @@ export class ExceptionsService {
       exception: this.mapException(resolved),
       reassignment: reassigned,
     };
+  }
+
+  async rejectReplacement(
+    principal: AuthenticatedPrincipal,
+    id: string,
+    input: { note?: string },
+  ) {
+    this.ensureDatabase();
+    if (principal.kind !== 'user' || principal.role !== 'SENDER') {
+      throw new ForbiddenException('Sender required');
+    }
+
+    const row = await this.loadExceptionPendingSenderApproval(principal.id, id);
+    const note = input.note?.trim() || 'Sender rejected replacement';
+
+    const resolved = await this.prisma.$transaction(async (tx) => {
+      if (row.tripId) {
+        await tx.trip.update({
+          where: { id: row.tripId },
+          data: { status: TripStatus.CANCELLED, onBreak: false, breakStartedAt: null },
+        });
+      }
+      await tx.assignment.update({
+        where: { id: row.assignmentId },
+        data: { status: AssignmentStatus.CANCELLED },
+      });
+      await tx.job.update({
+        where: { id: row.jobId },
+        data: { status: JobStatus.CANCELLED },
+      });
+      return tx.tripException.update({
+        where: { id },
+        data: {
+          status: TripExceptionStatus.RESOLVED_CANCELLED,
+          resolvedAt: new Date(),
+          resolvedByUserId: principal.id,
+          resolutionNote: note,
+          proposedVehicleId: null,
+          proposedDriverId: null,
+          proposedAt: null,
+          proposedByUserId: null,
+        },
+        include: this.detailInclude(),
+      });
+    });
+
+    let refund: { success?: boolean; refundId?: string; message?: string; mock?: boolean } | null =
+      null;
+    try {
+      refund = await this.payments.refundStub(principal, row.jobId);
+    } catch (err) {
+      refund = {
+        success: false,
+        message: err instanceof Error ? err.message : String(err),
+      };
+    }
+
+    await this.audit.recordPlatform({
+      action: AuditAction.EXCEPTION_REPLACEMENT_REJECTED,
+      actorUserId: principal.id,
+      entityType: 'TripException',
+      entityId: id,
+      metadata: { note, refund },
+    });
+    await this.audit.recordPlatform({
+      action: AuditAction.EXCEPTION_RESOLVED,
+      actorUserId: principal.id,
+      entityType: 'TripException',
+      entityId: id,
+      metadata: { outcome: 'RESOLVED_CANCELLED' },
+    });
+
+    const notify = await this.loadNotifyTargets(row);
+    await this.notifications.notifyTripExceptionReplacementRejected({
+      carrierEmails: notify.carrierEmails,
+      senderEmail: notify.senderEmail,
+      driverEmail: notify.driverEmail,
+      jobTitle: notify.jobTitle,
+      jobId: notify.jobId,
+      note,
+      exceptionId: id,
+    });
+
+    return {
+      exception: this.mapException(resolved),
+      refund,
+      cancelled: true as const,
+    };
+  }
+
+  private async loadExceptionPendingSenderApproval(senderUserId: string, id: string) {
+    const user = await this.prisma.user.findUnique({ where: { id: senderUserId } });
+    if (!user?.companyId) throw new NotFoundException('Sender company not found');
+    const row = await this.loadExceptionRow(id);
+    const job = await this.prisma.job.findUnique({
+      where: { id: row.jobId },
+      select: { senderCompanyId: true },
+    });
+    if (!job || job.senderCompanyId !== user.companyId) {
+      throw new ForbiddenException();
+    }
+    if (row.status !== TripExceptionStatus.AWAITING_SENDER_APPROVAL) {
+      throw new BadRequestException({
+        message: 'Exception is not awaiting sender approval',
+        code: 'NOT_AWAITING_SENDER_APPROVAL',
+      });
+    }
+    return row;
   }
 
   async listRescueCandidates(principal: AuthenticatedPrincipal, id: string) {
@@ -928,6 +1233,32 @@ export class ExceptionsService {
       actorAdminId,
     );
 
+    let stripeAdjustment: {
+      status: string;
+      amountCents: number | null;
+      transferId?: string | null;
+      reversalId?: string | null;
+      mock?: boolean;
+      message?: string;
+    };
+    try {
+      const adj = await this.payments.adjustForMarketplaceRelease(row.jobId);
+      stripeAdjustment = {
+        status: adj.status,
+        amountCents: adj.amountCents ?? null,
+        transferId: adj.transferId,
+        reversalId: adj.reversalId,
+        mock: adj.mock,
+        message: adj.message,
+      };
+    } catch (err) {
+      stripeAdjustment = {
+        status: 'ADJUSTMENT_FAILED',
+        amountCents: null,
+        message: err instanceof Error ? err.message : String(err),
+      };
+    }
+
     const notify = await this.loadNotifyTargets(row);
     await this.notifications.notifyTripExceptionReleased({
       driverEmail: notify.driverEmail,
@@ -951,10 +1282,7 @@ export class ExceptionsService {
         message:
           'Job re-listed on marketplace with priority. Sender estimate unchanged; carrier bid floor discounted.',
       },
-      stripeAdjustment: {
-        status: 'STUB_NOT_IMPLEMENTED',
-        amountCents: null,
-      },
+      stripeAdjustment,
     };
   }
 

@@ -10,6 +10,7 @@ import {
   ServiceUnavailableException,
   forwardRef,
 } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import {
   AssignmentStatus,
   JobStatus,
@@ -25,6 +26,7 @@ import {
   type Prisma,
 } from '@prisma/client';
 import type { AuthenticatedPrincipal } from '../../common/guards/jwt-auth.guard';
+import type { AppEnv } from '../../config/env.validation';
 import { AuditAction } from '../../shared/types';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
@@ -46,7 +48,13 @@ export class PaymentsService {
     @Inject(forwardRef(() => TripsService))
     private readonly trips: TripsService,
     @Optional() private readonly notifications?: NotificationsService,
+    /** Optional so unit specs that construct PaymentsService manually stay valid. */
+    @Optional() private readonly config?: ConfigService<AppEnv, true>,
   ) {}
+
+  private carrierClearingDays() {
+    return this.config?.get('STRIPE_CARRIER_CLEARING_DAYS', { infer: true }) ?? 7;
+  }
 
   private ensureDatabase() {
     if (!this.prisma.isConnected()) {
@@ -200,6 +208,25 @@ export class PaymentsService {
     const amountInc = proposal.amountIncGstCents;
     const amountEx = proposal.amountExGstCents;
     const amountGst = proposal.amountGstCents;
+
+    // Marketplace rescue re-list: fare already captured — do not charge sender again.
+    const priorCharge = await this.prisma.paymentEvent.findFirst({
+      where: {
+        jobId: job.id,
+        type: PaymentEventType.CHARGE,
+        status: PaymentEventStatus.SUCCEEDED,
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+    if (priorCharge?.stripePaymentIntentId) {
+      return this.acceptWithPriorCharge({
+        userId: user.id,
+        jobId: job.id,
+        proposal,
+        priorCharge,
+        acceptKey: key,
+      });
+    }
 
     const created = await this.prisma.$transaction(async (tx) => {
       const assignment = await tx.assignment.create({
@@ -1145,8 +1172,13 @@ export class PaymentsService {
         data: { status: JobStatus.ASSIGNED },
       });
 
-      // Ledger accrual stubs (disburse M10/M12)
-      const existingLines = await tx.settlementLine.count({ where: { jobId: pe.jobId! } });
+      // Ledger accrual stubs (disburse M10/M12). Ignore VOID rows from marketplace release.
+      const existingLines = await tx.settlementLine.count({
+        where: {
+          jobId: pe.jobId!,
+          status: { not: SettlementLineStatus.VOID },
+        },
+      });
       if (existingLines === 0) {
         const gross = pe.amountIncGstCents;
         const carrier = Math.round(gross * 0.7);
@@ -1551,6 +1583,157 @@ export class PaymentsService {
     });
   }
 
+  /**
+   * Re-accept after marketplace re-list: reuse succeeded fare charge (no second PI).
+   */
+  private async acceptWithPriorCharge(params: {
+    userId: string;
+    jobId: string;
+    proposal: {
+      id: string;
+      carrierCompanyId: string;
+      vehicleId: string | null;
+      driverId: string | null;
+      amountIncGstCents: number;
+      amountExGstCents: number;
+      amountGstCents: number;
+    };
+    priorCharge: {
+      id: string;
+      stripePaymentIntentId: string | null;
+      amountIncGstCents: number;
+      metadata: Prisma.JsonValue;
+    };
+    acceptKey: string;
+  }) {
+    const { userId, jobId, proposal, priorCharge, acceptKey } = params;
+    if (!priorCharge.stripePaymentIntentId) {
+      throw new BadRequestException('Prior charge missing PaymentIntent id');
+    }
+
+    const created = await this.prisma.$transaction(async (tx) => {
+      const assignment = await tx.assignment.create({
+        data: {
+          jobId,
+          proposalId: proposal.id,
+          carrierCompanyId: proposal.carrierCompanyId,
+          vehicleId: proposal.vehicleId,
+          driverId: proposal.driverId,
+          status: AssignmentStatus.PENDING,
+        },
+      });
+
+      await tx.proposal.update({
+        where: { id: proposal.id },
+        data: { status: ProposalStatus.ACCEPTED },
+      });
+
+      const conflictPeers = await tx.proposal.findMany({
+        where: {
+          status: ProposalStatus.SUBMITTED,
+          OR: [
+            { jobId, id: { not: proposal.id } },
+            ...(proposal.vehicleId
+              ? [{ vehicleId: proposal.vehicleId, id: { not: proposal.id } }]
+              : []),
+            ...(proposal.driverId
+              ? [{ driverId: proposal.driverId, id: { not: proposal.id } }]
+              : []),
+          ],
+        },
+      });
+      if (conflictPeers.length > 0) {
+        await tx.proposal.updateMany({
+          where: { id: { in: conflictPeers.map((p) => p.id) } },
+          data: { status: ProposalStatus.EXPIRED },
+        });
+      }
+
+      await tx.job.update({
+        where: { id: jobId },
+        data: {
+          status: JobStatus.ASSIGNED,
+          marketplacePriority: false,
+          rescueDiscountPercent: null,
+        },
+      });
+
+      const priorMeta =
+        priorCharge.metadata && typeof priorCharge.metadata === 'object'
+          ? (priorCharge.metadata as Record<string, unknown>)
+          : {};
+      await tx.paymentEvent.update({
+        where: { id: priorCharge.id },
+        data: {
+          metadata: {
+            ...priorMeta,
+            proposalId: proposal.id,
+            assignmentId: assignment.id,
+            acceptKey,
+            reusedCharge: true,
+            conflictIds: conflictPeers.map((p) => p.id),
+          } as Prisma.InputJsonValue,
+        },
+      });
+
+      return { assignment, conflictIds: conflictPeers.map((p) => p.id) };
+    });
+
+    for (const cid of created.conflictIds) {
+      await this.audit.recordPlatform({
+        action: AuditAction.PROPOSAL_EXPIRED_CONFLICT,
+        actorUserId: userId,
+        entityType: 'Proposal',
+        entityId: cid,
+        metadata: { jobId, acceptedProposalId: proposal.id, reusedCharge: true },
+      });
+    }
+    await this.audit.recordPlatform({
+      action: AuditAction.PROPOSAL_ACCEPTED,
+      actorUserId: userId,
+      entityType: 'Proposal',
+      entityId: proposal.id,
+      metadata: {
+        jobId,
+        assignmentId: created.assignment.id,
+        reusedCharge: true,
+        paymentEventId: priorCharge.id,
+      },
+    });
+
+    await this.markPaidAndLock({
+      paymentEventId: priorCharge.id,
+      paymentIntentId: priorCharge.stripePaymentIntentId,
+      source: 'rescue_reaccept_prior_charge',
+    });
+
+    const paymentEvent = await this.prisma.paymentEvent.findUnique({
+      where: { id: priorCharge.id },
+    });
+    const assignment = await this.prisma.assignment.findUnique({
+      where: { id: created.assignment.id },
+    });
+
+    return {
+      ...this.buildAcceptResponse(
+        paymentEvent ?? {
+          id: priorCharge.id,
+          status: PaymentEventStatus.SUCCEEDED,
+          amountIncGstCents: priorCharge.amountIncGstCents,
+          stripePaymentIntentId: priorCharge.stripePaymentIntentId,
+          jobId,
+        },
+        assignment,
+        false,
+      ),
+      clientSecret: null,
+      publishableKey: this.stripe.publishableKey(),
+      stripeStatus: 'succeeded',
+      mock: this.stripe.isMockMode(),
+      message: 'Prior fare reused — assignment locked (marketplace rescue)',
+    };
+  }
+
   async refundStub(principal: AuthenticatedPrincipal, jobId: string) {
     this.ensureDatabase();
     if (principal.role !== 'SENDER' && principal.kind !== 'admin') {
@@ -1580,23 +1763,434 @@ export class PaymentsService {
     if (!pe?.stripePaymentIntentId) {
       throw new BadRequestException('No succeeded charge to refund');
     }
+
+    // Reverse carrier payout first if already transferred.
+    await this.adjustForMarketplaceRelease(jobId).catch(() => undefined);
+
+    const idempotencyKey = `refund:${jobId}:${pe.id}`;
+    const existingRefund = await this.prisma.paymentEvent.findFirst({
+      where: { jobId, type: PaymentEventType.REFUND, status: PaymentEventStatus.SUCCEEDED },
+    });
+    if (existingRefund?.stripeRefundId) {
+      return {
+        success: true,
+        refundId: existingRefund.stripeRefundId,
+        message: 'Refund already recorded',
+        mock: this.stripe.isMockMode(),
+      };
+    }
+
     const refund = await this.stripe.createRefundStub({
       paymentIntentId: pe.stripePaymentIntentId,
-      idempotencyKey: `refund-stub:${jobId}:${pe.id}`,
+      idempotencyKey,
+    });
+    await this.prisma.paymentEvent.create({
+      data: {
+        jobId,
+        type: PaymentEventType.REFUND,
+        status: PaymentEventStatus.SUCCEEDED,
+        amountExGstCents: pe.amountExGstCents,
+        amountGstCents: pe.amountGstCents,
+        amountIncGstCents: pe.amountIncGstCents,
+        currency: pe.currency,
+        stripeRefundId: refund.id,
+        stripePaymentIntentId: pe.stripePaymentIntentId,
+        idempotencyKey,
+        metadata: { source: 'refund_api', mock: refund.mock },
+      },
+    });
+    await this.prisma.settlementLine.updateMany({
+      where: {
+        jobId,
+        status: {
+          in: [
+            SettlementLineStatus.ACCRUED,
+            SettlementLineStatus.PAYABLE,
+            SettlementLineStatus.PAID,
+          ],
+        },
+      },
+      data: { status: SettlementLineStatus.VOID },
     });
     await this.audit.recordPlatform({
-      action: AuditAction.REFUND_STUB,
+      action: AuditAction.PAYMENT_REFUND_CREATED,
       actorUserId: principal.kind === 'user' ? principal.id : undefined,
       actorAdminId: principal.kind === 'admin' ? principal.id : undefined,
       entityType: 'PaymentEvent',
       entityId: pe.id,
-      metadata: { refundId: refund.id, stub: true, fullPath: 'M10/M12' },
+      metadata: { refundId: refund.id, mock: refund.mock },
     });
     return {
       success: true,
       refundId: refund.id,
-      message: 'Refund stub recorded — full cancel path is M10/M12',
+      message: 'Fare refunded to sender; settlement lines voided',
       mock: refund.mock,
+    };
+  }
+
+  /**
+   * M10 §6.7 — marketplace release / re-list:
+   * - Do **not** refund sender (escrow stays on platform for re-award).
+   * - Reverse carrier Transfer if already paid out.
+   * - VOID settlement lines so the next accept recreates accruals for the new carrier.
+   */
+  async adjustForMarketplaceRelease(jobId: string): Promise<{
+    status: 'HELD' | 'REVERSED' | 'NO_CHARGE' | 'ALREADY_ADJUSTED';
+    transferId?: string | null;
+    reversalId?: string | null;
+    amountCents?: number | null;
+    mock?: boolean;
+    message: string;
+  }> {
+    this.ensureDatabase();
+
+    const charge = await this.prisma.paymentEvent.findFirst({
+      where: {
+        jobId,
+        type: PaymentEventType.CHARGE,
+        status: PaymentEventStatus.SUCCEEDED,
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+    if (!charge) {
+      return {
+        status: 'NO_CHARGE',
+        amountCents: null,
+        message: 'No succeeded fare charge — nothing to hold or reverse',
+      };
+    }
+
+    const priorReversal = await this.prisma.paymentEvent.findFirst({
+      where: {
+        jobId,
+        type: PaymentEventType.TRANSFER_REVERSAL,
+        status: PaymentEventStatus.SUCCEEDED,
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    const transfer = await this.prisma.paymentEvent.findFirst({
+      where: {
+        jobId,
+        type: PaymentEventType.TRANSFER,
+        status: PaymentEventStatus.SUCCEEDED,
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    let reversalId: string | null = priorReversal?.stripeRefundId ?? null;
+    let mock = false;
+    let status: 'HELD' | 'REVERSED' | 'ALREADY_ADJUSTED' = 'HELD';
+
+    if (priorReversal && transfer?.stripeTransferId) {
+      status = 'ALREADY_ADJUSTED';
+    } else if (transfer?.stripeTransferId) {
+      const idempotencyKey = `transfer-reversal:${jobId}:${transfer.stripeTransferId}`;
+      try {
+        const reversal = await this.stripe.createTransferReversal({
+          transferId: transfer.stripeTransferId,
+          amountCents: transfer.amountIncGstCents,
+          idempotencyKey,
+          metadata: { jobId, paymentEventId: transfer.id, reason: 'marketplace_release' },
+        });
+        reversalId = reversal.id;
+        mock = reversal.mock;
+        status = 'REVERSED';
+        await this.prisma.paymentEvent.create({
+          data: {
+            jobId,
+            type: PaymentEventType.TRANSFER_REVERSAL,
+            status: PaymentEventStatus.SUCCEEDED,
+            amountExGstCents: transfer.amountExGstCents,
+            amountGstCents: transfer.amountGstCents,
+            amountIncGstCents: transfer.amountIncGstCents,
+            currency: transfer.currency,
+            // Reuse refund id column for Stripe reversal id (no dedicated column).
+            stripeRefundId: reversal.id,
+            stripeTransferId: transfer.stripeTransferId,
+            idempotencyKey,
+            metadata: {
+              reason: 'marketplace_release',
+              originalTransferEventId: transfer.id,
+              mock: reversal.mock,
+            },
+          },
+        });
+        await this.audit.recordPlatform({
+          action: AuditAction.PAYMENT_TRANSFER_REVERSED,
+          entityType: 'Job',
+          entityId: jobId,
+          metadata: {
+            transferId: transfer.stripeTransferId,
+            reversalId: reversal.id,
+            amountCents: transfer.amountIncGstCents,
+            mock: reversal.mock,
+          },
+        });
+      } catch (err) {
+        this.logger.warn(
+          `TransferReversal failed job=${jobId}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        throw new BadRequestException({
+          message: 'Failed to reverse carrier transfer on marketplace release',
+          code: 'TRANSFER_REVERSAL_FAILED',
+          detail: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
+    await this.prisma.settlementLine.updateMany({
+      where: {
+        jobId,
+        status: {
+          in: [
+            SettlementLineStatus.ACCRUED,
+            SettlementLineStatus.PAYABLE,
+            SettlementLineStatus.PAID,
+          ],
+        },
+      },
+      data: { status: SettlementLineStatus.VOID },
+    });
+
+    return {
+      status,
+      transferId: transfer?.stripeTransferId ?? null,
+      reversalId,
+      amountCents: charge.amountIncGstCents,
+      mock,
+      message:
+        status === 'REVERSED'
+          ? 'Carrier transfer reversed; fare held on platform for re-award'
+          : status === 'ALREADY_ADJUSTED'
+            ? 'Transfer already reversed; fare held on platform'
+            : 'Fare held on platform (no carrier transfer yet); settlement lines voided for re-award',
+    };
+  }
+
+  /**
+   * After client-side SCA (`confirmCardPayment`), re-read the PaymentIntent from Stripe
+   * and lock the assignment if succeeded (webhook may lag locally).
+   */
+  async syncJobPayment(principal: AuthenticatedPrincipal, jobId: string) {
+    this.ensureDatabase();
+    if (principal.role !== 'SENDER') {
+      throw new ForbiddenException('Sender required');
+    }
+    const user = await this.prisma.user.findUnique({ where: { id: principal.id } });
+    if (!user?.companyId) throw new NotFoundException('Sender company not found');
+
+    const job = await this.prisma.job.findFirst({
+      where: { id: jobId, senderCompanyId: user.companyId },
+      include: { assignment: true },
+    });
+    if (!job) throw new NotFoundException('Job not found');
+
+    const pe = await this.prisma.paymentEvent.findFirst({
+      where: { jobId, type: PaymentEventType.CHARGE },
+      orderBy: { createdAt: 'desc' },
+    });
+    if (!pe?.stripePaymentIntentId) {
+      throw new BadRequestException('No payment intent to sync');
+    }
+
+    const status = await this.stripe.retrievePaymentIntentStatus(pe.stripePaymentIntentId);
+    if (status === 'succeeded') {
+      await this.markPaidAndLock({
+        paymentEventId: pe.id,
+        paymentIntentId: pe.stripePaymentIntentId,
+        source: 'client_sync',
+      });
+    } else if (status === 'canceled' || status === 'requires_payment_method') {
+      await this.prisma.paymentEvent.update({
+        where: { id: pe.id },
+        data: { status: PaymentEventStatus.FAILED },
+      });
+    } else if (status === 'requires_action') {
+      await this.prisma.paymentEvent.update({
+        where: { id: pe.id },
+        data: { status: PaymentEventStatus.REQUIRES_ACTION },
+      });
+    }
+
+    const freshPe = await this.prisma.paymentEvent.findUnique({ where: { id: pe.id } });
+    const assignment = await this.prisma.assignment.findUnique({ where: { jobId } });
+    const clientSecret =
+      freshPe?.status === PaymentEventStatus.REQUIRES_ACTION ||
+      freshPe?.status === PaymentEventStatus.PENDING
+        ? await this.stripe.retrievePaymentIntentClientSecret(pe.stripePaymentIntentId)
+        : null;
+
+    return {
+      ...this.buildAcceptResponse(
+        freshPe ?? pe,
+        assignment,
+        true,
+      ),
+      clientSecret,
+      publishableKey: this.stripe.publishableKey(),
+      stripeStatus: status,
+      mock: this.stripe.isMockMode(),
+      message:
+        assignment?.status === AssignmentStatus.LOCKED
+          ? 'Payment succeeded — assignment locked'
+          : status === 'requires_action'
+            ? 'Complete SCA with clientSecret'
+            : `Payment status: ${status ?? 'unknown'}`,
+    };
+  }
+
+  /**
+   * M12 — Transfer carrier 70% after clearing window (default 7 days; 0 = immediate).
+   * Safe to call repeatedly (idempotent via PaymentEvent TRANSFER key).
+   */
+  async tryDisburseCarrierTransfer(jobId: string): Promise<{
+    transferred: boolean;
+    reason?: string;
+    transferId?: string;
+    mock?: boolean;
+  }> {
+    this.ensureDatabase();
+
+    const trip = await this.prisma.trip.findFirst({
+      where: { jobId, status: TripStatus.COMPLETED },
+      select: { completedAt: true },
+    });
+    if (!trip?.completedAt) {
+      return { transferred: false, reason: 'trip_not_completed' };
+    }
+
+    const clearingMs = this.carrierClearingDays() * 24 * 60 * 60 * 1000;
+    if (Date.now() < trip.completedAt.getTime() + clearingMs) {
+      return { transferred: false, reason: 'clearing_hold' };
+    }
+
+    const line = await this.prisma.settlementLine.findFirst({
+      where: {
+        jobId,
+        recipientType: SettlementRecipientType.CARRIER,
+        status: { in: [SettlementLineStatus.ACCRUED, SettlementLineStatus.PAYABLE] },
+      },
+    });
+    if (!line) {
+      const paid = await this.prisma.settlementLine.findFirst({
+        where: {
+          jobId,
+          recipientType: SettlementRecipientType.CARRIER,
+          status: SettlementLineStatus.PAID,
+        },
+      });
+      return paid
+        ? { transferred: false, reason: 'already_paid' }
+        : { transferred: false, reason: 'no_carrier_line' };
+    }
+
+    const existingTransfer = await this.prisma.paymentEvent.findFirst({
+      where: {
+        jobId,
+        type: PaymentEventType.TRANSFER,
+        status: PaymentEventStatus.SUCCEEDED,
+      },
+    });
+    if (existingTransfer?.stripeTransferId) {
+      if (line.status !== SettlementLineStatus.PAID) {
+        await this.prisma.settlementLine.update({
+          where: { id: line.id },
+          data: { status: SettlementLineStatus.PAID, paidAt: new Date() },
+        });
+      }
+      return {
+        transferred: false,
+        reason: 'already_transferred',
+        transferId: existingTransfer.stripeTransferId,
+      };
+    }
+
+    const assignment = await this.prisma.assignment.findUnique({
+      where: { jobId },
+      include: {
+        carrierCompany: {
+          select: {
+            id: true,
+            stripeConnectAccountId: true,
+            stripeConnectPayoutsEnabled: true,
+          },
+        },
+      },
+    });
+    const dest = assignment?.carrierCompany?.stripeConnectAccountId;
+    if (!dest) {
+      return { transferred: false, reason: 'carrier_connect_missing' };
+    }
+    if (!assignment?.carrierCompany?.stripeConnectPayoutsEnabled) {
+      return { transferred: false, reason: 'carrier_payouts_disabled' };
+    }
+
+    const idempotencyKey = `carrier-transfer:${jobId}:${line.id}`;
+    let transfer;
+    try {
+      transfer = await this.stripe.createTransfer({
+        amountCents: line.amountCents,
+        destinationAccountId: dest,
+        idempotencyKey,
+        transferGroup: jobId,
+        metadata: {
+          jobId,
+          settlementLineId: line.id,
+          companyId: assignment.carrierCompany.id,
+        },
+      });
+    } catch (err) {
+      this.logger.warn(
+        `Carrier transfer failed job=${jobId}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return {
+        transferred: false,
+        reason: err instanceof Error ? err.message : 'transfer_failed',
+      };
+    }
+
+    await this.prisma.$transaction(async (tx) => {
+      await tx.paymentEvent.create({
+        data: {
+          jobId,
+          type: PaymentEventType.TRANSFER,
+          status: PaymentEventStatus.SUCCEEDED,
+          amountExGstCents: line.amountCents,
+          amountGstCents: 0,
+          amountIncGstCents: line.amountCents,
+          currency: line.currency,
+          stripeTransferId: transfer.id,
+          idempotencyKey,
+          metadata: {
+            settlementLineId: line.id,
+            destination: dest,
+            mock: transfer.mock,
+          },
+        },
+      });
+      await tx.settlementLine.update({
+        where: { id: line.id },
+        data: { status: SettlementLineStatus.PAID, paidAt: new Date() },
+      });
+    });
+
+    await this.audit.recordPlatform({
+      action: AuditAction.PAYMENT_TRANSFER_CREATED,
+      entityType: 'Job',
+      entityId: jobId,
+      metadata: {
+        transferId: transfer.id,
+        amountCents: line.amountCents,
+        destination: dest,
+        mock: transfer.mock,
+      },
+    });
+
+    return {
+      transferred: true,
+      transferId: transfer.id,
+      mock: transfer.mock,
     };
   }
 }

@@ -101,7 +101,10 @@ prisma as never,
       const prisma = { isConnected: () => true };
       const service = makeService(prisma);
       // Runtime path rejects !online; schema types online as literal true.
-      const offlineInput = { online: false } as unknown as { online: true };
+      const offlineInput = { online: false, odometerStartKm: 1 } as unknown as {
+        online: true;
+        odometerStartKm: number;
+      };
 
       await expect(
         service.startTrip(driverPrincipal, 'trip-1', offlineInput),
@@ -141,12 +144,12 @@ prisma as never,
       const service = makeService(prisma);
 
       await expect(
-        service.startTrip(driverPrincipal, 'trip-1', { online: true }),
+        service.startTrip(driverPrincipal, 'trip-1', { online: true, odometerStartKm: 12000 }),
       ).rejects.toMatchObject({
         response: { code: 'TRIP_NOT_PAID', message: 'Payment required' },
       });
       await expect(
-        service.startTrip(driverPrincipal, 'trip-1', { online: true }),
+        service.startTrip(driverPrincipal, 'trip-1', { online: true, odometerStartKm: 12000 }),
       ).rejects.toBeInstanceOf(ForbiddenException);
     });
 
@@ -170,7 +173,7 @@ prisma as never,
       const service = makeService(prisma);
 
       await expect(
-        service.startTrip(driverPrincipal, 'trip-1', { online: true }),
+        service.startTrip(driverPrincipal, 'trip-1', { online: true, odometerStartKm: 12000 }),
       ).rejects.toMatchObject({
         response: {
           code: 'VEHICLE_NOT_ACTIVE',

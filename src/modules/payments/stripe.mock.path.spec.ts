@@ -50,6 +50,32 @@ describe('StripeService mock expansions', () => {
     await expect(svc.retrievePaymentIntentStatus('pi_mock_x')).resolves.toBe('succeeded');
   });
 
+  it('mock createTransfer returns tr_mock id', async () => {
+    const svc = new StripeService(mockCfg);
+    const transfer = await svc.createTransfer({
+      amountCents: 7000,
+      destinationAccountId: 'acct_mock_1',
+      idempotencyKey: 'carrier-transfer:job1:line1',
+      transferGroup: 'job1',
+    });
+    expect(transfer.mock).toBe(true);
+    expect(transfer.id.startsWith('tr_mock_')).toBe(true);
+    expect(transfer.status).toBe('paid');
+  });
+
+  it('mock createTransferReversal returns trr_mock id', async () => {
+    const svc = new StripeService(mockCfg);
+    const reversal = await svc.createTransferReversal({
+      transferId: 'tr_mock_abc',
+      amountCents: 7000,
+      idempotencyKey: 'transfer-reversal:job1:tr_mock_abc',
+      metadata: { jobId: 'job1', reason: 'marketplace_release' },
+    });
+    expect(reversal.mock).toBe(true);
+    expect(reversal.id.startsWith('trr_mock_')).toBe(true);
+    expect(reversal.status).toBe('succeeded');
+  });
+
   it('publishableKey reads config', () => {
     const svc = new StripeService(
       config({ STRIPE_PUBLISHABLE_KEY: 'pk_live_x', STRIPE_SECRET_KEY: undefined }),

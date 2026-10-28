@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Body,
   Controller,
   Get,
@@ -92,6 +93,56 @@ export class TripsController {
     @Param('tripId') tripId: string,
   ) {
     return this.trips.getTripPod(principal, tripId);
+  }
+
+  @Get(':tripId/documents/stops/:jobStopId/:kind')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(AppRole.DRIVER, AppRole.SENDER, AppRole.TRANSPORT_COMPANY)
+  @ApiOperation({
+    summary: 'M10 — download stop POD package / signature PDF (party ACL)',
+  })
+  async stopDocument(
+    @CurrentPrincipal() principal: AuthenticatedPrincipal,
+    @Param('tripId') tripId: string,
+    @Param('jobStopId') jobStopId: string,
+    @Param('kind') kind: string,
+  ) {
+    if (kind !== 'pod-package' && kind !== 'signature-pdf') {
+      throw new BadRequestException('kind must be pod-package or signature-pdf');
+    }
+    const file = await this.trips.getTripDocument(
+      principal,
+      tripId,
+      kind,
+      jobStopId,
+    );
+    return new StreamableFile(file.stream, {
+      type: file.mimeType,
+      disposition: `attachment; filename="${file.filename}"`,
+    });
+  }
+
+  @Get(':tripId/documents/:kind')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(AppRole.DRIVER, AppRole.SENDER, AppRole.TRANSPORT_COMPANY)
+  @ApiOperation({
+    summary: 'M10 — download trip POD / tax invoice / run sheet PDF (party ACL)',
+  })
+  async tripDocument(
+    @CurrentPrincipal() principal: AuthenticatedPrincipal,
+    @Param('tripId') tripId: string,
+    @Param('kind') kind: string,
+  ) {
+    if (kind !== 'pod' && kind !== 'tax-invoice' && kind !== 'run-sheet') {
+      throw new BadRequestException('kind must be pod, tax-invoice, or run-sheet');
+    }
+    const file = await this.trips.getTripDocument(principal, tripId, kind);
+    return new StreamableFile(file.stream, {
+      type: file.mimeType,
+      disposition: `attachment; filename="${file.filename}"`,
+    });
   }
 
   @Get(':tripId')

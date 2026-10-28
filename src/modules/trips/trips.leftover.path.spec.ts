@@ -248,7 +248,7 @@ prisma as never,
     const service = makeService(prisma);
 
     try {
-      await service.startTrip(driverPrincipal, 'trip-1', { online: true });
+      await service.startTrip(driverPrincipal, 'trip-1', { online: true, odometerStartKm: 12000 });
       fail('expected SAFETY_REQUIRED');
     } catch (err) {
       expect((err as ForbiddenException).getResponse()).toMatchObject({
@@ -276,7 +276,7 @@ prisma as never,
       ],
     });
     try {
-      await service.startTrip(driverPrincipal, 'trip-1', { online: true });
+      await service.startTrip(driverPrincipal, 'trip-1', { online: true, odometerStartKm: 12000 });
       fail('expected MASS_SURCHARGE_PENDING');
     } catch (err) {
       expect((err as ForbiddenException).getResponse()).toMatchObject({
@@ -292,7 +292,7 @@ prisma as never,
       surcharges: [],
     });
     try {
-      await service.startTrip(driverPrincipal, 'trip-1', { online: true });
+      await service.startTrip(driverPrincipal, 'trip-1', { online: true, odometerStartKm: 12000 });
       fail('expected MASS_REQUIRED');
     } catch (err) {
       expect((err as ForbiddenException).getResponse()).toMatchObject({
@@ -310,7 +310,7 @@ prisma as never,
       surcharges: [],
     };
     prisma.trip.findFirst.mockResolvedValue(started);
-    const again = await service.startTrip(driverPrincipal, 'trip-1', { online: true });
+    const again = await service.startTrip(driverPrincipal, 'trip-1', { online: true, odometerStartKm: 12000 });
     expect(again.startedAt).toEqual(started.startedAt);
   });
 

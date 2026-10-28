@@ -65,6 +65,11 @@ export const envSchema = z.object({
   STRIPE_PUBLISHABLE_KEY: z.string().optional(),
   /** Webhook signing secret (whsec_…) — required for live/test webhook verify when not mock. */
   STRIPE_WEBHOOK_SECRET: z.string().optional(),
+  /**
+   * Days to hold carrier share after trip complete before Stripe Transfer (spec default 7).
+   * Set 0 in local/test to disburse immediately on trip complete.
+   */
+  STRIPE_CARRIER_CLEARING_DAYS: z.coerce.number().int().nonnegative().default(7),
   /** M9 geofence radius meters (default 200). */
   GEOFENCE_RADIUS_METERS: z.coerce.number().positive().default(200),
   /** M9 DEV: override free-wait to N seconds for demo (0 = use policy minutes). */

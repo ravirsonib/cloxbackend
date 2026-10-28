@@ -30,6 +30,11 @@ describe('PaymentsService refundStub admin leftover', () => {
   const audit = { recordPlatform: jest.fn() };
   const stripe = {
     createRefundStub: jest.fn().mockResolvedValue({ id: 're_admin', mock: true }),
+    createTransferReversal: jest.fn().mockResolvedValue({
+      id: 'trr_admin',
+      status: 'succeeded',
+      mock: true,
+    }),
     cancelPaymentIntent: jest.fn(),
     publishableKey: jest.fn(),
     retrievePaymentIntentStatus: jest.fn(),
@@ -60,6 +65,16 @@ describe('PaymentsService refundStub admin leftover', () => {
   });
 
   it('admin refunds without senderCompanyId scope', async () => {
+    const charge = {
+      id: 'pe-1',
+      stripePaymentIntentId: 'pi_1',
+      type: PaymentEventType.CHARGE,
+      status: PaymentEventStatus.SUCCEEDED,
+      amountExGstCents: 10000,
+      amountGstCents: 1000,
+      amountIncGstCents: 11000,
+      currency: 'aud',
+    };
     const prisma = {
       isConnected: () => true,
       user: { findUnique: jest.fn() },
@@ -67,13 +82,16 @@ describe('PaymentsService refundStub admin leftover', () => {
         findFirst: jest.fn().mockResolvedValue({ id: 'job-1' }),
       },
       paymentEvent: {
-        findFirst: jest.fn().mockResolvedValue({
-          id: 'pe-1',
-          stripePaymentIntentId: 'pi_1',
-          type: PaymentEventType.CHARGE,
-          status: PaymentEventStatus.SUCCEEDED,
-        }),
+        findFirst: jest
+          .fn()
+          .mockResolvedValueOnce(charge)
+          .mockResolvedValueOnce(null)
+          .mockResolvedValueOnce(null)
+          .mockResolvedValueOnce(charge)
+          .mockResolvedValueOnce(null),
+        create: jest.fn().mockResolvedValue({ id: 'pe-refund' }),
       },
+      settlementLine: { updateMany: jest.fn().mockResolvedValue({ count: 0 }) },
     };
 
     const result = await makeService(prisma).refundStub(admin, 'job-1');
@@ -89,7 +107,7 @@ describe('PaymentsService refundStub admin leftover', () => {
     expect(audit.recordPlatform).toHaveBeenCalledWith(
       expect.objectContaining({
         actorAdminId: 'admin-1',
-        metadata: expect.objectContaining({ refundId: 're_admin', stub: true }),
+        metadata: expect.objectContaining({ refundId: 're_admin', mock: true }),
       }),
     );
   });

@@ -45,6 +45,8 @@ describe('ExceptionsService continue / escalate / watchdog', () => {
   const notifications = {
     notifyTripExceptionOpened: jest.fn(),
     notifyTripExceptionReassigned: jest.fn(),
+    notifyTripExceptionReplacementProposed: jest.fn().mockResolvedValue([]),
+    notifyTripExceptionReplacementRejected: jest.fn().mockResolvedValue([]),
     notifyTripExceptionContinued: jest.fn().mockResolvedValue([]),
     notifyTripExceptionEscalated: jest
       .fn()
@@ -66,6 +68,7 @@ describe('ExceptionsService continue / escalate / watchdog', () => {
       audit as never,
       notifications as never,
       carrier as never,
+      { adjustForMarketplaceRelease: jest.fn() } as never,
       config as never,
     );
   }
@@ -190,26 +193,39 @@ describe('ExceptionsService continue / escalate / watchdog', () => {
     ).rejects.toBeInstanceOf(ForbiddenException);
   });
 
-  it('watchdog auto-escalates stale pre-trip exceptions', async () => {
+  it('watchdog auto-relists stale pre-trip AWAITING_CARRIER exceptions', async () => {
+    const releaseSpy = jest.spyOn(ExceptionsService.prototype, 'releaseToMarketplace');
+    releaseSpy.mockResolvedValue({
+      exception: { id: 'ex-stale', status: TripExceptionStatus.RESOLVED_RELISTED } as never,
+      marketplaceRelease: {
+        status: 'RELISTED',
+        reListJob: true,
+        marketplacePriority: true,
+        discountPercent: 10,
+        message: 'ok',
+      },
+      stripeAdjustment: { status: 'HELD', amountCents: 10000 },
+    });
+
     const service = makeService({
       isConnected: () => true,
+      platformSettings: {
+        upsert: jest.fn().mockResolvedValue({ marketplaceRelistSlaMs: 300_000 }),
+      },
       tripException: {
         findMany: jest.fn().mockResolvedValue([{ id: 'ex-stale' }]),
       },
     });
-    const escalateSpy = jest.spyOn(service, 'escalate').mockResolvedValue({
-      exception: { ...openRow, status: TripExceptionStatus.ESCALATED } as never,
-      alreadyEscalated: false,
-    });
 
     const result = await service.runEscalationWatchdog();
 
-    expect(result).toEqual({ scanned: 1, escalated: 1 });
-    expect(escalateSpy).toHaveBeenCalledWith(
+    expect(result).toMatchObject({ scanned: 1, relisted: 1, escalated: 0 });
+    expect(releaseSpy).toHaveBeenCalledWith(
       expect.objectContaining({ kind: 'admin' }),
       'ex-stale',
-      { note: 'Auto-escalated: no carrier action within SLA' },
+      expect.objectContaining({ note: expect.stringContaining('Auto re-listed') }),
       { automatic: true },
     );
+    releaseSpy.mockRestore();
   });
 });

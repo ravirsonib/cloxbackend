@@ -38,6 +38,16 @@ describe('PaymentsService.refundStub ownership', () => {
   });
 
   it('allows refund when job belongs to sender company', async () => {
+    const charge = {
+      id: 'pe-1',
+      stripePaymentIntentId: 'pi_1',
+      type: PaymentEventType.CHARGE,
+      status: PaymentEventStatus.SUCCEEDED,
+      amountExGstCents: 10000,
+      amountGstCents: 1000,
+      amountIncGstCents: 11000,
+      currency: 'aud',
+    };
     const prisma = {
       isConnected: () => true,
       user: {
@@ -47,16 +57,20 @@ describe('PaymentsService.refundStub ownership', () => {
         findFirst: jest.fn().mockResolvedValue({ id: 'job-1', senderCompanyId: 'co-a' }),
       },
       paymentEvent: {
-        findFirst: jest.fn().mockResolvedValue({
-          id: 'pe-1',
-          stripePaymentIntentId: 'pi_1',
-          type: PaymentEventType.CHARGE,
-          status: PaymentEventStatus.SUCCEEDED,
-        }),
+        findFirst: jest
+          .fn()
+          .mockResolvedValueOnce(charge)
+          .mockResolvedValueOnce(null)
+          .mockResolvedValueOnce(null)
+          .mockResolvedValueOnce(charge)
+          .mockResolvedValueOnce(null),
+        create: jest.fn().mockResolvedValue({ id: 'pe-refund' }),
       },
+      settlementLine: { updateMany: jest.fn().mockResolvedValue({ count: 0 }) },
     };
     const stripe = {
       createRefundStub: jest.fn().mockResolvedValue({ id: 're_1', mock: true }),
+      createTransferReversal: jest.fn(),
     };
     const audit = { recordPlatform: jest.fn() };
     const service = new PaymentsService(

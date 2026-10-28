@@ -24,6 +24,8 @@ describe('ExceptionsService.open', () => {
   const notifications = {
     notifyTripExceptionOpened: jest.fn().mockResolvedValue({ driver: { skipped: true } }),
     notifyTripExceptionReassigned: jest.fn().mockResolvedValue([]),
+    notifyTripExceptionReplacementProposed: jest.fn().mockResolvedValue([]),
+    notifyTripExceptionReplacementRejected: jest.fn().mockResolvedValue([]),
     notifyTripExceptionContinued: jest.fn().mockResolvedValue([]),
     notifyTripExceptionEscalated: jest.fn().mockResolvedValue({ opsNotified: true }),
     notifyBreakdownReport: jest.fn().mockResolvedValue({ sentTo: [], results: [] }),
@@ -45,6 +47,7 @@ describe('ExceptionsService.open', () => {
       audit as never,
       notifications as never,
       carrier as never,
+      { adjustForMarketplaceRelease: jest.fn() } as never,
       config as never,
     );
   }
@@ -129,7 +132,13 @@ describe('ExceptionsService.open', () => {
           breakdownPdfStorageKey: 'trips/trip-1/ex-1/breakdown-pdf.pdf',
         }),
       },
-      driver: { update: jest.fn() },
+      driver: {
+        update: jest.fn(),
+        findUnique: jest.fn().mockResolvedValue({ reliabilityScore: 100 }),
+      },
+      platformSettings: {
+        upsert: jest.fn().mockResolvedValue({ driverUnavailableScoreDelta: 5 }),
+      },
       $transaction: jest.fn(async (fn: (tx: unknown) => Promise<unknown>) =>
         fn({
           trip: { update: jest.fn() },

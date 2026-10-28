@@ -8,11 +8,13 @@ import {
   tripExceptionOpenSchema,
   tripExceptionReassignSchema,
   tripExceptionReleaseSchema,
+  tripExceptionSenderDecisionSchema,
   type TripExceptionContinueInput,
   type TripExceptionEscalateInput,
   type TripExceptionOpenInput,
   type TripExceptionReassignInput,
   type TripExceptionReleaseInput,
+  type TripExceptionSenderDecisionInput,
 } from '../../shared/types';
 import { CurrentPrincipal } from '../../common/decorators/current-admin.decorator';
 import { Roles } from '../../common/decorators/roles.decorator';
@@ -75,6 +77,7 @@ export class ExceptionsController {
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(
     AppRole.TRANSPORT_COMPANY,
+    AppRole.SENDER,
     AppRole.DRIVER,
     AdminRole.SUPER_ADMIN,
     AdminRole.STATE_MASTER,
@@ -91,13 +94,46 @@ export class ExceptionsController {
   @ApiBearerAuth()
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(AppRole.TRANSPORT_COMPANY)
-  @ApiOperation({ summary: 'Carrier resolves exception via intra-fleet reassign' })
+  @ApiOperation({
+    summary:
+      'Carrier proposes intra-fleet replacement (sender must approve before crew swap)',
+  })
   reassign(
     @CurrentPrincipal() principal: AuthenticatedPrincipal,
     @Param('id', ParseUUIDPipe) id: string,
     @Body(new ZodValidationPipe(tripExceptionReassignSchema)) body: TripExceptionReassignInput,
   ) {
     return this.exceptions.reassign(principal, id, body);
+  }
+
+  @Post(':id/approve-replacement')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(AppRole.SENDER)
+  @ApiOperation({ summary: 'Sender approves proposed replacement — applies crew swap' })
+  approveReplacement(
+    @CurrentPrincipal() principal: AuthenticatedPrincipal,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body(new ZodValidationPipe(tripExceptionSenderDecisionSchema))
+    body: TripExceptionSenderDecisionInput,
+  ) {
+    return this.exceptions.approveReplacement(principal, id, body);
+  }
+
+  @Post(':id/reject-replacement')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(AppRole.SENDER)
+  @ApiOperation({
+    summary: 'Sender rejects proposed replacement — cancel job + refund',
+  })
+  rejectReplacement(
+    @CurrentPrincipal() principal: AuthenticatedPrincipal,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body(new ZodValidationPipe(tripExceptionSenderDecisionSchema))
+    body: TripExceptionSenderDecisionInput,
+  ) {
+    return this.exceptions.rejectReplacement(principal, id, body);
   }
 
   @Post(':id/continue')
