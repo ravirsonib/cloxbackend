@@ -177,18 +177,21 @@ export class StripeService {
       return { url, mock: true as const };
     }
     // Accounts created via v2 need Account Links v2 (hosted onboarding).
+    // `configurations` matches merchant+recipient requested at account create
+    // (Stripe rejects links that omit configs for some platforms).
     const link = await this.getClient().v2.core.accountLinks.create({
       account: params.accountId,
       use_case: {
         type: 'account_onboarding',
         account_onboarding: {
+          configurations: ['merchant', 'recipient'],
           refresh_url: params.refreshUrl,
           return_url: params.returnUrl,
           collection_options: {
             fields: 'eventually_due',
           },
         },
-      },
+      } as Stripe.V2.Core.AccountLinkCreateParams['use_case'],
     });
     return { url: link.url, mock: false as const };
   }
@@ -202,13 +205,42 @@ export class StripeService {
         mock: true as const,
       };
     }
-    const account = await this.getClient().accounts.retrieve(accountId);
-    return {
-      id: account.id,
-      payoutsEnabled: Boolean(account.payouts_enabled),
-      chargesEnabled: Boolean(account.charges_enabled),
-      mock: false as const,
-    };
+    // Prefer Accounts v2 capability status (recipient transfers / merchant payouts).
+    try {
+      const account = await this.getClient().v2.core.accounts.retrieve(accountId, {
+        include: ['configuration.recipient', 'configuration.merchant'],
+      });
+      const transfersStatus =
+        account.configuration?.recipient?.capabilities?.stripe_balance?.stripe_transfers
+          ?.status;
+      const payoutsStatus =
+        account.configuration?.merchant?.capabilities?.stripe_balance?.payouts?.status;
+      const cardStatus =
+        account.configuration?.merchant?.capabilities?.card_payments?.status;
+      // Ready to receive platform Transfers (Model A) once stripe_transfers is active.
+      const payoutsEnabled =
+        transfersStatus === 'active' || payoutsStatus === 'active';
+      const chargesEnabled = cardStatus === 'active';
+      return {
+        id: account.id,
+        payoutsEnabled,
+        chargesEnabled,
+        mock: false as const,
+      };
+    } catch (error: unknown) {
+      this.logger.warn(
+        `Accounts v2 retrieve failed for ${accountId}; falling back to Accounts v1 retrieve: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      const account = await this.getClient().accounts.retrieve(accountId);
+      return {
+        id: account.id,
+        payoutsEnabled: Boolean(account.payouts_enabled),
+        chargesEnabled: Boolean(account.charges_enabled),
+        mock: false as const,
+      };
+    }
   }
 
   publishableKey() {

@@ -13,7 +13,7 @@ jest.mock('stripe', () => {
     accountLinks: { create: jest.fn() },
     v2: {
       core: {
-        accounts: { create: jest.fn() },
+        accounts: { create: jest.fn(), retrieve: jest.fn() },
         accountLinks: { create: jest.fn() },
       },
     },
@@ -58,7 +58,7 @@ function stripeMock() {
     accountLinks: { create: jest.Mock };
     v2: {
       core: {
-        accounts: { create: jest.Mock };
+        accounts: { create: jest.Mock; retrieve: jest.Mock };
         accountLinks: { create: jest.Mock };
       };
     };
@@ -130,10 +130,21 @@ describe('StripeService live SDK paths (mocked Stripe client)', () => {
     api.v2.core.accountLinks.create.mockResolvedValue({
       url: 'https://connect.stripe/onboard',
     });
-    api.accounts.retrieve.mockResolvedValue({
+    api.v2.core.accounts.retrieve.mockResolvedValue({
       id: 'acct_live_1',
-      payouts_enabled: true,
-      charges_enabled: false,
+      configuration: {
+        recipient: {
+          capabilities: {
+            stripe_balance: { stripe_transfers: { status: 'active' } },
+          },
+        },
+        merchant: {
+          capabilities: {
+            card_payments: { status: 'inactive' },
+            stripe_balance: { payouts: { status: 'active' } },
+          },
+        },
+      },
     });
 
     const svc = new StripeService(liveConfig());
@@ -173,6 +184,7 @@ describe('StripeService live SDK paths (mocked Stripe client)', () => {
       chargesEnabled: false,
       mock: false,
     });
+    expect(api.v2.core.accounts.retrieve).toHaveBeenCalled();
   });
 
   it('live createPaymentIntent with and without paymentMethodId', async () => {

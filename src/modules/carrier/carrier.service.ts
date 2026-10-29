@@ -434,8 +434,13 @@ export class CarrierService {
     const adminOrigin = this.config
       .get('ADMIN_APP_URL', { infer: true })
       .replace(/\/$/, '');
-    const refreshUrl = urls?.refreshUrl ?? `${adminOrigin}/carrier/onboarding`;
-    const returnUrl = urls?.returnUrl ?? `${adminOrigin}/carrier/onboarding?connect=return`;
+    // Both return and refresh must carry connect=return. Stripe often sends users
+    // to refresh_url (expired/reused Account Link); without the query, the
+    // Payouts Continue button used to stay locked after a successful Stripe flow.
+    const returnUrl =
+      urls?.returnUrl ?? `${adminOrigin}/carrier/onboarding?connect=return`;
+    const refreshUrl =
+      urls?.refreshUrl ?? `${adminOrigin}/carrier/onboarding?connect=return`;
     const link = await this.stripe.createAccountLink({
       accountId,
       refreshUrl,
@@ -465,7 +470,9 @@ export class CarrierService {
     }
     const account = await this.stripe.retrieveConnectAccount(company.stripeConnectAccountId);
     if (!account.payoutsEnabled) {
-      throw new BadRequestException('Connect account payouts not enabled yet');
+      throw new BadRequestException(
+        'Stripe payouts are not ready yet. Finish every Stripe step (bank + identity), then click Continue again. If Stripe still shows outstanding requirements, open payout setup again.',
+      );
     }
     await this.prisma.company.update({
       where: { id: company.id },

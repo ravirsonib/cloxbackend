@@ -127,7 +127,7 @@ describe('CarrierService crumb branch leftovers', () => {
     await makeService(prisma).createConnectOnboarding(carrierPrincipal);
     expect(stripe.createAccountLink).toHaveBeenCalledWith(
       expect.objectContaining({
-        refreshUrl: 'http://localhost:5174/carrier/onboarding',
+        refreshUrl: 'http://localhost:5174/carrier/onboarding?connect=return',
         returnUrl: 'http://localhost:5174/carrier/onboarding?connect=return',
       }),
     );
@@ -139,7 +139,7 @@ describe('CarrierService crumb branch leftovers', () => {
     );
     expect(stripe.createAccountLink).toHaveBeenCalledWith(
       expect.objectContaining({
-        refreshUrl: 'https://admin.clox.test/carrier/onboarding',
+        refreshUrl: 'https://admin.clox.test/carrier/onboarding?connect=return',
         returnUrl: 'https://admin.clox.test/carrier/onboarding?connect=return',
       }),
     );
