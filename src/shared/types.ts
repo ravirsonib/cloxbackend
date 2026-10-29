@@ -1586,3 +1586,30 @@ export const partnerPerformanceQuerySchema = z.object({
 });
 export type PartnerPerformanceQuery = z.infer<typeof partnerPerformanceQuerySchema>;
 
+export const notificationTypeSchema = z.enum([
+  'JOB_PUBLISHED',
+  'TRIP_AT_PICKUP',
+  'TRIP_STARTED',
+  'TRIP_BREAK',
+  'TRIP_EXCEPTION',
+  'TRIP_AT_DROPOFF',
+  'POD_FINALIZED',
+  'TRIP_COMPLETED',
+  'DISPUTE',
+]);
+export type NotificationTypeDto = z.infer<typeof notificationTypeSchema>;
+
+export const notificationItemSchema = z.object({
+  id: z.string().uuid(),
+  type: notificationTypeSchema,
+  title: z.string(),
+  body: z.string().nullable(),
+  href: z.string().nullable(),
+  entityType: z.string().nullable(),
+  entityId: z.string().nullable(),
+  readAt: z.string().datetime().nullable(),
+  createdAt: z.string().datetime(),
+  unread: z.boolean(),
+});
+export type NotificationItem = z.infer<typeof notificationItemSchema>;
+

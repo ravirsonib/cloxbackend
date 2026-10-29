@@ -27,9 +27,11 @@ import {
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { carrierMatchesJob } from '../matching/matching.eligibility';
+import { InAppNotificationsService } from '../notifications/in-app-notifications.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { PaymentsService } from '../payments/payments.service';
 import { SenderService } from '../sender/sender.service';
+import { NotificationType } from '@prisma/client';
 import { resolveJobEditMode } from './job-edit-mode';
 import {
   carrierNetPayoutCents,
@@ -61,6 +63,7 @@ export class JobsService {
     private readonly senderService: SenderService,
     private readonly payments: PaymentsService,
     @Optional() private readonly notifications?: NotificationsService,
+    @Optional() private readonly inbox?: InAppNotificationsService,
   ) {}
 
   private ensureDatabase() {
@@ -891,7 +894,7 @@ export class JobsService {
    * see this job on the market board (same carrierMatchesJob rules).
    */
   private async notifyEligibleCarriersOfPublish(jobId: string) {
-    if (!this.notifications) return;
+    if (!this.notifications && !this.inbox) return;
 
     const job = await this.prisma.job.findUnique({
       where: { id: jobId },
@@ -911,15 +914,17 @@ export class JobsService {
         vehicles: true,
         users: {
           where: { role: PlatformRole.TRANSPORT_COMPANY },
-          select: { email: true },
+          select: { id: true, email: true },
         },
       },
     });
 
     const emails: string[] = [];
+    const userIds: string[] = [];
     for (const company of carriers) {
       if (!carrierMatchesJob(company, job)) continue;
       for (const u of company.users) {
+        if (u.id) userIds.push(u.id);
         const email = u.email?.trim();
         if (email) emails.push(email);
         if (emails.length >= MAX_JOB_PUBLISH_CARRIER_EMAILS) break;
@@ -927,7 +932,21 @@ export class JobsService {
       if (emails.length >= MAX_JOB_PUBLISH_CARRIER_EMAILS) break;
     }
 
-    if (emails.length === 0) return;
+    const jobLabel = job.title || job.id.slice(0, 8);
+    if (this.inbox && userIds.length > 0) {
+      const inboxCount = await this.inbox.notifyUsers({
+        userIds,
+        type: NotificationType.JOB_PUBLISHED,
+        title: `New job on the market: ${jobLabel}`,
+        body: 'A matching load is open for bids. Open the market board to review.',
+        href: '/market',
+        entityType: 'Job',
+        entityId: job.id,
+      });
+      this.logger.log(`Job ${job.id} publish in-app notified ${inboxCount} carrier user(s)`);
+    }
+
+    if (!this.notifications || emails.length === 0) return;
 
     const result = await this.notifications.notifyJobPublishedToCarriers({
       carrierEmails: emails,
@@ -940,7 +959,7 @@ export class JobsService {
       requiresDg: job.requiresDg,
     });
     this.logger.log(
-      `Job ${job.id} publish notified ${result.notified} eligible carrier mailbox(es)`,
+      `Job ${job.id} publish emailed ${result.notified} eligible carrier mailbox(es)`,
     );
   }
 

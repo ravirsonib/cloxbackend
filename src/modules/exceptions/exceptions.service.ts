@@ -3,6 +3,7 @@ import {
   ForbiddenException,
   Injectable,
   NotFoundException,
+  Optional,
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -10,6 +11,8 @@ import {
   AssignmentStatus,
   DriverStatus,
   JobStatus,
+  NotificationType,
+  PlatformRole,
   ProposalStatus,
   TripExceptionKind,
   TripExceptionPhase,
@@ -41,6 +44,7 @@ import {
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { CarrierService } from '../carrier/carrier.service';
+import { InAppNotificationsService } from '../notifications/in-app-notifications.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { PaymentsService } from '../payments/payments.service';
 import {
@@ -84,6 +88,7 @@ export class ExceptionsService {
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
     private readonly notifications: NotificationsService,
+    @Optional() private readonly inbox: InAppNotificationsService | undefined,
     private readonly carrier: CarrierService,
     private readonly payments: PaymentsService,
     private readonly config: ConfigService<AppEnv, true>,
@@ -280,6 +285,7 @@ export class ExceptionsService {
           select: {
             id: true,
             title: true,
+            senderCompanyId: true,
             receiverEmail: true,
             senderCompany: {
               select: {
@@ -429,6 +435,31 @@ export class ExceptionsService {
       note: created.note ?? input.note,
       exceptionId: created.id,
     });
+
+    if (this.inbox) {
+      void this.inbox
+        .userIdsForCompanies({
+          companyIds: [
+            trip.job.senderCompanyId,
+            trip.assignment.carrierCompanyId,
+          ],
+          roles: [PlatformRole.SENDER, PlatformRole.TRANSPORT_COMPANY],
+        })
+        .then((userIds) =>
+          this.inbox!.notifyUsers({
+            userIds,
+            type: NotificationType.TRIP_EXCEPTION,
+            title: 'Trip exception opened',
+            body: `${created.kind} · ${created.phase}${
+              created.note ? ` — ${created.note}` : ''
+            }`,
+            href: `/jobs/${trip.job.id}`,
+            entityType: 'TripException',
+            entityId: created.id,
+          }),
+        )
+        .catch(() => undefined);
+    }
 
     await this.audit.recordPlatform({
       action: AuditAction.EXCEPTION_NOTIFIED,

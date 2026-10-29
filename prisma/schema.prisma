@@ -314,10 +314,42 @@ model User {
   driver          Driver?
   otpChallenges   OtpChallenge[]
   sessions        AuthSession[]
+  notifications   Notification[]
 
   @@index([companyId])
   @@index([role, status])
   @@index([phone])
+}
+
+enum NotificationType {
+  JOB_PUBLISHED
+  TRIP_AT_PICKUP
+  TRIP_STARTED
+  TRIP_BREAK
+  TRIP_EXCEPTION
+  TRIP_AT_DROPOFF
+  POD_FINALIZED
+  TRIP_COMPLETED
+  /// Reserved for future futile-trip / dispute flows — no emitters in MVP.
+  DISPUTE
+}
+
+/// In-app inbox row (email remains separate via NotificationsService).
+model Notification {
+  id         String           @id @default(uuid())
+  userId     String
+  user       User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type       NotificationType
+  title      String
+  body       String?
+  href       String?
+  entityType String?
+  entityId   String?
+  readAt     DateTime?
+  createdAt  DateTime         @default(now())
+
+  @@index([userId, readAt, createdAt])
+  @@index([userId, createdAt])
 }
 
 enum SenderAccountType {

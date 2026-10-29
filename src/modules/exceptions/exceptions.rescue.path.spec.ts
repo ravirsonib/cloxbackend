@@ -52,6 +52,10 @@ describe('ExceptionsService rescue candidates + release', () => {
       prisma as never,
       audit as never,
       notifications as never,
+      {
+        userIdsForCompanies: jest.fn().mockResolvedValue([]),
+        notifyUsers: jest.fn().mockResolvedValue(0),
+      } as never,
       carrier as never,
       payments as never,
       config as never,

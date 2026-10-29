@@ -33,16 +33,20 @@ describe('Thin controller status / meta endpoints', () => {
     expect(rec.recommendedVehicleClass).toBeTruthy();
   });
 
-  it('SettlementsController + NotificationsController status scaffolds', () => {
+  it('SettlementsController status scaffold + NotificationsController constructs', () => {
     expect(new SettlementsController().status()).toMatchObject({
       module: 'settlements',
       status: 'scaffold',
       implemented: false,
     });
-    expect(new NotificationsController().status()).toMatchObject({
-      module: 'notifications',
-      status: 'scaffold',
-      implemented: false,
-    });
+    const inbox = {
+      listForPrincipal: jest.fn(),
+      unreadCount: jest.fn(),
+      markRead: jest.fn(),
+      markAllRead: jest.fn(),
+    };
+    expect(new NotificationsController(inbox as never)).toBeInstanceOf(
+      NotificationsController,
+    );
   });
 });

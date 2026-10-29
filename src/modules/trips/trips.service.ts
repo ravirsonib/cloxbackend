@@ -5,6 +5,7 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  Optional,
   ServiceUnavailableException,
   forwardRef,
 } from '@nestjs/common';
@@ -13,6 +14,8 @@ import {
   AssignmentStatus,
   JobPricingModel,
   JobStatus,
+  NotificationType,
+  PlatformRole,
   Prisma,
   SurchargeKind,
   SurchargeStatus,
@@ -43,6 +46,7 @@ import {
 } from '../../shared/types';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
+import { InAppNotificationsService } from '../notifications/in-app-notifications.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { PaymentsService } from '../payments/payments.service';
 import {
@@ -91,11 +95,72 @@ export class TripsService {
     @Inject(forwardRef(() => PaymentsService))
     private readonly payments: PaymentsService,
     private readonly notifications: NotificationsService,
+    @Optional() private readonly inbox?: InAppNotificationsService,
   ) {}
 
   private ensureDatabase() {
     if (!this.prisma.isConnected()) {
       throw new ServiceUnavailableException('Database is unavailable');
+    }
+  }
+
+  /**
+   * Best-effort in-app inbox for trip stakeholders (sender + carrier [+ driver]).
+   * Never throws — trip transitions must not depend on inbox writes.
+   */
+  private async emitTripInbox(params: {
+    tripId: string;
+    type: NotificationType;
+    title: string;
+    body?: string;
+    includeDriver?: boolean;
+  }) {
+    if (!this.inbox) return;
+    try {
+      const trip = await this.prisma.trip.findUnique({
+        where: { id: params.tripId },
+        select: {
+          id: true,
+          jobId: true,
+          job: { select: { senderCompanyId: true, title: true } },
+          assignment: {
+            select: { carrierCompanyId: true, driverId: true },
+          },
+        },
+      });
+      if (!trip) return;
+
+      const companyIds = [
+        trip.job.senderCompanyId,
+        trip.assignment.carrierCompanyId,
+      ].filter(Boolean);
+      const partyIds = await this.inbox.userIdsForCompanies({
+        companyIds,
+        roles: [PlatformRole.SENDER, PlatformRole.TRANSPORT_COMPANY],
+      });
+      const userIds = [...partyIds];
+      if (params.includeDriver) {
+        const driverUserId = await this.inbox.userIdForDriver(
+          trip.assignment.driverId,
+        );
+        if (driverUserId) userIds.push(driverUserId);
+      }
+
+      await this.inbox.notifyUsers({
+        userIds,
+        type: params.type,
+        title: params.title,
+        body: params.body ?? null,
+        href: `/jobs/${trip.jobId}`,
+        entityType: 'Trip',
+        entityId: trip.id,
+      });
+    } catch (error: unknown) {
+      this.logger.warn(
+        `Trip inbox emit failed (${params.type}): ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
     }
   }
 
@@ -988,18 +1053,24 @@ export class TripsService {
         },
       });
 
-      await this.audit.recordPlatform({
-        action: AuditAction.TRIP_MASS_CHECKED,
-        actorUserId: user.id,
-        entityType: 'Trip',
-        entityId: trip.id,
-        metadata: {
-          over: true,
-          actual: input.actualMassKg,
-          declared,
-          code: 'MASS_DISCREPANCY',
-          surchargeId: surcharge.id,
-        },
+    await this.audit.recordPlatform({
+      action: AuditAction.TRIP_MASS_CHECKED,
+      actorUserId: user.id,
+      entityType: 'Trip',
+      entityId: trip.id,
+      metadata: {
+        over: true,
+        actual: input.actualMassKg,
+        declared,
+        code: 'MASS_DISCREPANCY',
+        surchargeId: surcharge.id,
+      },
+    });
+      void this.emitTripInbox({
+        tripId: trip.id,
+        type: NotificationType.TRIP_AT_PICKUP,
+        title: 'Driver at pickup',
+        body: 'Mass check recorded (over declared). Start is blocked until surcharge is cleared.',
       });
 
       const refreshed = await this.loadTripForDriver(user.driver!.id, tripId);
@@ -1024,6 +1095,12 @@ export class TripsService {
         status: TripStatus.AT_PICKUP,
       },
       include: this.tripInclude(),
+    });
+    void this.emitTripInbox({
+      tripId: trip.id,
+      type: NotificationType.TRIP_AT_PICKUP,
+      title: 'Driver at pickup',
+      body: 'Mass check passed. Trip is ready to start.',
     });
     await this.audit.recordPlatform({
       action: AuditAction.TRIP_MASS_CHECKED,
@@ -1132,6 +1209,12 @@ export class TripsService {
       entityId: trip.jobId,
       metadata: { event: 'trip_started', channel: 'FCM/APNs stub' },
     });
+    void this.emitTripInbox({
+      tripId: trip.id,
+      type: NotificationType.TRIP_STARTED,
+      title: 'Trip started',
+      body: 'The driver has started the trip and is in transit.',
+    });
 
     return this.mapTrip(updated, { complianceOk: true });
   }
@@ -1183,6 +1266,14 @@ export class TripsService {
       entityId: trip.id,
       metadata: { onBreak: input.onBreak },
     });
+    if (input.onBreak) {
+      void this.emitTripInbox({
+        tripId: trip.id,
+        type: NotificationType.TRIP_BREAK,
+        title: 'Driver on break',
+        body: 'Live tracking is paused while the driver is on break.',
+      });
+    }
     return this.mapTrip(updated);
   }
 
@@ -1452,6 +1543,13 @@ export class TripsService {
       entityType: 'Trip',
       entityId: trip.id,
       metadata: { jobId: trip.jobId },
+    });
+    void this.emitTripInbox({
+      tripId: trip.id,
+      type: NotificationType.TRIP_COMPLETED,
+      title: 'Trip completed',
+      body: 'All stops and POD are complete. The job is finished.',
+      includeDriver: true,
     });
 
     try {
@@ -2117,6 +2215,12 @@ export class TripsService {
       entityType: 'Trip',
       entityId: tripId,
       metadata: { jobStopId },
+    });
+    void this.emitTripInbox({
+      tripId,
+      type: NotificationType.TRIP_AT_DROPOFF,
+      title: 'Driver at drop-off',
+      body: 'The driver has arrived at drop-off. POD can proceed.',
     });
   }
 
@@ -2811,6 +2915,13 @@ export class TripsService {
         podPackageStorageKey: podPdfArtifact.storageKey,
         journeyEventCount: journey.length,
       },
+    });
+    void this.emitTripInbox({
+      tripId: trip.id,
+      type: NotificationType.POD_FINALIZED,
+      title: 'POD finalized',
+      body: `Proof of delivery captured for ${parties.dropSuburb || 'drop-off'}.`,
+      includeDriver: true,
     });
 
     // Complete + release driver first (POD is trip end). Emails must not block release.

@@ -2,6 +2,7 @@ import { Test } from '@nestjs/testing';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
+import { InAppNotificationsService } from '../notifications/in-app-notifications.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { PaymentsService } from '../payments/payments.service';
 import { TripsService } from './trips.service';
@@ -21,6 +22,14 @@ describe('TripsService constructor leftover', () => {
             notifyTripApproaching: jest.fn(),
             notifyTripAtDropoff: jest.fn(),
             notifyPodFinalized: jest.fn(),
+          },
+        },
+        {
+          provide: InAppNotificationsService,
+          useValue: {
+            notifyUsers: jest.fn(),
+            userIdsForCompanies: jest.fn().mockResolvedValue([]),
+            userIdForDriver: jest.fn().mockResolvedValue(null),
           },
         },
       ],

@@ -67,6 +67,10 @@ describe('ExceptionsService continue / escalate / watchdog', () => {
       prisma as never,
       audit as never,
       notifications as never,
+      {
+        userIdsForCompanies: jest.fn().mockResolvedValue([]),
+        notifyUsers: jest.fn().mockResolvedValue(0),
+      } as never,
       carrier as never,
       { adjustForMarketplaceRelease: jest.fn() } as never,
       config as never,
