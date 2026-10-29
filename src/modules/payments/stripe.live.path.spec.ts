@@ -11,6 +11,12 @@ jest.mock('stripe', () => {
       retrieve: jest.fn(),
     },
     accountLinks: { create: jest.fn() },
+    v2: {
+      core: {
+        accounts: { create: jest.fn() },
+        accountLinks: { create: jest.fn() },
+      },
+    },
     paymentIntents: {
       create: jest.fn(),
       retrieve: jest.fn(),
@@ -50,6 +56,12 @@ function stripeMock() {
     paymentMethods: { attach: jest.Mock };
     accounts: { create: jest.Mock; retrieve: jest.Mock };
     accountLinks: { create: jest.Mock };
+    v2: {
+      core: {
+        accounts: { create: jest.Mock };
+        accountLinks: { create: jest.Mock };
+      };
+    };
     paymentIntents: { create: jest.Mock; retrieve: jest.Mock; cancel: jest.Mock };
     refunds: { create: jest.Mock };
     transfers: { create: jest.Mock; createReversal: jest.Mock };
@@ -114,8 +126,10 @@ describe('StripeService live SDK paths (mocked Stripe client)', () => {
 
   it('live Connect account + link + retrieve', async () => {
     const api = stripeMock();
-    api.accounts.create.mockResolvedValue({ id: 'acct_live_1' });
-    api.accountLinks.create.mockResolvedValue({ url: 'https://connect.stripe/onboard' });
+    api.v2.core.accounts.create.mockResolvedValue({ id: 'acct_live_1' });
+    api.v2.core.accountLinks.create.mockResolvedValue({
+      url: 'https://connect.stripe/onboard',
+    });
     api.accounts.retrieve.mockResolvedValue({
       id: 'acct_live_1',
       payouts_enabled: true,
@@ -129,6 +143,14 @@ describe('StripeService live SDK paths (mocked Stripe client)', () => {
         businessName: 'Carrier Co',
       }),
     ).resolves.toEqual({ id: 'acct_live_1', mock: false });
+    expect(api.v2.core.accounts.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        dashboard: 'express',
+        contact_email: 'carrier@yopmail.com',
+        identity: expect.objectContaining({ country: 'au', entity_type: 'company' }),
+      }),
+    );
+    expect(api.accounts.create).not.toHaveBeenCalled();
 
     await expect(
       svc.createAccountLink({
@@ -137,6 +159,13 @@ describe('StripeService live SDK paths (mocked Stripe client)', () => {
         returnUrl: 'https://app/return',
       }),
     ).resolves.toEqual({ url: 'https://connect.stripe/onboard', mock: false });
+    expect(api.v2.core.accountLinks.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        account: 'acct_live_1',
+        use_case: expect.objectContaining({ type: 'account_onboarding' }),
+      }),
+    );
+    expect(api.accountLinks.create).not.toHaveBeenCalled();
 
     await expect(svc.retrieveConnectAccount('acct_live_1')).resolves.toEqual({
       id: 'acct_live_1',

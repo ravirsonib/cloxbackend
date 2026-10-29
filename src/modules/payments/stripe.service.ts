@@ -57,7 +57,8 @@ export class StripeService {
     }
     const intent = await this.getClient().setupIntents.create({
       customer: customerId,
-      payment_method_types: ['card'],
+      // Stripe SDK 23+: `payment_method_types` → `allowed_payment_method_types`
+      allowed_payment_method_types: ['card'],
       usage: 'off_session',
     });
     return {
@@ -85,7 +86,13 @@ export class StripeService {
     return { paymentMethodId: params.paymentMethodId, mock: false as const };
   }
 
-  /** Stripe Connect Express account (M4). Mock when no secret key. */
+  /**
+   * Stripe Connect Express-equivalent account via Accounts v2 (M4).
+   * Separate charges + transfers need recipient (stripe_transfers);
+   * merchant/card_payments kept for Express parity. Mock when no secret key.
+   * @see https://docs.stripe.com/connect/accounts-v2/account-creation
+   * @see docs/payments/stripe-payment-specification.md §6.2
+   */
   async createConnectAccount(params: {
     email: string;
     businessName: string;
@@ -97,17 +104,44 @@ export class StripeService {
       return { id, mock: true as const };
     }
     try {
-      const account = await this.getClient().accounts.create({
-        type: 'express',
-        country: 'AU',
-        email: params.email,
-        business_type: 'company',
-        company: { name: params.businessName },
-        capabilities: {
-          card_payments: { requested: true },
-          transfers: { requested: true },
+      const account = await this.getClient().v2.core.accounts.create({
+        contact_email: params.email,
+        display_name: params.businessName,
+        dashboard: 'express',
+        identity: {
+          country: 'au',
+          entity_type: 'company',
+          business_details: { registered_name: params.businessName },
+        },
+        defaults: {
+          currency: 'aud',
+          responsibilities: {
+            // Express dashboard requires platform-liable fees + losses.
+            fees_collector: 'application',
+            losses_collector: 'application',
+          },
+        },
+        configuration: {
+          merchant: {
+            capabilities: {
+              card_payments: { requested: true },
+            },
+          },
+          recipient: {
+            capabilities: {
+              stripe_balance: {
+                stripe_transfers: { requested: true },
+              },
+            },
+          },
         },
         metadata: params.metadata,
+        include: [
+          'configuration.merchant',
+          'configuration.recipient',
+          'identity',
+          'defaults',
+        ],
       });
       return { id: account.id, mock: false as const };
     } catch (error: unknown) {
@@ -118,6 +152,14 @@ export class StripeService {
         );
         throw new Error(
           'Stripe Connect is not enabled on the platform account. An admin must enable Connect in the Stripe Dashboard (Connect → Get started), then retry payout setup.',
+        );
+      }
+      if (/Accounts v1|feat_accounts_v1_support|\/v2\/core\/accounts/i.test(message)) {
+        this.logger.error(
+          `Stripe rejected Connect account creation (Accounts v1 policy / v2 required): ${message}`,
+        );
+        throw new Error(
+          'Stripe Connect account setup failed. The platform must create connected accounts with Accounts v2. Retry after the API is updated, or ask an admin to check Stripe Connect settings.',
         );
       }
       throw error;
@@ -134,11 +176,19 @@ export class StripeService {
       this.logger.warn(`STRIPE_MOCK: AccountLink ${url}`);
       return { url, mock: true as const };
     }
-    const link = await this.getClient().accountLinks.create({
+    // Accounts created via v2 need Account Links v2 (hosted onboarding).
+    const link = await this.getClient().v2.core.accountLinks.create({
       account: params.accountId,
-      refresh_url: params.refreshUrl,
-      return_url: params.returnUrl,
-      type: 'account_onboarding',
+      use_case: {
+        type: 'account_onboarding',
+        account_onboarding: {
+          refresh_url: params.refreshUrl,
+          return_url: params.returnUrl,
+          collection_options: {
+            fields: 'eventually_due',
+          },
+        },
+      },
     });
     return { url: link.url, mock: false as const };
   }

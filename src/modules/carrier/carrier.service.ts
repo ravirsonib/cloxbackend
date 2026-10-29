@@ -417,7 +417,10 @@ export class CarrierService {
         });
       } catch (error: unknown) {
         const message = error instanceof Error ? error.message : String(error);
-        if (/Stripe Connect is not enabled/i.test(message)) {
+        if (
+          /Stripe Connect is not enabled/i.test(message) ||
+          /Stripe Connect account setup failed/i.test(message)
+        ) {
           throw new BadRequestException(message);
         }
         throw error;
