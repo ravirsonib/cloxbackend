@@ -177,21 +177,20 @@ export class StripeService {
       return { url, mock: true as const };
     }
     // Accounts created via v2 need Account Links v2 (hosted onboarding).
-    // `configurations` matches merchant+recipient requested at account create
-    // (Stripe rejects links that omit configs for some platforms).
+    // Do not send `configurations` here — current Stripe API rejects it as unknown;
+    // configs already requested on account create are used for the link.
     const link = await this.getClient().v2.core.accountLinks.create({
       account: params.accountId,
       use_case: {
         type: 'account_onboarding',
         account_onboarding: {
-          configurations: ['merchant', 'recipient'],
           refresh_url: params.refreshUrl,
           return_url: params.returnUrl,
           collection_options: {
             fields: 'eventually_due',
           },
         },
-      } as Stripe.V2.Core.AccountLinkCreateParams['use_case'],
+      },
     });
     return { url: link.url, mock: false as const };
   }
