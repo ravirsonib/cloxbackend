@@ -5,6 +5,7 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  Optional,
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -15,6 +16,7 @@ import {
   ComplianceCaseType,
   ComplianceDocStatus,
   ComplianceDocType,
+  NotificationType,
   PlatformRole,
   SenderAccountType,
   UserStatus,
@@ -31,7 +33,9 @@ import {
 } from '../../shared/types';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
+import { InAppNotificationsService } from '../notifications/in-app-notifications.service';
 import { NotificationsService } from '../notifications/notifications.service';
+import { companyHasMockSenderPayment } from '../payments/stripe-mock-ids.util';
 import { StripeService } from '../payments/stripe.service';
 
 type CompanyInvoiceShape = {
@@ -53,6 +57,7 @@ export class SenderService {
     private readonly config: ConfigService<AppEnv, true>,
     private readonly notifications: NotificationsService,
     private readonly attribution: AttributionService,
+    @Optional() private readonly inbox?: InAppNotificationsService,
   ) {}
 
   private ensureDatabase() {
@@ -123,8 +128,13 @@ export class SenderService {
   ): string {
     if (company.status === CompanyStatus.REJECTED) return 'rejected';
     if (company.status === CompanyStatus.SUSPENDED) return 'suspended';
-    if (company.status === CompanyStatus.ACTIVE) return 'complete';
-    if (company.status === CompanyStatus.PENDING_PAYMENT) return 'payment';
+    // ACTIVE / PENDING_PAYMENT without a live payment method → reopen Payment only.
+    if (
+      company.status === CompanyStatus.ACTIVE ||
+      company.status === CompanyStatus.PENDING_PAYMENT
+    ) {
+      return company.paymentReady ? 'complete' : 'payment';
+    }
     if (
       company.status === CompanyStatus.PENDING_REVIEW ||
       company.status === CompanyStatus.PENDING_VERIFICATION
@@ -135,6 +145,46 @@ export class SenderService {
     if (!company.senderAccountType) return 'account_type';
     if (!this.invoiceComplete(company)) return 'invoice';
     return 'documents';
+  }
+
+  /**
+   * Live Stripe: clear mock Customer/PM flags so ACTIVE senders reopen Payment.
+   * Returns updated row when mutated, otherwise null.
+   */
+  private async clearMockSenderPaymentIfLive(company: {
+    id: string;
+    paymentReady: boolean;
+    stripeCustomerId: string | null;
+    stripeDefaultPaymentMethodId: string | null;
+  }) {
+    if (this.stripe.isMockMode()) return null;
+    if (!companyHasMockSenderPayment(company)) return null;
+    return this.prisma.company.update({
+      where: { id: company.id },
+      data: {
+        stripeCustomerId: null,
+        stripeDefaultPaymentMethodId: null,
+        paymentReady: false,
+      },
+    });
+  }
+
+  private async maybeNotifyPaymentSetupRequired(userId: string, companyId: string) {
+    if (!this.inbox) return;
+    const existing = await this.prisma.notification.findFirst({
+      where: { userId, type: NotificationType.PAYMENT_SETUP_REQUIRED },
+      select: { id: true },
+    });
+    if (existing) return;
+    void this.inbox.notifyUsers({
+      userIds: [userId],
+      type: NotificationType.PAYMENT_SETUP_REQUIRED,
+      title: 'Set up payment to keep booking',
+      body: 'Add a live card on Sender onboarding. Mock/practice cards no longer work.',
+      href: '/sender/onboarding',
+      entityType: 'Company',
+      entityId: companyId,
+    });
   }
 
   async register(input: SenderRegisterInput) {
@@ -225,12 +275,30 @@ export class SenderService {
   async getOnboarding(principal: AuthenticatedPrincipal) {
     this.ensureDatabase();
     const user = await this.requireSender(principal);
-    const company = user.company!;
+    let company = user.company!;
+    const cleared = await this.clearMockSenderPaymentIfLive(company);
+    if (cleared) {
+      company = {
+        ...company,
+        paymentReady: cleared.paymentReady,
+        stripeCustomerId: cleared.stripeCustomerId,
+        stripeDefaultPaymentMethodId: cleared.stripeDefaultPaymentMethodId,
+      };
+    }
     const latestCase = company.complianceCases[0] ?? null;
     const goNoGo = this.goNoGo(company);
+    const step = this.wizardStep(company);
+    if (
+      (company.status === CompanyStatus.ACTIVE ||
+        company.status === CompanyStatus.PENDING_PAYMENT) &&
+      !company.paymentReady
+    ) {
+      void this.maybeNotifyPaymentSetupRequired(user.id, company.id);
+    }
 
     return {
-      step: this.wizardStep(company),
+      step,
+      paymentRepairRequired: step === 'payment' && company.status === CompanyStatus.ACTIVE,
       user: {
         id: user.id,
         email: user.email,
@@ -462,6 +530,24 @@ export class SenderService {
       metadata: { caseType, documentIds: input.documentIds },
     });
 
+    if (this.inbox) {
+      const legalName = company.legalName || 'Sender';
+      const regionId = created.regionId ?? company.homeRegionId;
+      void this.inbox.notifyComplianceCaseToOps({
+        caseId: created.id,
+        regionId,
+        type: isInfoResubmit
+          ? NotificationType.COMPLIANCE_CASE_RESUBMITTED
+          : NotificationType.COMPLIANCE_CASE_OPENED,
+        title: isInfoResubmit
+          ? `Compliance resubmitted: ${legalName}`
+          : `Compliance review: ${legalName}`,
+        body: isInfoResubmit
+          ? 'Sender re-submitted documents after info requested.'
+          : 'Sender verification submitted for Ops review.',
+      });
+    }
+
     return this.getOnboarding(principal);
   }
 
@@ -481,6 +567,14 @@ export class SenderService {
     }
 
     let customerId = company.stripeCustomerId;
+    // Live mode: replace mock Customer ids so SetupIntent can succeed.
+    if (
+      customerId &&
+      companyHasMockSenderPayment({ stripeCustomerId: customerId }) &&
+      !this.stripe.isMockMode()
+    ) {
+      customerId = null;
+    }
     if (!customerId) {
       const customer = await this.stripe.createCustomer({
         email: user.email,
@@ -491,7 +585,11 @@ export class SenderService {
       customerId = customer.id;
       await this.prisma.company.update({
         where: { id: company.id },
-        data: { stripeCustomerId: customerId },
+        data: {
+          stripeCustomerId: customerId,
+          stripeDefaultPaymentMethodId: null,
+          paymentReady: false,
+        },
       });
     }
 
@@ -519,10 +617,15 @@ export class SenderService {
     const user = await this.requireSender(principal);
     const company = user.company!;
 
-    if (company.status !== CompanyStatus.PENDING_PAYMENT) {
-      throw new BadRequestException('Company must be PENDING_PAYMENT to activate');
+    if (
+      company.status !== CompanyStatus.PENDING_PAYMENT &&
+      company.status !== CompanyStatus.ACTIVE
+    ) {
+      throw new BadRequestException(
+        'Payment confirm available only after Ops approve (PENDING_PAYMENT or ACTIVE repair)',
+      );
     }
-    if (!company.stripeCustomerId) {
+    if (!company.stripeCustomerId || companyHasMockSenderPayment(company)) {
       throw new BadRequestException('Call payment setup first');
     }
     if (!this.invoiceComplete(company)) {
@@ -539,12 +642,13 @@ export class SenderService {
       paymentMethodId: pmId,
     });
 
+    const activating = company.status === CompanyStatus.PENDING_PAYMENT;
     await this.prisma.company.update({
       where: { id: company.id },
       data: {
         stripeDefaultPaymentMethodId: attached.paymentMethodId,
         paymentReady: true,
-        status: CompanyStatus.ACTIVE,
+        ...(activating ? { status: CompanyStatus.ACTIVE } : {}),
       },
     });
 
@@ -553,14 +657,20 @@ export class SenderService {
       actorUserId: user.id,
       entityType: 'Company',
       entityId: company.id,
-      metadata: { paymentMethodId: attached.paymentMethodId, mock: attached.mock },
+      metadata: {
+        paymentMethodId: attached.paymentMethodId,
+        mock: attached.mock,
+        repair: !activating,
+      },
     });
-    await this.audit.recordPlatform({
-      action: AuditAction.SENDER_ACTIVATED,
-      actorUserId: user.id,
-      entityType: 'Company',
-      entityId: company.id,
-    });
+    if (activating) {
+      await this.audit.recordPlatform({
+        action: AuditAction.SENDER_ACTIVATED,
+        actorUserId: user.id,
+        entityType: 'Company',
+        entityId: company.id,
+      });
+    }
 
     return this.getOnboarding(principal);
   }

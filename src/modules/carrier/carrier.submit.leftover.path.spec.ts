@@ -77,7 +77,10 @@ describe('CarrierService submitVerification leftover gates', () => {
     inviteUrl: jest.fn(),
   };
 
-  function makeService(prisma: Record<string, unknown>) {
+  function makeService(
+    prisma: Record<string, unknown>,
+    inbox?: { notifyComplianceCaseToOps: jest.Mock },
+  ) {
     return new CarrierService(
       prisma as never,
       audit as never,
@@ -86,6 +89,7 @@ describe('CarrierService submitVerification leftover gates', () => {
       drivers as never,
       { sendRegistrationConfirmation: jest.fn().mockResolvedValue({ skipped: true }) } as never,
       { resolveInviteForRegister: jest.fn().mockResolvedValue({ referredByAdminUserId: null, inviteId: null, prospectId: null, homeRegionId: null }), markInviteAccepted: jest.fn() } as never,
+      inbox as never,
     );
   }
 
@@ -258,7 +262,10 @@ describe('CarrierService submitVerification leftover gates', () => {
       ),
     };
 
-    const result = await makeService(prisma).submitVerification(carrierPrincipal, {
+    const inbox = {
+      notifyComplianceCaseToOps: jest.fn().mockResolvedValue(2),
+    };
+    const result = await makeService(prisma, inbox).submitVerification(carrierPrincipal, {
       documentIds: DOC_IDS,
     });
     expect(result).toMatchObject({
@@ -282,6 +289,12 @@ describe('CarrierService submitVerification leftover gates', () => {
     expect(tx.complianceCase.create).not.toHaveBeenCalled();
     expect(audit.recordPlatform).toHaveBeenCalledWith(
       expect.objectContaining({ entityId: 'case-info' }),
+    );
+    expect(inbox.notifyComplianceCaseToOps).toHaveBeenCalledWith(
+      expect.objectContaining({
+        caseId: 'case-info',
+        type: 'COMPLIANCE_CASE_RESUBMITTED',
+      }),
     );
   });
 });

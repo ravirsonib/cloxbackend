@@ -1388,6 +1388,25 @@ export class ExceptionsService {
       exceptionId: id,
     });
 
+    if (this.inbox) {
+      const jobLabel = notify.jobTitle || notify.jobId.slice(0, 8);
+      const adminUserIds = await this.inbox.adminIdsSuperAndStateForRegion(
+        notify.originRegionId,
+      );
+      void this.inbox.notifyAdmins({
+        adminUserIds,
+        type: NotificationType.TRIP_EXCEPTION_ESCALATED,
+        title: automatic
+          ? `Exception auto-escalated: ${jobLabel}`
+          : `Exception escalated: ${jobLabel}`,
+        body: note,
+        href: '/ops/exceptions',
+        entityType: 'TripException',
+        entityId: id,
+        regionId: notify.originRegionId,
+      });
+    }
+
     return { exception: this.mapException(updated), alreadyEscalated: false };
   }
 
@@ -1912,6 +1931,7 @@ export class ExceptionsService {
         select: {
           id: true,
           title: true,
+          originRegionId: true,
           receiverEmail: true,
           senderCompany: {
             select: {
@@ -1943,6 +1963,7 @@ export class ExceptionsService {
       senderEmail,
       jobTitle: job?.title ?? row.job?.title ?? '',
       jobId: job?.id ?? row.jobId,
+      originRegionId: job?.originRegionId ?? null,
     };
   }
 }

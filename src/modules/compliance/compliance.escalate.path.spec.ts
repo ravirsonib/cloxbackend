@@ -66,7 +66,10 @@ describe('ComplianceService requestInfo + escalate paths', () => {
     };
   }
 
-  function makeService(prisma: Record<string, unknown>) {
+  function makeService(
+    prisma: Record<string, unknown>,
+    inbox?: { notifyComplianceCaseToOps: jest.Mock },
+  ) {
     return new ComplianceService(
       prisma as never,
       audit as never,
@@ -75,6 +78,7 @@ describe('ComplianceService requestInfo + escalate paths', () => {
       abr,
       { sendComplianceApprovedEmail: jest.fn().mockResolvedValue({ skipped: true }), sendComplianceInfoRequestedEmail: jest.fn().mockResolvedValue({ skipped: true }) } as never,
       { applyProposedChanges: jest.fn() } as never,
+      inbox as never,
     );
   }
 
@@ -89,7 +93,11 @@ describe('ComplianceService requestInfo + escalate paths', () => {
       complianceCase: {
         findUnique: jest.fn().mockResolvedValue(openCase()),
       },
-      user: { findMany: jest.fn().mockResolvedValue([{ email: 'carrier@yopmail.com' }]) },
+      user: {
+        findMany: jest
+          .fn()
+          .mockResolvedValue([{ id: 'u-carrier', email: 'carrier@yopmail.com' }]),
+      },
       $transaction: jest.fn().mockImplementation(async (fn: (tx: unknown) => unknown) => {
         const tx = {
           complianceCase: { update: caseUpdate },
@@ -98,7 +106,11 @@ describe('ComplianceService requestInfo + escalate paths', () => {
         return fn(tx);
       }),
     };
-    const service = makeService(prisma);
+    const inbox = {
+      notifyUsers: jest.fn().mockResolvedValue(1),
+      notifyComplianceCaseToOps: jest.fn().mockResolvedValue(0),
+    };
+    const service = makeService(prisma, inbox);
     await expect(
       service.requestInfo(superAdmin, 'case-1', { note: 'Need RWC photo' }),
     ).resolves.toEqual({
@@ -115,6 +127,16 @@ describe('ComplianceService requestInfo + escalate paths', () => {
       }),
     });
     expect(audit.recordPlatform).toHaveBeenCalled();
+    // fire-and-forget; allow microtask flush
+    await Promise.resolve();
+    expect(inbox.notifyUsers).toHaveBeenCalledWith(
+      expect.objectContaining({
+        userIds: ['u-carrier'],
+        type: 'COMPLIANCE_INFO_REQUESTED',
+        entityId: 'case-1',
+        href: '/carrier/onboarding',
+      }),
+    );
   });
 
   it('escalate rejects non-LOCAL_BDE', async () => {
@@ -144,7 +166,10 @@ describe('ComplianceService requestInfo + escalate paths', () => {
       },
       localTerritory: { findFirst: jest.fn() },
     };
-    const service = makeService(prisma);
+    const inbox = {
+      notifyComplianceCaseToOps: jest.fn().mockResolvedValue(2),
+    };
+    const service = makeService(prisma, inbox);
     await expect(
       service.escalate(localBde, 'case-1', { note: 'Need Super eyes' }),
     ).resolves.toEqual({
@@ -158,6 +183,14 @@ describe('ComplianceService requestInfo + escalate paths', () => {
         decisionNote: 'Need Super eyes',
       }),
     });
+    expect(inbox.notifyComplianceCaseToOps).toHaveBeenCalledWith(
+      expect.objectContaining({
+        caseId: 'case-1',
+        regionId: 'reg-vic',
+        type: 'COMPLIANCE_ESCALATED',
+        title: 'Compliance escalated: Carrier Co',
+      }),
+    );
   });
 
   it('getCase returns case with abrAssist null when no ABN', async () => {

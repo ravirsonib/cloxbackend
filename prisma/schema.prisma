@@ -90,6 +90,7 @@ model AdminUser {
   referredCompanies Company[]       @relation("CompanyReferredBy")
   companyInvites    CompanyInvite[] @relation("CompanyInviteInviter")
   prospects         Prospect[]      @relation("ProspectOwner")
+  notifications     Notification[]
 
   @@index([companyId])
   @@index([status])
@@ -332,24 +333,49 @@ enum NotificationType {
   TRIP_COMPLETED
   /// Reserved for future futile-trip / dispute flows — no emitters in MVP.
   DISPUTE
+  /// Marketplace — Ops decision on company KYB/KYC (email remains).
+  COMPLIANCE_APPROVED
+  COMPLIANCE_INFO_REQUESTED
+  /// Marketplace — bid lifecycle (email remains where present).
+  BID_RECEIVED
+  BID_ACCEPTED
+  /// Marketplace — reopen payment / Connect after mock→live or incomplete Stripe.
+  PAYMENT_SETUP_REQUIRED
+  PAYOUT_SETUP_REQUIRED
+
+  /// Ops inbox (Phase A) — emitters land in A2/A3.
+  COMPLIANCE_CASE_OPENED
+  COMPLIANCE_CASE_RESUBMITTED
+  ADMIN_PARTNER_KYB_SUBMITTED
+  COMPLIANCE_ESCALATED
+  TRIP_EXCEPTION_ESCALATED
+  FLEET_RWC_REVIEW_OPENED
+  DRIVER_LICENCE_REVIEW_OPENED
 }
 
 /// In-app inbox row (email remains separate via NotificationsService).
+/// Exactly one of userId (marketplace) or adminUserId (Ops) must be set — enforced in app.
 model Notification {
-  id         String           @id @default(uuid())
-  userId     String
-  user       User             @relation(fields: [userId], references: [id], onDelete: Cascade)
-  type       NotificationType
-  title      String
-  body       String?
-  href       String?
-  entityType String?
-  entityId   String?
-  readAt     DateTime?
-  createdAt  DateTime         @default(now())
+  id          String           @id @default(uuid())
+  userId      String?
+  user        User?            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  adminUserId String?
+  adminUser   AdminUser?       @relation(fields: [adminUserId], references: [id], onDelete: Cascade)
+  type        NotificationType
+  title       String
+  body        String?
+  href        String?
+  entityType  String?
+  entityId    String?
+  /// Optional denorm for Ops scoping / debug.
+  regionId    String?
+  readAt      DateTime?
+  createdAt   DateTime         @default(now())
 
   @@index([userId, readAt, createdAt])
   @@index([userId, createdAt])
+  @@index([adminUserId, readAt, createdAt])
+  @@index([adminUserId, createdAt])
 }
 
 enum SenderAccountType {

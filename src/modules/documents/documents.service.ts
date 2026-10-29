@@ -8,6 +8,7 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  Optional,
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -18,6 +19,7 @@ import {
   ComplianceCaseStatus,
   ComplianceCaseType,
   ComplianceDocStatus,
+  NotificationType,
 } from '@prisma/client';
 import type { AppEnv } from '../../config/env.validation';
 import type { AuthenticatedPrincipal } from '../../common/guards/jwt-auth.guard';
@@ -31,6 +33,7 @@ import {
 import { AttributionService } from '../../common/services/attribution.service';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
+import { InAppNotificationsService } from '../notifications/in-app-notifications.service';
 import { ScopeService } from '../../common/services/scope.service';
 
 const ALLOWED_MIME = new Set([
@@ -78,6 +81,7 @@ export class DocumentsService {
     private readonly audit: AuditService,
     private readonly scope: ScopeService,
     private readonly attribution: AttributionService,
+    @Optional() private readonly inbox?: InAppNotificationsService,
   ) {}
 
   private ensureDatabase() {
@@ -354,10 +358,14 @@ export class DocumentsService {
     this.ensureDatabase();
 
     if (!ALLOWED_MIME.has(input.mimeType)) {
-      throw new BadRequestException('Unsupported mime type');
+      throw new BadRequestException(
+        'Unsupported file type. Please use PDF, JPEG, PNG, or WebP.',
+      );
     }
     if (input.sizeBytes > 10 * 1024 * 1024) {
-      throw new BadRequestException('File exceeds 10MB limit');
+      throw new BadRequestException(
+        'This file is too large. Please choose a file under 10 MB.',
+      );
     }
 
     const company = await this.assertCompanyAccess(principal, input.companyId);
@@ -422,7 +430,7 @@ export class DocumentsService {
     this.ensureDatabase();
 
     if (!file?.buffer?.length) {
-      throw new BadRequestException('Missing file upload (multipart field "file")');
+      throw new BadRequestException('No file was received. Please try uploading again.');
     }
 
     const doc = await this.prisma.complianceDocument.findUnique({
@@ -440,12 +448,16 @@ export class DocumentsService {
     await this.assertDriverOwnsDoc(principal, doc);
 
     if (!mimeMatchesIntent(doc.mimeType, file.mimetype)) {
-      throw new BadRequestException('Content-Type does not match upload intent');
+      throw new BadRequestException(
+        'This file type does not match what was selected. Please try again with a PDF or photo.',
+      );
     }
     // Platform ceiling is 10MB; declared intent size is advisory (clients may recompress).
     const maxBytes = 10 * 1024 * 1024;
     if (file.size > maxBytes) {
-      throw new BadRequestException('File exceeds 10MB limit');
+      throw new BadRequestException(
+        'This file is too large. Please choose a file under 10 MB.',
+      );
     }
 
     const fullPath = this.absolutePath(doc.storageKey);
@@ -545,7 +557,13 @@ export class DocumentsService {
   ) {
     const company = await this.prisma.company.findUnique({
       where: { id: companyId },
-      select: { id: true, status: true, homeRegionId: true, type: true },
+      select: {
+        id: true,
+        status: true,
+        homeRegionId: true,
+        type: true,
+        legalName: true,
+      },
     });
     if (!company || company.type !== CompanyType.CARRIER) return;
     if (company.status !== CompanyStatus.BID_ELIGIBLE) return;
@@ -565,6 +583,7 @@ export class DocumentsService {
       orderBy: { createdAt: 'desc' },
     });
 
+    let shouldNotifyOps = false;
     if (!fleetCase) {
       fleetCase = await this.prisma.complianceCase.create({
         data: {
@@ -574,6 +593,7 @@ export class DocumentsService {
           regionId: company.homeRegionId,
         },
       });
+      shouldNotifyOps = true;
     } else if (fleetCase.status === ComplianceCaseStatus.INFO_REQUESTED) {
       fleetCase = await this.prisma.complianceCase.update({
         where: { id: fleetCase.id },
@@ -582,6 +602,7 @@ export class DocumentsService {
           decisionNote: null,
         },
       });
+      shouldNotifyOps = true;
     }
 
     const orphanRwcs = await this.prisma.complianceDocument.findMany({
@@ -602,6 +623,16 @@ export class DocumentsService {
         status: ComplianceDocStatus.UNDER_REVIEW,
       },
     });
+
+    if (shouldNotifyOps && this.inbox) {
+      void this.inbox.notifyComplianceCaseToOps({
+        caseId: fleetCase.id,
+        regionId: fleetCase.regionId ?? company.homeRegionId,
+        type: NotificationType.FLEET_RWC_REVIEW_OPENED,
+        title: `RWC review: ${company.legalName || 'Carrier'}`,
+        body: 'Fleet vehicle RWC submitted for Ops review.',
+      });
+    }
   }
 
   async listDocuments(

@@ -55,7 +55,10 @@ describe('CarrierService fleet RWC + DG KYB attach', () => {
     inviteUrl: jest.fn(),
   };
 
-  function makeService(prisma: Record<string, unknown>) {
+  function makeService(
+    prisma: Record<string, unknown>,
+    inbox?: { notifyComplianceCaseToOps: jest.Mock },
+  ) {
     return new CarrierService(
       prisma as never,
       audit as never,
@@ -72,6 +75,7 @@ describe('CarrierService fleet RWC + DG KYB attach', () => {
         }),
         markInviteAccepted: jest.fn(),
       } as never,
+      inbox as never,
     );
   }
 
@@ -243,14 +247,24 @@ describe('CarrierService fleet RWC + DG KYB attach', () => {
         ]),
       },
       assignment: { findMany: jest.fn().mockResolvedValue([]) },
+      proposal: { findMany: jest.fn().mockResolvedValue([]) },
     };
 
-    const result = await makeService(prisma).listVehicles(carrierPrincipal);
+    const inbox = {
+      notifyComplianceCaseToOps: jest.fn().mockResolvedValue(2),
+    };
+    const result = await makeService(prisma, inbox).listVehicles(carrierPrincipal);
     expect(prisma.complianceCase.create).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({
           caseType: ComplianceCaseType.CARRIER_FLEET_RWC,
         }),
+      }),
+    );
+    expect(inbox.notifyComplianceCaseToOps).toHaveBeenCalledWith(
+      expect.objectContaining({
+        caseId: 'case-fleet',
+        type: 'FLEET_RWC_REVIEW_OPENED',
       }),
     );
     expect(prisma.complianceDocument.updateMany).toHaveBeenCalledWith(

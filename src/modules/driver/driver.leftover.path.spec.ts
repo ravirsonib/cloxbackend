@@ -37,12 +37,16 @@ describe('DriverService acceptInvite + submitProfile leftovers', () => {
     },
   };
 
-  function makeService(prisma: Record<string, unknown>) {
+  function makeService(
+    prisma: Record<string, unknown>,
+    inbox?: { notifyComplianceCaseToOps: jest.Mock },
+  ) {
     return new DriverService(
       prisma as never,
       audit as never,
       notifications as never,
       config as never,
+      inbox as never,
     );
   }
 
@@ -273,6 +277,7 @@ describe('DriverService acceptInvite + submitProfile leftovers', () => {
           status: CompanyStatus.BID_ELIGIBLE,
           homeRegionId: 'reg-vic',
           type: CompanyType.CARRIER,
+          legalName: 'Carrier Co',
         }),
       },
       complianceCase: {
@@ -281,6 +286,7 @@ describe('DriverService acceptInvite + submitProfile leftovers', () => {
           id: 'case-drv',
           status: ComplianceCaseStatus.OPEN,
           caseType: ComplianceCaseType.CARRIER_DRIVER_LICENCE,
+          regionId: 'reg-vic',
         }),
       },
       complianceDocument: {
@@ -291,7 +297,10 @@ describe('DriverService acceptInvite + submitProfile leftovers', () => {
       driver: { update: driverUpdate },
       $transaction: jest.fn(async (ops: unknown[]) => ops),
     };
-    const service = makeService(prisma);
+    const inbox = {
+      notifyComplianceCaseToOps: jest.fn().mockResolvedValue(2),
+    };
+    const service = makeService(prisma, inbox);
     const result = await service.submitProfile(driverPrincipal, {
       ...personalProfile,
       licenceNo: 'L1',
@@ -312,6 +321,13 @@ describe('DriverService acceptInvite + submitProfile leftovers', () => {
       }),
     });
     expect(prisma.complianceDocument.updateMany).toHaveBeenCalled();
+    expect(inbox.notifyComplianceCaseToOps).toHaveBeenCalledWith(
+      expect.objectContaining({
+        caseId: 'case-drv',
+        type: 'DRIVER_LICENCE_REVIEW_OPENED',
+        regionId: 'reg-vic',
+      }),
+    );
   });
 
   it('submitProfile rejects unlinked / not accepted / past expiry / bad doc', async () => {

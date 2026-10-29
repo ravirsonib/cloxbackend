@@ -4,6 +4,7 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  Optional,
   ServiceUnavailableException,
 } from '@nestjs/common';
 import {
@@ -16,6 +17,7 @@ import {
   ComplianceDocType,
   DriverStatus,
   LeadStatus,
+  NotificationType,
   PlatformRole,
   UserStatus,
   VehicleStatus,
@@ -34,6 +36,7 @@ import {
 } from '../../shared/types';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
+import { InAppNotificationsService } from '../notifications/in-app-notifications.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { AbrService } from './abr.service';
 
@@ -55,6 +58,7 @@ export class ComplianceService {
     private readonly abr: AbrService,
     private readonly notifications: NotificationsService,
     private readonly companyProfile: CompanyProfileService,
+    @Optional() private readonly inbox?: InAppNotificationsService,
   ) {}
 
   private ensureDatabase() {
@@ -317,6 +321,17 @@ export class ComplianceService {
       },
     });
 
+    if (this.inbox) {
+      const legalName = company.legalName || 'Company';
+      void this.inbox.notifyComplianceCaseToOps({
+        caseId: created.complianceCase.id,
+        regionId: created.complianceCase.regionId ?? company.homeRegionId,
+        type: NotificationType.COMPLIANCE_CASE_OPENED,
+        title: `Compliance review: ${legalName}`,
+        body: 'Compliance case opened for Ops review.',
+      });
+    }
+
     return {
       id: created.complianceCase.id,
       status: created.complianceCase.status,
@@ -554,6 +569,23 @@ export class ComplianceService {
           });
         }
       }
+      void this.notifyCompanyDecision({
+        kind: 'approved',
+        caseId,
+        companyId: complianceCase.companyId,
+        companyEmail: complianceCase.company.email,
+        companyName: complianceCase.company.legalName,
+        companyType: complianceCase.company.type,
+        companyStatus: complianceCase.company.status,
+        caseType: complianceCase.caseType,
+        decisionNote: input.note,
+        sendEmail: false,
+      }).catch((error: unknown) => {
+        this.logger.error(
+          `Failed to notify company for asset-review approval ${caseId}`,
+          error instanceof Error ? error.stack : String(error),
+        );
+      });
       return {
         id: caseId,
         status: ComplianceCaseStatus.APPROVED,
@@ -647,6 +679,7 @@ export class ComplianceService {
     if (!statusUnchanged) {
       void this.notifyCompanyDecision({
         kind: 'approved',
+        caseId,
         companyId: complianceCase.companyId,
         companyEmail: complianceCase.company.email,
         companyName: complianceCase.company.legalName,
@@ -656,7 +689,7 @@ export class ComplianceService {
         decisionNote: input.note,
       }).catch((error: unknown) => {
         this.logger.error(
-          `Failed to send compliance approval email for case ${caseId}`,
+          `Failed to send compliance approval notification for case ${caseId}`,
           error instanceof Error ? error.stack : String(error),
         );
       });
@@ -760,9 +793,10 @@ export class ComplianceService {
     };
   }
 
-  /** Notify sender/carrier contacts after Ops decision (non-blocking). */
+  /** Notify sender/carrier contacts after Ops decision (in-app + email). */
   private async notifyCompanyDecision(params: {
     kind: 'approved' | 'info_requested';
+    caseId: string;
     companyId: string;
     companyEmail: string | null;
     companyName: string;
@@ -770,6 +804,8 @@ export class ComplianceService {
     companyStatus: CompanyStatus;
     caseType: ComplianceCaseType;
     decisionNote?: string | null;
+    /** When false, skip email (asset-review cases historically email-silent). */
+    sendEmail?: boolean;
   }) {
     if (
       params.companyType !== CompanyType.CARRIER &&
@@ -781,13 +817,42 @@ export class ComplianceService {
     const users = await this.prisma.user.findMany({
       where: {
         companyId: params.companyId,
-        status: UserStatus.ACTIVE,
+        status: { in: [UserStatus.ACTIVE, UserStatus.PENDING] },
         role: {
           in: [PlatformRole.SENDER, PlatformRole.TRANSPORT_COMPANY],
         },
       },
-      select: { email: true },
+      select: { id: true, email: true },
     });
+
+    if (this.inbox && users.length > 0) {
+      const onboardingHref =
+        params.companyType === CompanyType.CARRIER
+          ? '/carrier/onboarding'
+          : '/sender/onboarding';
+      const approved = params.kind === 'approved';
+      void this.inbox.notifyUsers({
+        userIds: users.map((u) => u.id),
+        type: approved
+          ? NotificationType.COMPLIANCE_APPROVED
+          : NotificationType.COMPLIANCE_INFO_REQUESTED,
+        title: approved
+          ? `Verification approved: ${params.companyName}`
+          : `More info needed: ${params.companyName}`,
+        body:
+          params.decisionNote?.trim() ||
+          (approved
+            ? 'Ops approved your compliance case.'
+            : 'Ops requested more information on your compliance case.'),
+        href: onboardingHref,
+        entityType: 'ComplianceCase',
+        entityId: params.caseId,
+      });
+    }
+
+    if (params.sendEmail === false) {
+      return;
+    }
 
     const recipients = new Set<string>();
     if (params.companyEmail?.trim()) {
@@ -801,7 +866,7 @@ export class ComplianceService {
 
     if (recipients.size < 1) {
       this.logger.warn(
-        `No contact email for company ${params.companyId} — skipped ${params.kind} notification`,
+        `No contact email for company ${params.companyId} — skipped ${params.kind} email`,
       );
       return;
     }
@@ -984,23 +1049,23 @@ export class ComplianceService {
         entityId: caseId,
         metadata: { note: input.note ?? null, caseType: complianceCase.caseType },
       });
-      if (!this.isAssetReviewCase(complianceCase.caseType)) {
-        void this.notifyCompanyDecision({
-          kind: 'info_requested',
-          companyId: complianceCase.companyId,
-          companyEmail: complianceCase.company.email,
-          companyName: complianceCase.company.legalName,
-          companyType: complianceCase.company.type,
-          companyStatus: complianceCase.company.status,
-          caseType: complianceCase.caseType,
-          decisionNote: input.note,
-        }).catch((error: unknown) => {
-          this.logger.error(
-            `Failed to send compliance info-requested email for case ${caseId}`,
-            error instanceof Error ? error.stack : String(error),
-          );
-        });
-      }
+      void this.notifyCompanyDecision({
+        kind: 'info_requested',
+        caseId,
+        companyId: complianceCase.companyId,
+        companyEmail: complianceCase.company.email,
+        companyName: complianceCase.company.legalName,
+        companyType: complianceCase.company.type,
+        companyStatus: complianceCase.company.status,
+        caseType: complianceCase.caseType,
+        decisionNote: input.note,
+        sendEmail: !this.isAssetReviewCase(complianceCase.caseType),
+      }).catch((error: unknown) => {
+        this.logger.error(
+          `Failed to send compliance info-requested notification for case ${caseId}`,
+          error instanceof Error ? error.stack : String(error),
+        );
+      });
       return {
         id: caseId,
         status: ComplianceCaseStatus.INFO_REQUESTED,
@@ -1072,6 +1137,7 @@ export class ComplianceService {
     } else {
       void this.notifyCompanyDecision({
         kind: 'info_requested',
+        caseId,
         companyId: complianceCase.companyId,
         companyEmail: complianceCase.company.email,
         companyName: complianceCase.company.legalName,
@@ -1081,7 +1147,7 @@ export class ComplianceService {
         decisionNote: input.note,
       }).catch((error: unknown) => {
         this.logger.error(
-          `Failed to send compliance info-requested email for case ${caseId}`,
+          `Failed to send compliance info-requested notification for case ${caseId}`,
           error instanceof Error ? error.stack : String(error),
         );
       });
@@ -1119,6 +1185,19 @@ export class ComplianceService {
       entityId: caseId,
       metadata: { note: input.note ?? null },
     });
+
+    if (this.inbox) {
+      const legalName = complianceCase.company.legalName || 'Company';
+      const regionId =
+        complianceCase.regionId ?? complianceCase.company.homeRegionId ?? null;
+      void this.inbox.notifyComplianceCaseToOps({
+        caseId,
+        regionId,
+        type: NotificationType.COMPLIANCE_ESCALATED,
+        title: `Compliance escalated: ${legalName}`,
+        body: input.note?.trim() || 'Local BDE escalated this compliance case.',
+      });
+    }
 
     return { id: caseId, status: ComplianceCaseStatus.ESCALATED };
   }

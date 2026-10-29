@@ -5,6 +5,7 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  Optional,
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -18,6 +19,7 @@ import {
   ComplianceDocType,
   DriverStatus,
   JobStatus,
+  NotificationType,
   PlatformRole,
   ProposalStatus,
   TripStatus,
@@ -44,7 +46,9 @@ import { AuditService } from '../audit/audit.service';
 import { DriverService } from '../driver/driver.service';
 import { assertAssignmentCompliance } from '../jobs/assignment-gates';
 import { isVehicleClassAdequate } from '../jobs/job-pricing.util';
+import { InAppNotificationsService } from '../notifications/in-app-notifications.service';
 import { NotificationsService } from '../notifications/notifications.service';
+import { companyHasMockCarrierConnect } from '../payments/stripe-mock-ids.util';
 import { StripeService } from '../payments/stripe.service';
 
 @Injectable()
@@ -59,6 +63,7 @@ export class CarrierService {
     private readonly drivers: DriverService,
     private readonly notifications: NotificationsService,
     private readonly attribution: AttributionService,
+    @Optional() private readonly inbox?: InAppNotificationsService,
   ) {}
 
   private ensureDatabase() {
@@ -173,7 +178,10 @@ export class CarrierService {
   }): string {
     if (company.status === CompanyStatus.REJECTED) return 'rejected';
     if (company.status === CompanyStatus.SUSPENDED) return 'suspended';
-    if (company.status === CompanyStatus.BID_ELIGIBLE) return 'complete';
+    // BID_ELIGIBLE without live Connect → reopen Payouts only (fleet/KYB stay done).
+    if (company.status === CompanyStatus.BID_ELIGIBLE) {
+      return company.stripeConnectPayoutsEnabled ? 'complete' : 'connect';
+    }
     if (
       company.status === CompanyStatus.PENDING_REVIEW ||
       company.status === CompanyStatus.PENDING_VERIFICATION
@@ -207,6 +215,41 @@ export class CarrierService {
     }
     if (company.serviceRegionCodes.length < 1) return 'capabilities';
     return 'submit';
+  }
+
+  /** Live Stripe: clear mock Connect account so BID_ELIGIBLE carriers reopen Payouts. */
+  private async clearMockCarrierConnectIfLive(company: {
+    id: string;
+    stripeConnectAccountId: string | null;
+    stripeConnectPayoutsEnabled: boolean;
+  }) {
+    if (this.stripe.isMockMode()) return null;
+    if (!companyHasMockCarrierConnect(company)) return null;
+    return this.prisma.company.update({
+      where: { id: company.id },
+      data: {
+        stripeConnectAccountId: null,
+        stripeConnectPayoutsEnabled: false,
+      },
+    });
+  }
+
+  private async maybeNotifyPayoutSetupRequired(userId: string, companyId: string) {
+    if (!this.inbox) return;
+    const existing = await this.prisma.notification.findFirst({
+      where: { userId, type: NotificationType.PAYOUT_SETUP_REQUIRED },
+      select: { id: true },
+    });
+    if (existing) return;
+    void this.inbox.notifyUsers({
+      userIds: [userId],
+      type: NotificationType.PAYOUT_SETUP_REQUIRED,
+      title: 'Set up payouts to keep bidding',
+      body: 'Complete live Stripe Connect on Carrier onboarding. Mock/practice payouts no longer work.',
+      href: '/carrier/onboarding',
+      entityType: 'Company',
+      entityId: companyId,
+    });
   }
 
   async register(input: CarrierRegisterInput) {
@@ -293,11 +336,28 @@ export class CarrierService {
   async getOnboarding(principal: AuthenticatedPrincipal) {
     this.ensureDatabase();
     const user = await this.requireCarrier(principal);
-    const company = user.company!;
+    let company = user.company!;
+    const cleared = await this.clearMockCarrierConnectIfLive(company);
+    if (cleared) {
+      company = {
+        ...company,
+        stripeConnectAccountId: cleared.stripeConnectAccountId,
+        stripeConnectPayoutsEnabled: cleared.stripeConnectPayoutsEnabled,
+      };
+    }
     const latestCase = company.complianceCases[0] ?? null;
     const goNoGo = this.goNoGo(company);
+    const step = this.wizardStep(company);
+    if (
+      company.status === CompanyStatus.BID_ELIGIBLE &&
+      !company.stripeConnectPayoutsEnabled
+    ) {
+      void this.maybeNotifyPayoutSetupRequired(user.id, company.id);
+    }
     return {
-      step: this.wizardStep(company),
+      step,
+      payoutRepairRequired:
+        step === 'connect' && company.status === CompanyStatus.BID_ELIGIBLE,
       user: { id: user.id, email: user.email, name: user.name, phone: user.phone },
       company: {
         id: company.id,
@@ -407,6 +467,13 @@ export class CarrierService {
       throw new BadRequestException('Complete legal profile (ABN) before Connect');
     }
     let accountId = company.stripeConnectAccountId;
+    if (
+      accountId &&
+      companyHasMockCarrierConnect({ stripeConnectAccountId: accountId }) &&
+      !this.stripe.isMockMode()
+    ) {
+      accountId = null;
+    }
     if (!accountId) {
       let account: { id: string };
       try {
@@ -428,7 +495,10 @@ export class CarrierService {
       accountId = account.id;
       await this.prisma.company.update({
         where: { id: company.id },
-        data: { stripeConnectAccountId: accountId },
+        data: {
+          stripeConnectAccountId: accountId,
+          stripeConnectPayoutsEnabled: false,
+        },
       });
     }
     const adminOrigin = this.config
@@ -508,6 +578,7 @@ export class CarrierService {
     id: string;
     status: CompanyStatus;
     homeRegionId: string | null;
+    legalName?: string | null;
   }) {
     if (company.status !== CompanyStatus.BID_ELIGIBLE) return;
     const orphanRows = await this.prisma.complianceDocument.findMany({
@@ -544,6 +615,7 @@ export class CarrierService {
       },
       orderBy: { createdAt: 'desc' },
     });
+    let shouldNotifyOps = false;
     if (!fleetCase) {
       fleetCase = await this.prisma.complianceCase.create({
         data: {
@@ -553,11 +625,13 @@ export class CarrierService {
           regionId: company.homeRegionId,
         },
       });
+      shouldNotifyOps = true;
     } else if (fleetCase.status === ComplianceCaseStatus.INFO_REQUESTED) {
       fleetCase = await this.prisma.complianceCase.update({
         where: { id: fleetCase.id },
         data: { status: ComplianceCaseStatus.OPEN, decisionNote: null },
       });
+      shouldNotifyOps = true;
     }
     await this.prisma.complianceDocument.updateMany({
       where: { id: { in: orphans.map((d) => d.id) } },
@@ -566,6 +640,17 @@ export class CarrierService {
         status: ComplianceDocStatus.UNDER_REVIEW,
       },
     });
+
+    if (shouldNotifyOps && this.inbox) {
+      const legalName = company.legalName || 'Carrier';
+      void this.inbox.notifyComplianceCaseToOps({
+        caseId: fleetCase.id,
+        regionId: fleetCase.regionId ?? company.homeRegionId,
+        type: NotificationType.FLEET_RWC_REVIEW_OPENED,
+        title: `RWC review: ${legalName}`,
+        body: 'Fleet vehicle RWC submitted for Ops review.',
+      });
+    }
   }
 
   async listVehicles(principal: AuthenticatedPrincipal) {
@@ -1870,6 +1955,25 @@ export class CarrierService {
       entityId: created.id,
       metadata: { caseType: 'CARRIER_KYB', documentIds: allDocumentIds },
     });
+
+    if (this.inbox) {
+      const legalName = company.legalName || 'Carrier';
+      const regionId = created.regionId ?? company.homeRegionId;
+      void this.inbox.notifyComplianceCaseToOps({
+        caseId: created.id,
+        regionId,
+        type: isInfoResubmit
+          ? NotificationType.COMPLIANCE_CASE_RESUBMITTED
+          : NotificationType.COMPLIANCE_CASE_OPENED,
+        title: isInfoResubmit
+          ? `Compliance resubmitted: ${legalName}`
+          : `Compliance review: ${legalName}`,
+        body: isInfoResubmit
+          ? 'Carrier re-submitted documents after info requested.'
+          : 'Carrier KYB submitted for Ops review.',
+      });
+    }
+
     return this.getOnboarding(principal);
   }
 

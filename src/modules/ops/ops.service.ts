@@ -4,6 +4,7 @@ import {
   ForbiddenException,
   Injectable,
   NotFoundException,
+  Optional,
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -19,6 +20,7 @@ import {
   ComplianceDocStatus,
   ComplianceDocType,
   LeadStatus,
+  NotificationType,
 } from '@prisma/client';
 import {
   AuditAction,
@@ -33,6 +35,7 @@ import type { AppEnv } from '../../config/env.validation';
 import { hashValue } from '../../common/utils/crypto';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
+import { InAppNotificationsService } from '../notifications/in-app-notifications.service';
 import { NotificationsService } from '../notifications/notifications.service';
 
 const PARTNER_REQUIRED_DOCS: ComplianceDocType[] = [
@@ -54,6 +57,7 @@ export class OpsService {
     private readonly audit: AuditService,
     private readonly notifications: NotificationsService,
     private readonly config: ConfigService<AppEnv, true>,
+    @Optional() private readonly inbox?: InAppNotificationsService,
   ) {}
 
   private ensureDatabase() {
@@ -822,6 +826,18 @@ export class OpsService {
       entityId: result.complianceCase.id,
       metadata: { caseType: ComplianceCaseType.ADMIN_PARTNER_KYB },
     });
+
+    if (this.inbox) {
+      const legalName = company.legalName || 'Partner';
+      void this.inbox.notifyComplianceCaseToOps({
+        caseId: result.complianceCase.id,
+        regionId: result.complianceCase.regionId ?? regionId ?? null,
+        type: NotificationType.ADMIN_PARTNER_KYB_SUBMITTED,
+        title: `Partner KYB submitted: ${legalName}`,
+        body: 'Invited admin partner completed KYB for Super review.',
+        superOnly: true,
+      });
+    }
 
     return {
       caseId: result.complianceCase.id,

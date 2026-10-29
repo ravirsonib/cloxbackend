@@ -985,19 +985,35 @@ export class NotificationsService {
   }
 
   /**
-   * Sender paid & assignment locked — notify carrier (action) + assigned driver (new trip).
+   * Sender paid & assignment locked — notify carrier (action) + assigned driver
+   * (new trip) + receiver(s) (delivery booked; G0-17 email notify).
    */
   async notifyAssignmentLocked(params: {
     carrierEmails: string[];
     driverEmail: string | null;
+    /** Drop receivers (job-level and/or per DROPOFF stop); emailed once each. */
+    receivers?: Array<{
+      email: string;
+      name?: string | null;
+      dropSuburb?: string | null;
+      dropAddress?: string | null;
+    }>;
     jobId: string;
     jobTitle: string;
     amountIncGstCents: number;
     vehicleLabel: string;
     driverName: string;
+    pickupAt?: Date | null;
   }) {
     const amount = `$${(params.amountIncGstCents / 100).toFixed(2)}`;
     const jobLabel = params.jobTitle || params.jobId.slice(0, 8);
+    const pickupLabel = params.pickupAt
+      ? params.pickupAt.toLocaleString('en-AU', {
+          timeZone: 'Australia/Sydney',
+          dateStyle: 'medium',
+          timeStyle: 'short',
+        })
+      : null;
     const details: EmailDetailRow[] = [
       { label: 'Job', value: jobLabel },
       { label: 'Paid (inc GST)', value: amount },
@@ -1005,6 +1021,9 @@ export class NotificationsService {
       { label: 'Driver', value: params.driverName },
       { label: 'Job ID', value: params.jobId },
     ];
+    if (pickupLabel) {
+      details.splice(1, 0, { label: 'Scheduled pickup', value: pickupLabel });
+    }
 
     const carrierEmails = [
       ...new Set(params.carrierEmails.map((e) => e.trim()).filter(Boolean)),
@@ -1075,11 +1094,80 @@ export class NotificationsService {
       });
     }
 
+    const receiversByEmail = new Map<
+      string,
+      {
+        email: string;
+        name?: string | null;
+        dropSuburb?: string | null;
+        dropAddress?: string | null;
+      }
+    >();
+    for (const r of params.receivers ?? []) {
+      const email = r.email?.trim().toLowerCase();
+      if (!email?.includes('@') || receiversByEmail.has(email)) continue;
+      receiversByEmail.set(email, { ...r, email });
+    }
+
+    const receiverResults = await Promise.all(
+      [...receiversByEmail.values()].map((receiver) => {
+        const greetingName = receiver.name?.trim() || 'there';
+        const receiverDetails: EmailDetailRow[] = [
+          { label: 'Job', value: jobLabel },
+          ...(pickupLabel
+            ? [{ label: 'Scheduled pickup', value: pickupLabel }]
+            : []),
+          ...(receiver.dropSuburb
+            ? [{ label: 'Drop suburb', value: receiver.dropSuburb }]
+            : []),
+          ...(receiver.dropAddress
+            ? [{ label: 'Drop address', value: receiver.dropAddress }]
+            : []),
+          { label: 'Job ID', value: params.jobId },
+        ];
+        return this.sendBranded({
+          to: receiver.email,
+          subject: `CLOX — delivery booked · ${jobLabel}`,
+          text: [
+            `Hi ${greetingName},`,
+            '',
+            `A delivery has been booked for you on CLOX (${jobLabel}).`,
+            receiver.dropAddress
+              ? `Drop address: ${receiver.dropAddress}`
+              : receiver.dropSuburb
+                ? `Drop suburb: ${receiver.dropSuburb}`
+                : null,
+            pickupLabel ? `Scheduled pickup: ${pickupLabel}` : null,
+            '',
+            'You do not need an account. We will email you again when the driver is approaching and when they arrive so you can sign proof of delivery on the driver’s device.',
+          ]
+            .filter(Boolean)
+            .join('\n'),
+          eyebrow: 'Delivery booked',
+          title: 'A delivery is coming to you',
+          intro: `Hi ${greetingName} — the sender and carrier have confirmed this job. You will get further emails when the driver is near and when they arrive. Proof of delivery is signed on the driver’s device (no login needed).`,
+          details: receiverDetails,
+          nextSteps: [
+            {
+              title: 'Be ready to receive',
+              body: 'Have someone available at the drop address when the driver arrives.',
+            },
+            {
+              title: 'Sign on the driver’s device',
+              body: 'You will sign proof of delivery on the driver’s screen (Sign-on-Glass). No CLOX account is required.',
+            },
+          ],
+        });
+      }),
+    );
+
     return {
       carrier: carrierResults,
       driver: driverResult,
+      receiver: receiverResults,
       notifiedCarrier: carrierEmails.length,
       notifiedDriver: Boolean(driverTo),
+      notifiedReceiver: receiversByEmail.size,
     };
   }
 

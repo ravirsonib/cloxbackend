@@ -3,11 +3,12 @@ import { JwtModule } from '@nestjs/jwt';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { ScopeService } from '../../common/services/scope.service';
 import { AuditModule } from '../audit/audit.module';
+import { NotificationsModule } from '../notifications/notifications.module';
 import { DocumentsController } from './documents.controller';
 import { DocumentsService } from './documents.service';
 
 @Module({
-  imports: [JwtModule.register({}), AuditModule],
+  imports: [JwtModule.register({}), AuditModule, NotificationsModule],
   controllers: [DocumentsController],
   providers: [DocumentsService, JwtAuthGuard, ScopeService],
   exports: [DocumentsService],

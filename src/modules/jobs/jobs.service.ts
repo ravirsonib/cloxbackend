@@ -440,9 +440,11 @@ export class JobsService {
     const eligibility = await this.senderService.getBookingEligibility(principal);
     if (!eligibility.canBook) {
       throw new ForbiddenException({
-        message: 'Sender cannot create jobs until Ops approve + invoice + payment ready',
+        message:
+          'Sender cannot create jobs until Ops approve + invoice + payment ready. Open /sender/onboarding to add a live card if payment is missing.',
         code: 'SENDER_NOT_BOOKING_READY',
         goNoGo: eligibility.goNoGo,
+        href: '/sender/onboarding',
       });
     }
 
@@ -590,9 +592,11 @@ export class JobsService {
     const eligibility = await this.senderService.getBookingEligibility(principal);
     if (!eligibility.canBook) {
       throw new ForbiddenException({
-        message: 'Sender cannot update jobs until Ops approve + invoice + payment ready',
+        message:
+          'Sender cannot update jobs until Ops approve + invoice + payment ready. Open /sender/onboarding to add a live card if payment is missing.',
         code: 'SENDER_NOT_BOOKING_READY',
         goNoGo: eligibility.goNoGo,
+        href: '/sender/onboarding',
       });
     }
 
@@ -752,9 +756,11 @@ export class JobsService {
     const eligibility = await this.senderService.getBookingEligibility(principal);
     if (!eligibility.canBook) {
       throw new ForbiddenException({
-        message: 'Sender cannot update jobs until Ops approve + invoice + payment ready',
+        message:
+          'Sender cannot update jobs until Ops approve + invoice + payment ready. Open /sender/onboarding to add a live card if payment is missing.',
         code: 'SENDER_NOT_BOOKING_READY',
         goNoGo: eligibility.goNoGo,
+        href: '/sender/onboarding',
       });
     }
 
@@ -832,9 +838,11 @@ export class JobsService {
     const eligibility = await this.senderService.getBookingEligibility(principal);
     if (!eligibility.canBook) {
       throw new ForbiddenException({
-        message: 'Sender cannot publish jobs',
+        message:
+          'Sender cannot publish jobs until payment is ready. Open /sender/onboarding to add a live card if needed.',
         code: 'SENDER_NOT_BOOKING_READY',
         goNoGo: eligibility.goNoGo,
+        href: '/sender/onboarding',
       });
     }
     const user = await this.prisma.user.findUnique({ where: { id: principal.id } });

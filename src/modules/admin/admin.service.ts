@@ -874,6 +874,24 @@ export class AdminService {
     );
   }
 
+  /**
+   * True when every DROPOFF POD is FINALIZED but the trip is not finished yet
+   * (driver still needs geofence exit / completeTripIfReady).
+   */
+  private podAwaitingDriverExit(params: {
+    tripStatus: string | null | undefined;
+    dropoffStopIds: string[];
+    stopProgress: Array<{ jobStopId: string; podStatus: string }>;
+  }): boolean {
+    const status = params.tripStatus;
+    if (!status || status === TripStatus.COMPLETED || status === TripStatus.CANCELLED) {
+      return false;
+    }
+    if (params.dropoffStopIds.length < 1) return false;
+    const byStop = new Map(params.stopProgress.map((p) => [p.jobStopId, p.podStatus]));
+    return params.dropoffStopIds.every((id) => byStop.get(id) === 'FINALIZED');
+  }
+
   async listJobs(query: AdminJobListQuery) {
     this.ensureDatabase();
     const where: Prisma.JobWhereInput = {};
@@ -919,7 +937,19 @@ export class AdminService {
               carrierCompany: { select: { id: true, legalName: true } },
             },
           },
-          trip: { select: { id: true, status: true, startedAt: true, completedAt: true } },
+          stops: {
+            where: { stopType: 'DROPOFF' },
+            select: { id: true },
+          },
+          trip: {
+            select: {
+              id: true,
+              status: true,
+              startedAt: true,
+              completedAt: true,
+              stopProgress: { select: { jobStopId: true, podStatus: true } },
+            },
+          },
           _count: { select: { proposals: true } },
         },
       }),
@@ -927,24 +957,39 @@ export class AdminService {
     ]);
 
     return {
-      items: rows.map((j) => ({
-        id: j.id,
-        status: j.status,
-        title: j.title,
-        pricingModel: j.pricingModel,
-        receiverName: j.receiverName,
-        receiverEmail: j.receiverEmail,
-        estimateIncGstCents: j.estimateIncGstCents,
-        createdAt: j.createdAt,
-        updatedAt: j.updatedAt,
-        publishedAt: j.publishedAt,
-        senderCompany: j.senderCompany,
-        assignment: j.assignment,
-        trip: j.trip,
-        proposalCount: j._count.proposals,
-        canHardDelete: this.canHardDeleteJob(j.status),
-        canSoftDelete: this.canSoftDeleteJob(j.status),
-      })),
+      items: rows.map((j) => {
+        const podAwaitingExit = this.podAwaitingDriverExit({
+          tripStatus: j.trip?.status,
+          dropoffStopIds: j.stops.map((s) => s.id),
+          stopProgress: j.trip?.stopProgress ?? [],
+        });
+        return {
+          id: j.id,
+          status: j.status,
+          title: j.title,
+          pricingModel: j.pricingModel,
+          receiverName: j.receiverName,
+          receiverEmail: j.receiverEmail,
+          estimateIncGstCents: j.estimateIncGstCents,
+          createdAt: j.createdAt,
+          updatedAt: j.updatedAt,
+          publishedAt: j.publishedAt,
+          senderCompany: j.senderCompany,
+          assignment: j.assignment,
+          trip: j.trip
+            ? {
+                id: j.trip.id,
+                status: j.trip.status,
+                startedAt: j.trip.startedAt,
+                completedAt: j.trip.completedAt,
+                podAwaitingExit,
+              }
+            : null,
+          proposalCount: j._count.proposals,
+          canHardDelete: this.canHardDeleteJob(j.status),
+          canSoftDelete: this.canSoftDeleteJob(j.status),
+        };
+      }),
       page: query.page,
       pageSize: query.pageSize,
       total,
@@ -993,6 +1038,7 @@ export class AdminService {
             completedAt: true,
             safetyPassedAt: true,
             massCheckOk: true,
+            stopProgress: { select: { jobStopId: true, podStatus: true } },
           },
         },
         paymentEvents: {
@@ -1009,8 +1055,25 @@ export class AdminService {
       },
     });
     if (!job) throw new NotFoundException('Job not found');
+    const dropoffStopIds = job.stops
+      .filter((s) => s.stopType === 'DROPOFF')
+      .map((s) => s.id);
+    const trip = job.trip
+      ? (() => {
+          const { stopProgress, ...tripRest } = job.trip;
+          return {
+            ...tripRest,
+            podAwaitingExit: this.podAwaitingDriverExit({
+              tripStatus: job.trip.status,
+              dropoffStopIds,
+              stopProgress,
+            }),
+          };
+        })()
+      : null;
     return {
       ...job,
+      trip,
       canHardDelete: this.canHardDeleteJob(job.status),
       canSoftDelete: this.canSoftDeleteJob(job.status),
     };

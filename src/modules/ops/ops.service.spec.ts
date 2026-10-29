@@ -62,6 +62,34 @@ describe('OpsService.provisionAdmin paths', () => {
   });
 
   it('creates STATE_MASTER with nested STATE scope', async () => {
+    const createdAdmin = {
+      id: 'adm-1',
+      email: 'state@x.com',
+      role: AdminRole.STATE_MASTER,
+      name: 'State',
+      phone: null,
+      status: 'INVITED',
+      active: false,
+      companyId: 'co-1',
+      leadId: null,
+      scopes: [
+        {
+          scopeType: 'STATE',
+          region: { code: 'VIC' },
+          localTerritory: null,
+        },
+      ],
+      company: { id: 'co-1', legalName: 'State' },
+    };
+    const tx = {
+      company: {
+        create: jest.fn().mockResolvedValue({ id: 'co-1' }),
+      },
+      adminUser: {
+        create: jest.fn().mockResolvedValue(createdAdmin),
+      },
+      lead: { update: jest.fn() },
+    };
     const prisma = {
       isConnected: () => true,
       region: {
@@ -69,27 +97,15 @@ describe('OpsService.provisionAdmin paths', () => {
       },
       adminUser: {
         findUnique: jest.fn().mockResolvedValue(null),
-        create: jest.fn().mockResolvedValue({
-          id: 'adm-1',
-          email: 'state@x.com',
-          role: AdminRole.STATE_MASTER,
-          name: 'State',
-          scopes: [
-            {
-              scopeType: 'STATE',
-              region: { code: 'VIC' },
-              localTerritory: null,
-            },
-          ],
-        }),
       },
+      $transaction: jest.fn().mockImplementation(async (fn: (t: unknown) => unknown) => fn(tx)),
     };
     const audit = { recordPlatform: jest.fn() };
     const service = new OpsService(
       prisma as never,
       audit as never,
       {
-        sendAdminProvisionedEmail: jest.fn().mockResolvedValue({ skipped: true }),
+        sendAdminInviteEmail: jest.fn().mockResolvedValue({ skipped: true }),
       } as never,
       config as never,
     );
@@ -101,7 +117,7 @@ describe('OpsService.provisionAdmin paths', () => {
       name: 'State',
     });
 
-    expect(prisma.adminUser.create).toHaveBeenCalledWith(
+    expect(tx.adminUser.create).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({
           email: 'state@x.com',
@@ -117,6 +133,7 @@ describe('OpsService.provisionAdmin paths', () => {
     expect(result).toMatchObject({
       email: 'state@x.com',
       scopes: [{ regionCode: 'VIC' }],
+      invite: expect.objectContaining({ mailSkipped: true }),
     });
   });
 

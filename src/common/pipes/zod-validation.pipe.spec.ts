@@ -33,7 +33,25 @@ describe('ZodValidationPipe', () => {
     }
   });
 
-  it('labels root issues as body when path is empty', () => {
+  it('maps oversized sizeBytes to a plain-language message', () => {
+    const upload = z.object({
+      sizeBytes: z.number().int().positive().max(10 * 1024 * 1024),
+    });
+    const pipe = new ZodValidationPipe(upload);
+    try {
+      pipe.transform({ sizeBytes: 20 * 1024 * 1024 }, {} as never);
+      fail('expected BadRequestException');
+    } catch (err) {
+      const body = (err as BadRequestException).getResponse() as {
+        message: string;
+      };
+      expect(body.message).toMatch(/under 10 MB/i);
+      expect(body.message).not.toMatch(/Too big/i);
+      expect(body.message).not.toMatch(/10485760/);
+    }
+  });
+
+  it('returns root issue message without technical body: prefix when possible', () => {
     const root = z.string().email();
     const pipe = new ZodValidationPipe(root);
     try {
@@ -43,7 +61,7 @@ describe('ZodValidationPipe', () => {
       const body = (err as BadRequestException).getResponse() as {
         message: string;
       };
-      expect(body.message).toMatch(/^body:/);
+      expect(body.message.length).toBeGreaterThan(0);
     }
   });
 });

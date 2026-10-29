@@ -13,6 +13,7 @@ import {
   CompanyType,
   DriverStatus,
   JobStatus,
+  NotificationType,
   PlatformRole,
   ProposalStatus,
   TripStatus,
@@ -24,6 +25,7 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { CarrierService } from '../carrier/carrier.service';
 import { JobsService } from '../jobs/jobs.service';
+import { InAppNotificationsService } from '../notifications/in-app-notifications.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { assertAssignmentCompliance } from '../jobs/assignment-gates';
 import {
@@ -44,6 +46,7 @@ export class MatchingService {
     private readonly carrierService: CarrierService,
     private readonly jobsService: JobsService,
     @Optional() private readonly notifications?: NotificationsService,
+    @Optional() private readonly inbox?: InAppNotificationsService,
   ) {}
 
   private ensureDatabase() {
@@ -149,9 +152,12 @@ export class MatchingService {
     const eligibility = await this.carrierService.getBidEligibility(principal);
     if (!eligibility.canBid) {
       throw new ForbiddenException({
-        message: 'Carrier cannot bid',
+        message: eligibility.goNoGo.connectReady
+          ? 'Carrier cannot bid'
+          : 'Carrier cannot bid until Stripe payouts are ready. Open Carrier onboarding → Payouts.',
         code: 'CARRIER_NOT_BID_ELIGIBLE',
         goNoGo: eligibility.goNoGo,
+        href: '/carrier/onboarding',
       });
     }
     const user = await this.requireCarrierCompany(principal);
@@ -341,28 +347,44 @@ export class MatchingService {
       metadata: { jobId: job.id, amountIncGstCents: input.amountIncGstCents },
     });
 
-    if (this.notifications) {
-      try {
-        const jobNotify = await this.prisma.job.findUnique({
-          where: { id: job.id },
-          select: {
-            id: true,
-            title: true,
-            senderCompany: {
-              select: {
-                email: true,
-                users: {
-                  where: { role: PlatformRole.SENDER },
-                  select: { email: true },
-                  take: 5,
-                },
+    try {
+      const jobNotify = await this.prisma.job.findUnique({
+        where: { id: job.id },
+        select: {
+          id: true,
+          title: true,
+          senderCompany: {
+            select: {
+              email: true,
+              users: {
+                where: { role: PlatformRole.SENDER },
+                select: { id: true, email: true },
+                take: 10,
               },
             },
           },
+        },
+      });
+      const jobLabel = jobNotify?.title || job.id.slice(0, 8);
+      const senderUserIds =
+        jobNotify?.senderCompany?.users.map((u) => u.id).filter(Boolean) ?? [];
+      if (this.inbox && senderUserIds.length > 0) {
+        void this.inbox.notifyUsers({
+          userIds: senderUserIds,
+          type: NotificationType.BID_RECEIVED,
+          title: `New bid on ${jobLabel}`,
+          body: `A carrier bid $${(proposal.amountIncGstCents / 100).toFixed(2)} incl. GST.`,
+          href: `/jobs/${job.id}`,
+          entityType: 'Proposal',
+          entityId: proposal.id,
         });
+      }
+      if (this.notifications) {
         const senderEmails = [
           ...(jobNotify?.senderCompany?.users.map((u) => u.email) ?? []),
-          ...(jobNotify?.senderCompany?.email ? [jobNotify.senderCompany.email] : []),
+          ...(jobNotify?.senderCompany?.email
+            ? [jobNotify.senderCompany.email]
+            : []),
         ];
         if (senderEmails.length > 0) {
           await this.notifications.notifyProposalSubmitted({
@@ -373,13 +395,13 @@ export class MatchingService {
             etaMinutes: proposal.etaMinutes,
           });
         }
-      } catch (err) {
-        this.logger.warn(
-          `Bid email failed for proposal ${proposal.id}: ${
-            err instanceof Error ? err.message : String(err)
-          }`,
-        );
       }
+    } catch (err) {
+      this.logger.warn(
+        `Bid notify failed for proposal ${proposal.id}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
     }
 
     return {

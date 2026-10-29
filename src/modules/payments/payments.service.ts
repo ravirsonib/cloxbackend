@@ -14,6 +14,7 @@ import { ConfigService } from '@nestjs/config';
 import {
   AssignmentStatus,
   JobStatus,
+  NotificationType,
   PaymentEventStatus,
   PaymentEventType,
   PlatformRole,
@@ -30,6 +31,7 @@ import type { AppEnv } from '../../config/env.validation';
 import { AuditAction } from '../../shared/types';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
+import { InAppNotificationsService } from '../notifications/in-app-notifications.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { RevenueSplitService } from '../settlements/revenue-split.service';
 import { TripsService } from '../trips/trips.service';
@@ -52,6 +54,7 @@ export class PaymentsService {
     /** Optional so unit specs that construct PaymentsService manually stay valid. */
     @Optional() private readonly config?: ConfigService<AppEnv, true>,
     @Optional() private readonly revenueSplit?: RevenueSplitService,
+    @Optional() private readonly inbox?: InAppNotificationsService,
   ) {}
 
   private carrierClearingDays() {
@@ -91,8 +94,10 @@ export class PaymentsService {
     }
     if (!user.company.paymentReady || !user.company.stripeCustomerId) {
       throw new BadRequestException({
-        message: 'Sender payment method not ready',
+        message:
+          'Sender payment method not ready. Open Sender onboarding → Payment to add a live card.',
         code: 'SENDER_NOT_PAYMENT_READY',
+        href: '/sender/onboarding',
       });
     }
 
@@ -1274,7 +1279,27 @@ export class PaymentsService {
     const locked = await this.prisma.assignment.findUnique({
       where: { jobId: pe.jobId },
       include: {
-        job: { select: { id: true, title: true } },
+        job: {
+          select: {
+            id: true,
+            title: true,
+            pickupAt: true,
+            receiverName: true,
+            receiverEmail: true,
+            stops: {
+              where: { stopType: 'DROPOFF' },
+              orderBy: { sequence: 'asc' },
+              select: {
+                receiverName: true,
+                receiverEmail: true,
+                addressLine: true,
+                suburb: true,
+                state: true,
+                postcode: true,
+              },
+            },
+          },
+        },
         vehicle: { select: { registration: true, label: true } },
         driver: {
           select: {
@@ -1286,7 +1311,7 @@ export class PaymentsService {
             email: true,
             users: {
               where: { role: PlatformRole.TRANSPORT_COMPANY },
-              select: { email: true },
+              select: { id: true, email: true },
               take: 10,
             },
           },
@@ -1303,14 +1328,100 @@ export class PaymentsService {
           locked.vehicle?.registration ?? locked.vehicle?.label ?? 'Vehicle',
         driverName: locked.driver?.user.name ?? locked.driver?.user.email ?? 'Driver',
         driverEmail: locked.driver?.user.email ?? null,
+        carrierUserIds: locked.carrierCompany.users.map((u) => u.id),
         carrierEmails: [
           ...locked.carrierCompany.users.map((u) => u.email),
           ...(locked.carrierCompany.email ? [locked.carrierCompany.email] : []),
         ],
+        pickupAt: locked.job?.pickupAt ?? null,
+        receivers: this.collectJobReceiversForNotify(locked.job),
       });
     }
 
     return { skipped: false as const };
+  }
+
+  /** Job-level + per-dropoff receiver contacts for assignment-locked email. */
+  private collectJobReceiversForNotify(
+    job:
+      | {
+          receiverName: string | null;
+          receiverEmail: string | null;
+          stops: Array<{
+            receiverName: string | null;
+            receiverEmail: string | null;
+            addressLine: string | null;
+            suburb: string | null;
+            state: string | null;
+            postcode: string | null;
+          }>;
+        }
+      | null
+      | undefined,
+  ): Array<{
+    email: string;
+    name: string | null;
+    dropSuburb: string | null;
+    dropAddress: string | null;
+  }> {
+    if (!job) return [];
+    const out: Array<{
+      email: string;
+      name: string | null;
+      dropSuburb: string | null;
+      dropAddress: string | null;
+    }> = [];
+    const seen = new Set<string>();
+
+    const push = (params: {
+      email: string | null | undefined;
+      name: string | null | undefined;
+      suburb: string | null | undefined;
+      addressLine: string | null | undefined;
+      state: string | null | undefined;
+      postcode: string | null | undefined;
+    }) => {
+      const email = params.email?.trim().toLowerCase();
+      if (!email?.includes('@') || seen.has(email)) return;
+      seen.add(email);
+      const dropAddress = [
+        params.addressLine,
+        params.suburb,
+        params.state,
+        params.postcode,
+      ]
+        .filter(Boolean)
+        .join(', ');
+      out.push({
+        email,
+        name: params.name?.trim() || null,
+        dropSuburb: params.suburb?.trim() || null,
+        dropAddress: dropAddress || null,
+      });
+    };
+
+    for (const stop of job.stops) {
+      push({
+        email: stop.receiverEmail || job.receiverEmail,
+        name: stop.receiverName || job.receiverName,
+        suburb: stop.suburb,
+        addressLine: stop.addressLine,
+        state: stop.state,
+        postcode: stop.postcode,
+      });
+    }
+    // Single-drop / job-level only (no DROPOFF stop rows yet)
+    if (out.length === 0) {
+      push({
+        email: job.receiverEmail,
+        name: job.receiverName,
+        suburb: null,
+        addressLine: null,
+        state: null,
+        postcode: null,
+      });
+    }
+    return out;
   }
 
   private async notifyAssignmentLockedAfterPay(params: {
@@ -1320,8 +1431,28 @@ export class PaymentsService {
     vehicleLabel: string;
     driverName: string;
     driverEmail: string | null;
+    carrierUserIds: string[];
     carrierEmails: string[];
+    receivers: Array<{
+      email: string;
+      name: string | null;
+      dropSuburb: string | null;
+      dropAddress: string | null;
+    }>;
+    pickupAt: Date | null;
   }) {
+    const jobLabel = params.jobTitle || params.jobId.slice(0, 8);
+    if (this.inbox && params.carrierUserIds.length > 0) {
+      void this.inbox.notifyUsers({
+        userIds: params.carrierUserIds,
+        type: NotificationType.BID_ACCEPTED,
+        title: `Bid accepted: ${jobLabel}`,
+        body: 'Your bid was accepted and the assignment is locked. Prepare for trip.',
+        href: `/jobs/${params.jobId}`,
+        entityType: 'Job',
+        entityId: params.jobId,
+      });
+    }
     if (!this.notifications) return;
     try {
       await this.notifications.notifyAssignmentLocked(params);

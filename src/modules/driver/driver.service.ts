@@ -3,6 +3,7 @@ import {
   ForbiddenException,
   Injectable,
   NotFoundException,
+  Optional,
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -14,6 +15,7 @@ import {
   ComplianceDocStatus,
   ComplianceDocType,
   DriverStatus,
+  NotificationType,
   UserStatus,
 } from '@prisma/client';
 import { randomBytes } from 'crypto';
@@ -27,6 +29,7 @@ import {
 } from '../../shared/types';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
+import { InAppNotificationsService } from '../notifications/in-app-notifications.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import {
   hasUsableDriverLicenceDocument,
@@ -40,6 +43,7 @@ export class DriverService {
     private readonly audit: AuditService,
     private readonly notifications: NotificationsService,
     private readonly config: ConfigService<AppEnv, true>,
+    @Optional() private readonly inbox?: InAppNotificationsService,
   ) {}
 
   private ensureDatabase() {
@@ -370,7 +374,13 @@ export class DriverService {
 
     const company = await this.prisma.company.findUnique({
       where: { id: driver.companyId },
-      select: { id: true, status: true, homeRegionId: true, type: true },
+      select: {
+        id: true,
+        status: true,
+        homeRegionId: true,
+        type: true,
+        legalName: true,
+      },
     });
     const needsSuperReview =
       company?.type === CompanyType.CARRIER &&
@@ -443,7 +453,11 @@ export class DriverService {
    * Does not change company BID_ELIGIBLE.
    */
   private async attachDriverLicenceToReviewCase(
-    company: { id: string; homeRegionId: string | null },
+    company: {
+      id: string;
+      homeRegionId: string | null;
+      legalName?: string | null;
+    },
     driverId: string,
     documentId: string,
   ) {
@@ -462,6 +476,7 @@ export class DriverService {
       orderBy: { createdAt: 'desc' },
     });
 
+    let shouldNotifyOps = false;
     if (!reviewCase) {
       reviewCase = await this.prisma.complianceCase.create({
         data: {
@@ -471,6 +486,7 @@ export class DriverService {
           regionId: company.homeRegionId,
         },
       });
+      shouldNotifyOps = true;
     } else if (reviewCase.status === ComplianceCaseStatus.INFO_REQUESTED) {
       reviewCase = await this.prisma.complianceCase.update({
         where: { id: reviewCase.id },
@@ -479,6 +495,7 @@ export class DriverService {
           decisionNote: null,
         },
       });
+      shouldNotifyOps = true;
     }
 
     const orphanLicences = await this.prisma.complianceDocument.findMany({
@@ -501,6 +518,16 @@ export class DriverService {
         status: ComplianceDocStatus.UNDER_REVIEW,
       },
     });
+
+    if (shouldNotifyOps && this.inbox) {
+      void this.inbox.notifyComplianceCaseToOps({
+        caseId: reviewCase.id,
+        regionId: reviewCase.regionId ?? company.homeRegionId,
+        type: NotificationType.DRIVER_LICENCE_REVIEW_OPENED,
+        title: `Licence review: ${company.legalName || 'Carrier'}`,
+        body: 'Driver licence submitted for Ops review.',
+      });
+    }
   }
 
   async getAssignability(principal: AuthenticatedPrincipal) {

@@ -23,8 +23,17 @@ export class NotificationsController {
 
   @Get()
   @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles(AppRole.SENDER, AppRole.TRANSPORT_COMPANY, AppRole.DRIVER)
-  @ApiOperation({ summary: 'List in-app notifications for the current user' })
+  @Roles(
+    AppRole.SENDER,
+    AppRole.TRANSPORT_COMPANY,
+    AppRole.DRIVER,
+    AppRole.SUPER_ADMIN,
+    AppRole.STATE_MASTER,
+    AppRole.LOCAL_BDE,
+  )
+  @ApiOperation({
+    summary: 'List in-app notifications for the current marketplace user or Ops admin',
+  })
   list(
     @CurrentPrincipal() principal: AuthenticatedPrincipal,
     @Query('limit') limitRaw?: string,
@@ -39,7 +48,14 @@ export class NotificationsController {
 
   @Get('unread-count')
   @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles(AppRole.SENDER, AppRole.TRANSPORT_COMPANY, AppRole.DRIVER)
+  @Roles(
+    AppRole.SENDER,
+    AppRole.TRANSPORT_COMPANY,
+    AppRole.DRIVER,
+    AppRole.SUPER_ADMIN,
+    AppRole.STATE_MASTER,
+    AppRole.LOCAL_BDE,
+  )
   @ApiOperation({ summary: 'Unread in-app notification count' })
   unreadCount(@CurrentPrincipal() principal: AuthenticatedPrincipal) {
     return this.inbox.unreadCount(principal);
@@ -47,7 +63,14 @@ export class NotificationsController {
 
   @Post('read-all')
   @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles(AppRole.SENDER, AppRole.TRANSPORT_COMPANY, AppRole.DRIVER)
+  @Roles(
+    AppRole.SENDER,
+    AppRole.TRANSPORT_COMPANY,
+    AppRole.DRIVER,
+    AppRole.SUPER_ADMIN,
+    AppRole.STATE_MASTER,
+    AppRole.LOCAL_BDE,
+  )
   @ApiOperation({ summary: 'Mark all notifications as read' })
   markAllRead(@CurrentPrincipal() principal: AuthenticatedPrincipal) {
     return this.inbox.markAllRead(principal);
@@ -55,7 +78,14 @@ export class NotificationsController {
 
   @Post(':id/read')
   @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles(AppRole.SENDER, AppRole.TRANSPORT_COMPANY, AppRole.DRIVER)
+  @Roles(
+    AppRole.SENDER,
+    AppRole.TRANSPORT_COMPANY,
+    AppRole.DRIVER,
+    AppRole.SUPER_ADMIN,
+    AppRole.STATE_MASTER,
+    AppRole.LOCAL_BDE,
+  )
   @ApiOperation({ summary: 'Mark one notification as read' })
   markRead(
     @CurrentPrincipal() principal: AuthenticatedPrincipal,

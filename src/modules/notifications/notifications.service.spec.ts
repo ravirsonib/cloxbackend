@@ -140,4 +140,47 @@ describe('NotificationsService', () => {
     expect(href).toContain('next=%2Fmarket');
     branded.mockRestore();
   });
+
+  it('notifyAssignmentLocked emails receiver once (no login CTA)', async () => {
+    const service = new NotificationsService({
+      get: (key: string) => (key === 'ADMIN_APP_URL' ? 'http://localhost:5174' : undefined),
+    } as never);
+    const branded = jest
+      .spyOn(service as never, 'sendBranded' as never)
+      .mockResolvedValue({ skipped: true } as never);
+    const result = await service.notifyAssignmentLocked({
+      carrierEmails: ['carrier@yopmail.com'],
+      driverEmail: 'driver@yopmail.com',
+      receivers: [
+        {
+          email: 'Receiver@Yopmail.com',
+          name: 'Alex Receiver',
+          dropSuburb: 'Richmond',
+          dropAddress: '1 Bridge Rd, Richmond VIC 3121',
+        },
+        {
+          email: 'receiver@yopmail.com',
+          name: 'Duplicate',
+          dropSuburb: 'Richmond',
+          dropAddress: '1 Bridge Rd, Richmond VIC 3121',
+        },
+      ],
+      jobId: 'job-lock-1',
+      jobTitle: 'Melbourne drop',
+      amountIncGstCents: 22_000,
+      vehicleLabel: 'ABC123',
+      driverName: 'Sam Driver',
+      pickupAt: new Date('2026-11-02T01:00:00.000Z'),
+    });
+    expect(result.notifiedCarrier).toBe(1);
+    expect(result.notifiedDriver).toBe(true);
+    expect(result.notifiedReceiver).toBe(1);
+    const receiverCall = branded.mock.calls
+      .map((c) => c[0] as { to?: string; subject?: string; cta?: unknown; title?: string })
+      .find((p) => p.to?.toLowerCase() === 'receiver@yopmail.com');
+    expect(receiverCall?.subject).toContain('delivery booked');
+    expect(receiverCall?.title).toContain('coming to you');
+    expect(receiverCall?.cta).toBeUndefined();
+    branded.mockRestore();
+  });
 });

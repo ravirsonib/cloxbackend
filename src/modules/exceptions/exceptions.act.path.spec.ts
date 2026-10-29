@@ -62,7 +62,10 @@ describe('ExceptionsService continue / escalate / watchdog', () => {
     },
   };
 
-  function makeService(prisma: Record<string, unknown>) {
+  function makeService(
+    prisma: Record<string, unknown>,
+    inboxExtras?: Record<string, unknown>,
+  ) {
     return new ExceptionsService(
       prisma as never,
       audit as never,
@@ -70,6 +73,9 @@ describe('ExceptionsService continue / escalate / watchdog', () => {
       {
         userIdsForCompanies: jest.fn().mockResolvedValue([]),
         notifyUsers: jest.fn().mockResolvedValue(0),
+        adminIdsSuperAndStateForRegion: jest.fn().mockResolvedValue(['super-1', 'state-1']),
+        notifyAdmins: jest.fn().mockResolvedValue(2),
+        ...inboxExtras,
       } as never,
       carrier as never,
       { adjustForMarketplaceRelease: jest.fn() } as never,
@@ -166,13 +172,21 @@ describe('ExceptionsService continue / escalate / watchdog', () => {
         findUnique: jest.fn().mockResolvedValue({
           id: 'job-1',
           title: 'Load',
+          originRegionId: 'reg-vic',
           receiverEmail: 's@yopmail.com',
           senderCompany: { email: null, users: [] },
         }),
       },
     };
 
-    const result = await makeService(prisma).escalate(carrierPrincipal, 'ex-1', {
+    const notifyAdmins = jest.fn().mockResolvedValue(2);
+    const adminIdsSuperAndStateForRegion = jest
+      .fn()
+      .mockResolvedValue(['super-1', 'state-1']);
+    const result = await makeService(prisma, {
+      notifyAdmins,
+      adminIdsSuperAndStateForRegion,
+    }).escalate(carrierPrincipal, 'ex-1', {
       note: 'Need Ops',
     });
 
@@ -183,6 +197,17 @@ describe('ExceptionsService continue / escalate / watchdog', () => {
         opsEmail: 'ops@yopmail.com',
         senderEmail: 's@yopmail.com',
         automatic: false,
+      }),
+    );
+    expect(adminIdsSuperAndStateForRegion).toHaveBeenCalledWith('reg-vic');
+    expect(notifyAdmins).toHaveBeenCalledWith(
+      expect.objectContaining({
+        adminUserIds: ['super-1', 'state-1'],
+        type: 'TRIP_EXCEPTION_ESCALATED',
+        href: '/ops/exceptions',
+        entityType: 'TripException',
+        entityId: 'ex-1',
+        regionId: 'reg-vic',
       }),
     );
   });

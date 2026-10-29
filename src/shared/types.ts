@@ -700,9 +700,19 @@ export const createUploadIntentSchema = z.object({
   ]),
   vehicleId: z.string().uuid().optional(),
   driverId: z.string().uuid().optional(),
-  originalFilename: z.string().trim().min(1).max(255),
-  mimeType: z.enum(['application/pdf', 'image/jpeg', 'image/png', 'image/webp']),
-  sizeBytes: z.number().int().positive().max(10 * 1024 * 1024),
+  originalFilename: z
+    .string()
+    .trim()
+    .min(1, 'Please choose a file with a valid name.')
+    .max(255, 'File name is too long.'),
+  mimeType: z.enum(['application/pdf', 'image/jpeg', 'image/png', 'image/webp'], {
+    message: 'Unsupported file type. Please use PDF, JPEG, PNG, or WebP.',
+  }),
+  sizeBytes: z
+    .number({ message: 'Please choose a file to upload.' })
+    .int()
+    .positive('Please choose a file to upload.')
+    .max(10 * 1024 * 1024, 'This file is too large. Please choose a file under 10 MB.'),
   expiresAt: z.string().datetime().optional(),
 });
 
@@ -1596,6 +1606,20 @@ export const notificationTypeSchema = z.enum([
   'POD_FINALIZED',
   'TRIP_COMPLETED',
   'DISPUTE',
+  'COMPLIANCE_APPROVED',
+  'COMPLIANCE_INFO_REQUESTED',
+  'BID_RECEIVED',
+  'BID_ACCEPTED',
+  'PAYMENT_SETUP_REQUIRED',
+  'PAYOUT_SETUP_REQUIRED',
+  'COMPLIANCE_CASE_OPENED',
+
+  'COMPLIANCE_CASE_RESUBMITTED',
+  'ADMIN_PARTNER_KYB_SUBMITTED',
+  'COMPLIANCE_ESCALATED',
+  'TRIP_EXCEPTION_ESCALATED',
+  'FLEET_RWC_REVIEW_OPENED',
+  'DRIVER_LICENCE_REVIEW_OPENED',
 ]);
 export type NotificationTypeDto = z.infer<typeof notificationTypeSchema>;
 
