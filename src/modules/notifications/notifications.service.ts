@@ -852,6 +852,79 @@ export class NotificationsService {
     });
   }
 
+  /** Job opened on the market — notify bid-eligible carriers that match the load. */
+  async notifyJobPublishedToCarriers(params: {
+    carrierEmails: string[];
+    jobId: string;
+    jobTitle: string;
+    minVehicleClass: string | null;
+    originRegionCode: string | null;
+    pickupAt: Date | null;
+    estimateIncGstCents: number | null;
+    requiresDg: boolean;
+  }) {
+    const jobLabel = params.jobTitle || params.jobId.slice(0, 8);
+    const amount =
+      params.estimateIncGstCents != null
+        ? `$${(params.estimateIncGstCents / 100).toFixed(2)}`
+        : null;
+    const details: EmailDetailRow[] = [
+      { label: 'Job', value: jobLabel },
+      ...(params.originRegionCode
+        ? [{ label: 'Origin', value: params.originRegionCode }]
+        : []),
+      ...(params.minVehicleClass
+        ? [{ label: 'Min vehicle', value: params.minVehicleClass }]
+        : []),
+      ...(params.pickupAt
+        ? [{ label: 'Pickup', value: params.pickupAt.toISOString() }]
+        : []),
+      ...(amount ? [{ label: 'Estimate (inc GST)', value: amount }] : []),
+      ...(params.requiresDg ? [{ label: 'DG', value: 'Required' }] : []),
+      { label: 'Job ID', value: params.jobId },
+    ];
+    const nextPath = '/market';
+    const emails = [...new Set(params.carrierEmails.map((e) => e.trim()).filter(Boolean))];
+    const results = await Promise.all(
+      emails.map((to) =>
+        this.sendBranded({
+          to,
+          subject: `CLOX — new job on the market: ${jobLabel}`,
+          text: [
+            `A new job matching your fleet is open for bids: ${jobLabel}.`,
+            params.originRegionCode ? `Origin: ${params.originRegionCode}` : undefined,
+            params.minVehicleClass ? `Min vehicle: ${params.minVehicleClass}` : undefined,
+            amount ? `Estimate (inc GST): ${amount}` : undefined,
+            '',
+            `Open the market board: ${this.signInContinueUrl(to, nextPath)}`,
+          ]
+            .filter((line) => line !== undefined)
+            .join('\n'),
+          eyebrow: 'New market job',
+          title: 'A matching job is open for bids',
+          intro:
+            'A sender published a load that matches your capabilities, region, and vehicle class. Open the market board to review and submit a bid.',
+          details,
+          nextSteps: [
+            {
+              title: 'Review on the market board',
+              body: 'Confirm route, vehicle class, and estimate before bidding.',
+            },
+            {
+              title: 'Submit a bid',
+              body: 'Include vehicle, driver, amount, and ETA. The sender reviews proposals before payment.',
+            },
+          ],
+          cta: {
+            label: 'Open market board →',
+            href: this.signInContinueUrl(to, nextPath),
+          },
+        }),
+      ),
+    );
+    return { results, notified: emails.length };
+  }
+
   /** Carrier submitted a bid — notify sender to review proposals on the job. */
   async notifyProposalSubmitted(params: {
     senderEmails: string[];

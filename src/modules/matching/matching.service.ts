@@ -10,7 +10,6 @@ import {
 } from '@nestjs/common';
 import {
   AssignmentStatus,
-  CompanyStatus,
   CompanyType,
   DriverStatus,
   JobStatus,
@@ -33,6 +32,7 @@ import {
   isVehicleAdequateForJob,
   isVehicleClassAdequate,
 } from '../jobs/job-pricing.util';
+import { carrierMatchesJob } from './matching.eligibility';
 
 @Injectable()
 export class MatchingService {
@@ -74,43 +74,6 @@ export class MatchingService {
     return user;
   }
 
-  private carrierMatchesJob(
-    company: {
-      status: CompanyStatus;
-      capabilities: string[];
-      serviceRegionCodes: string[];
-      homeRegion: { code: string } | null;
-      vehicles: Array<{ vehicleClass: string | null; status: VehicleStatus }>;
-    },
-    job: {
-      requiresDg: boolean;
-      requiresReefer: boolean;
-      requiresOversize: boolean;
-      minVehicleClass: string | null;
-      chargeableWeightKg?: number | null;
-      originRegion: { code: string } | null;
-    },
-  ) {
-    if (job.requiresDg && !company.capabilities.includes('DG')) return false;
-    if (job.requiresReefer && !company.capabilities.includes('REEFER')) return false;
-    if (job.requiresOversize && !company.capabilities.includes('OVERSIZE')) return false;
-    const regions = new Set([
-      ...company.serviceRegionCodes,
-      ...(company.homeRegion?.code ? [company.homeRegion.code] : []),
-    ]);
-    if (job.originRegion?.code && !regions.has(job.originRegion.code)) return false;
-    const hasAdequateVehicle = company.vehicles.some(
-      (v) =>
-        v.status === VehicleStatus.ACTIVE &&
-        isVehicleAdequateForJob(
-          v.vehicleClass,
-          job.minVehicleClass,
-          job.chargeableWeightKg,
-        ),
-    );
-    return hasAdequateVehicle;
-  }
-
   async listBoard(principal: AuthenticatedPrincipal) {
     this.ensureDatabase();
     const eligibility = await this.carrierService.getBidEligibility(principal);
@@ -141,10 +104,10 @@ export class MatchingService {
       take: 50,
     });
 
-    const visible = jobs.filter((j) => this.carrierMatchesJob(company, j));
+    const visible = jobs.filter((j) => carrierMatchesJob(company, j));
 
     return {
-      netPayoutHint: '70% of gross (platform share stub)',
+      netPayoutHint: '70% of gross to carrier (admin 30% pool is configurable)',
       jobs: visible.map((j) => {
         const discount = j.rescueDiscountPercent ?? 0;
         const discountedEstimate =
@@ -195,7 +158,7 @@ export class MatchingService {
     const company = user.company!;
     const job = await this.jobsService.assertJobOpenForBidding(input.jobId);
 
-    if (!this.carrierMatchesJob(company, job)) {
+    if (!carrierMatchesJob(company, job)) {
       throw new ForbiddenException({
         message: 'Job not eligible for this carrier (region / DG / REEFER / OVERSIZE / vehicle class)',
         code: 'JOB_NOT_ELIGIBLE',

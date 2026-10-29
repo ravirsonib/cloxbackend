@@ -173,6 +173,10 @@ export const AuditAction = {
   EXCEPTION_PERFORMANCE_STUB: 'exception.performance_stub',
   EXCEPTION_RELISTED: 'exception.relisted',
   PLATFORM_SETTINGS_UPDATED: 'platform.settings_updated',
+  REVENUE_SPLIT_DRAFTED: 'policy.revenue_split.drafted',
+  REVENUE_SPLIT_PUBLISHED: 'policy.revenue_split.published',
+  REVENUE_SPLIT_OVERRIDE_PUBLISHED: 'policy.revenue_split.override_published',
+  REVENUE_SPLIT_ADMIN_PACKAGE_PUBLISHED: 'policy.revenue_split.admin_package_published',
   REFUND_STUB: 'payment.refund_stub',
   TRIP_CREATED: 'trip.created',
   TRIP_SAFETY_PASSED: 'trip.safety_passed',
@@ -1478,4 +1482,107 @@ export const platformSettingsPatchSchema = z.object({
 });
 
 export type PlatformSettingsPatchInput = z.infer<typeof platformSettingsPatchSchema>;
+
+const adminPoolPercentsSchema = z
+  .object({
+    superPercent: z.number().int().min(0).max(30),
+    statePercent: z.number().int().min(0).max(30),
+    localPercent: z.number().int().min(0).max(30),
+  })
+  .refine((v) => v.superPercent + v.statePercent + v.localPercent === 30, {
+    message: 'superPercent + statePercent + localPercent must equal 30',
+  });
+
+export const revenueSplitDraftSchema = adminPoolPercentsSchema.and(
+  z.object({ notes: z.string().trim().max(500).optional() }),
+);
+export type RevenueSplitDraftInput = z.infer<typeof revenueSplitDraftSchema>;
+
+export const revenueSplitPublishSchema = z
+  .object({
+    draftId: z.string().uuid().optional(),
+    superPercent: z.number().int().min(0).max(30).optional(),
+    statePercent: z.number().int().min(0).max(30).optional(),
+    localPercent: z.number().int().min(0).max(30).optional(),
+    notes: z.string().trim().max(500).optional(),
+    effectiveFrom: z.string().datetime().optional(),
+  })
+  .superRefine((value, ctx) => {
+    if (value.draftId) return;
+    if (
+      value.superPercent == null ||
+      value.statePercent == null ||
+      value.localPercent == null
+    ) {
+      ctx.addIssue({
+        code: 'custom',
+        message: 'Provide draftId or all of superPercent, statePercent, localPercent',
+      });
+      return;
+    }
+    if (value.superPercent + value.statePercent + value.localPercent !== 30) {
+      ctx.addIssue({
+        code: 'custom',
+        message: 'superPercent + statePercent + localPercent must equal 30',
+      });
+    }
+  });
+export type RevenueSplitPublishInput = z.infer<typeof revenueSplitPublishSchema>;
+
+export const revenueSplitOverridePublishSchema = adminPoolPercentsSchema.and(
+  z.object({
+    scopeType: z.enum(['REGION', 'TERRITORY']),
+    scopeId: z.string().uuid(),
+    notes: z.string().trim().max(500).optional(),
+    effectiveFrom: z.string().datetime().optional(),
+  }),
+);
+export type RevenueSplitOverridePublishInput = z.infer<
+  typeof revenueSplitOverridePublishSchema
+>;
+
+export const revenueSplitAdminPackagePublishSchema = adminPoolPercentsSchema.and(
+  z.object({
+    adminUserId: z.string().uuid(),
+    notes: z.string().trim().max(500).optional(),
+    effectiveFrom: z.string().datetime().optional(),
+  }),
+);
+export type RevenueSplitAdminPackagePublishInput = z.infer<
+  typeof revenueSplitAdminPackagePublishSchema
+>;
+
+export const revenueSplitAdminPackagesQuerySchema = z.object({
+  adminUserId: z.string().uuid().optional(),
+});
+export type RevenueSplitAdminPackagesQuery = z.infer<
+  typeof revenueSplitAdminPackagesQuerySchema
+>;
+
+export const revenueSplitPreviewQuerySchema = z.object({
+  grossIncGstCents: z.coerce.number().int().min(0).max(100_000_000),
+  regionId: z.string().uuid().optional(),
+  territoryId: z.string().uuid().optional(),
+  senderCompanyId: z.string().uuid().optional(),
+});
+export type RevenueSplitPreviewQuery = z.infer<typeof revenueSplitPreviewQuerySchema>;
+
+export const partnerPerformanceQuerySchema = z.object({
+  role: z.enum([AdminRole.STATE_MASTER, AdminRole.LOCAL_BDE]).optional(),
+  status: z
+    .enum([
+      'INVITED',
+      'PENDING_DOCS',
+      'PENDING_REVIEW',
+      'ACTIVE',
+      'SUSPENDED',
+      'REJECTED',
+    ])
+    .optional(),
+  regionId: z.string().uuid().optional(),
+  q: z.string().trim().max(120).optional(),
+  page: z.coerce.number().int().min(1).default(1),
+  pageSize: z.coerce.number().int().min(1).max(50).default(20),
+});
+export type PartnerPerformanceQuery = z.infer<typeof partnerPerformanceQuerySchema>;
 

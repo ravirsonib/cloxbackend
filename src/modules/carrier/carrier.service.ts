@@ -154,7 +154,7 @@ export class CarrierService {
       capabilitiesSet: capsOk,
       opsApproved,
       canBid: opsApproved && connectOk && fleetOk && profileOk && capsOk,
-      netPayoutHint: '70% to carrier after CLOX fee (enforced M6/M7)',
+      netPayoutHint: '70% to carrier after CLOX fee (admin 30% pool configurable)',
     };
   }
 

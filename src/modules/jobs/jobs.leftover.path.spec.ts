@@ -150,6 +150,7 @@ describe('JobsService leftover list/get/publish/bidding paths', () => {
           ],
         }),
       },
+      tripException: { findFirst: jest.fn().mockResolvedValue(null) },
     };
     const result = await makeService(prisma).getJobForSender(sender, 'job-1');
     expect(result.assignment).toMatchObject({
@@ -185,6 +186,7 @@ describe('JobsService leftover list/get/publish/bidding paths', () => {
       status: JobStatus.BIDDING,
       publishedAt: new Date(),
     });
+    const notifyJobPublishedToCarriers = jest.fn().mockResolvedValue({ notified: 1, results: [] });
     const prisma = {
       isConnected: () => true,
       user: {
@@ -196,12 +198,47 @@ describe('JobsService leftover list/get/publish/bidding paths', () => {
           .fn()
           .mockResolvedValueOnce({ ...draft, status: JobStatus.PUBLISHED })
           .mockResolvedValueOnce(bidding),
+        findUnique: jest.fn().mockResolvedValue({
+          ...bidding,
+          originRegion: { code: 'VIC' },
+          requiresDg: false,
+          requiresReefer: false,
+          requiresOversize: false,
+          minVehicleClass: 'VAN',
+          chargeableWeightKg: 100,
+        }),
+      },
+      company: {
+        findMany: jest.fn().mockResolvedValue([
+          {
+            status: 'BID_ELIGIBLE',
+            capabilities: [],
+            serviceRegionCodes: ['VIC'],
+            homeRegion: { code: 'VIC' },
+            vehicles: [{ vehicleClass: 'VAN', status: 'ACTIVE' }],
+            users: [{ email: 'carrier@yopmail.com' }],
+          },
+        ]),
       },
     };
-    const result = await makeService(prisma).publishJob(sender, 'job-1');
+    const service = new JobsService(
+      prisma as never,
+      audit as never,
+      senderService as never,
+      {} as never,
+      { notifyJobPublishedToCarriers } as never,
+    );
+    const result = await service.publishJob(sender, 'job-1');
     expect(result.status).toBe(JobStatus.BIDDING);
     expect(prisma.job.update).toHaveBeenCalledTimes(2);
     expect(audit.recordPlatform).toHaveBeenCalled();
+    await new Promise((r) => setImmediate(r));
+    expect(notifyJobPublishedToCarriers).toHaveBeenCalledWith(
+      expect.objectContaining({
+        carrierEmails: ['carrier@yopmail.com'],
+        jobId: 'job-1',
+      }),
+    );
   });
 
   it('publishJob rejects when sender not booking-ready or missing receiver/disclaimer', async () => {

@@ -157,7 +157,10 @@ export function gstSplitFromIncCents(incGstCents: number) {
   return { amountExGstCents: ex, amountGstCents: gst, amountIncGstCents: incGstCents };
 }
 
-/** Carrier net display = 70% of gross (G0 share stub). */
+/**
+ * Carrier net display — locked at 70% of gross (revenue split 2A).
+ * Admin 30% pool is policy/override-driven at settlement accrual.
+ */
 export function carrierNetPayoutCents(grossIncGstCents: number): number {
   return Math.round(grossIncGstCents * 0.7);
 }

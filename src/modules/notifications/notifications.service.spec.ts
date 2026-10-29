@@ -116,4 +116,28 @@ describe('NotificationsService', () => {
     expect(href).toContain('switch=1');
     branded.mockRestore();
   });
+
+  it('notifyJobPublishedToCarriers deep-links market board via login', async () => {
+    const service = new NotificationsService({
+      get: (key: string) => (key === 'ADMIN_APP_URL' ? 'http://localhost:5174' : undefined),
+    } as never);
+    const branded = jest
+      .spyOn(service as never, 'sendBranded' as never)
+      .mockResolvedValue({ skipped: true } as never);
+    const result = await service.notifyJobPublishedToCarriers({
+      carrierEmails: ['carrier@yopmail.com', 'carrier@yopmail.com'],
+      jobId: 'job-1',
+      jobTitle: 'VIC van run',
+      minVehicleClass: 'VAN',
+      originRegionCode: 'VIC',
+      pickupAt: new Date('2026-11-01T09:00:00.000Z'),
+      estimateIncGstCents: 12_000,
+      requiresDg: false,
+    });
+    expect(result.notified).toBe(1);
+    const href = (branded.mock.calls[0]?.[0] as { cta?: { href?: string } } | undefined)?.cta
+      ?.href;
+    expect(href).toContain('next=%2Fmarket');
+    branded.mockRestore();
+  });
 });

@@ -82,6 +82,10 @@ model AdminUser {
   scopes        AdminScope[]
   auditEvents   AuditEvent[]    @relation("AuditActor")
   policyVersions PolicyVersion[] @relation("PolicyPublisher")
+  revenueSplitOverrides RevenueSplitOverride[] @relation("RevenueSplitOverridePublisher")
+  revenueSplitPackages AdminRevenueSplitPackage[] @relation("AdminRevenueSplitPackageSubject")
+  publishedRevenueSplitPackages AdminRevenueSplitPackage[] @relation("AdminRevenueSplitPackagePublisher")
+  settlementLines SettlementLine[] @relation("SettlementLineAdmin")
   /// Marketplace companies this Local BDE referred (book of business)
   referredCompanies Company[]       @relation("CompanyReferredBy")
   companyInvites    CompanyInvite[] @relation("CompanyInviteInviter")
@@ -1117,24 +1121,88 @@ model PaymentEvent {
   @@index([stripePaymentIntentId])
 }
 
+enum RevenueSplitScopeType {
+  REGION
+  TERRITORY
+}
+
+/// Legacy seat-scoped override (historical SettlementLine.overrideId only). Prefer AdminRevenueSplitPackage.
+model RevenueSplitOverride {
+  id            String                 @id @default(uuid())
+  scopeType     RevenueSplitScopeType
+  scopeId       String
+  superPercent  Int
+  statePercent  Int
+  localPercent  Int
+  effectiveFrom DateTime
+  publishedAt   DateTime?
+  publishedBy   String?
+  publisher     AdminUser?             @relation("RevenueSplitOverridePublisher", fields: [publishedBy], references: [id], onDelete: SetNull)
+  notes         String?
+  createdAt     DateTime               @default(now())
+  updatedAt     DateTime               @updatedAt
+
+  settlementLines SettlementLine[]
+
+  @@index([scopeType, scopeId, publishedAt])
+  @@index([effectiveFrom])
+}
+
+/// Per-AdminUser Super/State/Local package (sums to 30). Carrier stays 70%.
+model AdminRevenueSplitPackage {
+  id            String    @id @default(uuid())
+  adminUserId   String
+  adminUser     AdminUser @relation("AdminRevenueSplitPackageSubject", fields: [adminUserId], references: [id], onDelete: Cascade)
+  superPercent  Int
+  statePercent  Int
+  localPercent  Int
+  effectiveFrom DateTime
+  publishedAt   DateTime?
+  publishedBy   String?
+  publisher     AdminUser? @relation("AdminRevenueSplitPackagePublisher", fields: [publishedBy], references: [id], onDelete: SetNull)
+  notes         String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  settlementLines SettlementLine[]
+
+  @@index([adminUserId, publishedAt])
+  @@index([effectiveFrom])
+}
+
 model SettlementLine {
-  id             String                  @id @default(uuid())
-  jobId          String?
-  job            Job?                    @relation(fields: [jobId], references: [id], onDelete: SetNull)
-  recipientType  SettlementRecipientType
+  id              String                  @id @default(uuid())
+  jobId           String?
+  job             Job?                    @relation(fields: [jobId], references: [id], onDelete: SetNull)
+  recipientType   SettlementRecipientType
   /// Share of gross percent e.g. 70, 15, 10, 5
-  sharePercent   Int?
-  amountCents    Int
-  currency       String                  @default("AUD")
-  status         SettlementLineStatus    @default(ACCRUED)
-  regionId       String?
-  territoryId    String?
-  paidAt         DateTime?
-  createdAt      DateTime                @default(now())
-  updatedAt      DateTime                @updatedAt
+  sharePercent    Int?
+  amountCents     Int
+  currency        String                  @default("AUD")
+  status          SettlementLineStatus    @default(ACCRUED)
+  regionId        String?
+  territoryId     String?
+  policyVersionId String?
+  policyVersion   PolicyVersion?          @relation(fields: [policyVersionId], references: [id], onDelete: SetNull)
+  /// Legacy seat override snapshot (historical only)
+  overrideId      String?
+  override        RevenueSplitOverride?   @relation(fields: [overrideId], references: [id], onDelete: SetNull)
+  /// Per-admin package snapshot when accrual used a personal deal
+  adminPackageId  String?
+  adminPackage    AdminRevenueSplitPackage? @relation(fields: [adminPackageId], references: [id], onDelete: SetNull)
+  /// Payee identity at accrual (referrer Local, or origin State seat, etc.)
+  adminUserId     String?
+  adminUser       AdminUser?              @relation("SettlementLineAdmin", fields: [adminUserId], references: [id], onDelete: SetNull)
+  paidAt          DateTime?
+  createdAt       DateTime                @default(now())
+  updatedAt       DateTime                @updatedAt
 
   @@index([jobId])
   @@index([recipientType, status])
+  @@index([policyVersionId])
+  @@index([overrideId])
+  @@index([adminPackageId])
+  @@index([adminUserId])
 }
 
 // ─── Ops / policy / audit ───────────────────────────────────────────────────
@@ -1149,6 +1217,8 @@ model PolicyVersion {
   publisher   AdminUser? @relation("PolicyPublisher", fields: [publishedBy], references: [id], onDelete: SetNull)
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
+
+  settlementLines SettlementLine[]
 
   @@unique([key, version])
   @@index([key, publishedAt])

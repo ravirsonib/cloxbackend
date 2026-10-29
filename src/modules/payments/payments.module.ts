@@ -4,6 +4,7 @@ import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../../common/guards/roles.guard';
 import { AuditModule } from '../audit/audit.module';
 import { NotificationsModule } from '../notifications/notifications.module';
+import { SettlementsModule } from '../settlements/settlements.module';
 import { TripsModule } from '../trips/trips.module';
 import { PaymentsController } from './payments.controller';
 import { PaymentsService } from './payments.service';
@@ -14,6 +15,7 @@ import { StripeService } from './stripe.service';
     JwtModule.register({}),
     AuditModule,
     NotificationsModule,
+    SettlementsModule,
     forwardRef(() => TripsModule),
   ],
   controllers: [PaymentsController],

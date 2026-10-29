@@ -31,6 +31,7 @@ import { AuditAction } from '../../shared/types';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { NotificationsService } from '../notifications/notifications.service';
+import { RevenueSplitService } from '../settlements/revenue-split.service';
 import { TripsService } from '../trips/trips.service';
 import { splitIncGst } from '../trips/geofence.util';
 import { StripeService } from './stripe.service';
@@ -50,6 +51,7 @@ export class PaymentsService {
     @Optional() private readonly notifications?: NotificationsService,
     /** Optional so unit specs that construct PaymentsService manually stay valid. */
     @Optional() private readonly config?: ConfigService<AppEnv, true>,
+    @Optional() private readonly revenueSplit?: RevenueSplitService,
   ) {}
 
   private carrierClearingDays() {
@@ -1172,7 +1174,7 @@ export class PaymentsService {
         data: { status: JobStatus.ASSIGNED },
       });
 
-      // Ledger accrual stubs (disburse M10/M12). Ignore VOID rows from marketplace release.
+      // Ledger accrual (national / per-admin package from sender onboarder). Ignore VOID rows.
       const existingLines = await tx.settlementLine.count({
         where: {
           jobId: pe.jobId!,
@@ -1180,43 +1182,79 @@ export class PaymentsService {
         },
       });
       if (existingLines === 0) {
-        const gross = pe.amountIncGstCents;
-        const carrier = Math.round(gross * 0.7);
-        const superShare = Math.round(gross * 0.15);
-        const stateShare = Math.round(gross * 0.1);
-        const localShare = gross - carrier - superShare - stateShare;
-        await tx.settlementLine.createMany({
-          data: [
-            {
-              jobId: pe.jobId!,
-              recipientType: SettlementRecipientType.CARRIER,
-              sharePercent: 70,
-              amountCents: carrier,
-              status: SettlementLineStatus.ACCRUED,
-            },
-            {
-              jobId: pe.jobId!,
-              recipientType: SettlementRecipientType.SUPER_ADMIN,
-              sharePercent: 15,
-              amountCents: superShare,
-              status: SettlementLineStatus.ACCRUED,
-            },
-            {
-              jobId: pe.jobId!,
-              recipientType: SettlementRecipientType.STATE_MASTER,
-              sharePercent: 10,
-              amountCents: stateShare,
-              status: SettlementLineStatus.ACCRUED,
-            },
-            {
-              jobId: pe.jobId!,
-              recipientType: SettlementRecipientType.LOCAL_BDE,
-              sharePercent: 5,
-              amountCents: localShare,
-              status: SettlementLineStatus.ACCRUED,
-            },
-          ],
+        const job = await tx.job.findUnique({
+          where: { id: pe.jobId! },
+          select: {
+            originRegionId: true,
+            originTerritoryId: true,
+            senderCompanyId: true,
+          },
         });
+        const resolved = this.revenueSplit
+          ? await this.revenueSplit.resolveForJob({
+              grossIncGstCents: pe.amountIncGstCents,
+              originRegionId: job?.originRegionId ?? null,
+              originTerritoryId: job?.originTerritoryId ?? null,
+              senderCompanyId: job?.senderCompanyId ?? null,
+            })
+          : null;
+
+        if (resolved) {
+          await tx.settlementLine.createMany({
+            data: resolved.lines.map((line) => ({
+              jobId: pe.jobId!,
+              recipientType: line.recipientType,
+              sharePercent: line.sharePercent,
+              amountCents: line.amountCents,
+              status: SettlementLineStatus.ACCRUED,
+              regionId: line.regionId,
+              territoryId: line.territoryId,
+              policyVersionId: resolved.policyVersionId,
+              overrideId: resolved.overrideId,
+              adminPackageId: resolved.adminPackageId,
+              adminUserId: line.adminUserId,
+            })),
+          });
+        } else {
+          // Specs / fallback when RevenueSplitService not injected
+          const gross = pe.amountIncGstCents;
+          const carrier = Math.round(gross * 0.7);
+          const superShare = Math.round(gross * 0.15);
+          const stateShare = Math.round(gross * 0.1);
+          const localShare = gross - carrier - superShare - stateShare;
+          await tx.settlementLine.createMany({
+            data: [
+              {
+                jobId: pe.jobId!,
+                recipientType: SettlementRecipientType.CARRIER,
+                sharePercent: 70,
+                amountCents: carrier,
+                status: SettlementLineStatus.ACCRUED,
+              },
+              {
+                jobId: pe.jobId!,
+                recipientType: SettlementRecipientType.SUPER_ADMIN,
+                sharePercent: 15,
+                amountCents: superShare,
+                status: SettlementLineStatus.ACCRUED,
+              },
+              {
+                jobId: pe.jobId!,
+                recipientType: SettlementRecipientType.STATE_MASTER,
+                sharePercent: 10,
+                amountCents: stateShare,
+                status: SettlementLineStatus.ACCRUED,
+              },
+              {
+                jobId: pe.jobId!,
+                recipientType: SettlementRecipientType.LOCAL_BDE,
+                sharePercent: 5,
+                amountCents: localShare,
+                status: SettlementLineStatus.ACCRUED,
+              },
+            ],
+          });
+        }
       }
     });
 

@@ -347,6 +347,34 @@ async function seedPolicy() {
   });
   // eslint-disable-next-line no-console
   console.log('Seeded PolicyVersion geofence.v1');
+
+  await prisma.policyVersion.upsert({
+    where: { key_version: { key: 'revenue_split.v1', version: 1 } },
+    update: {
+      payload: {
+        carrierPercent: 70,
+        superPercent: 15,
+        statePercent: 10,
+        localPercent: 5,
+        notes: 'Pilot default (G0)',
+      },
+      publishedAt: new Date(),
+    },
+    create: {
+      key: 'revenue_split.v1',
+      version: 1,
+      payload: {
+        carrierPercent: 70,
+        superPercent: 15,
+        statePercent: 10,
+        localPercent: 5,
+        notes: 'Pilot default (G0)',
+      },
+      publishedAt: new Date(),
+    },
+  });
+  // eslint-disable-next-line no-console
+  console.log('Seeded PolicyVersion revenue_split.v1');
 }
 
 async function main() {

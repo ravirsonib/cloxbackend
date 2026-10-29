@@ -2,14 +2,18 @@ import {
   BadRequestException,
   ForbiddenException,
   Injectable,
+  Logger,
   NotFoundException,
+  Optional,
   ServiceUnavailableException,
 } from '@nestjs/common';
 import {
   AssignmentStatus,
+  CompanyStatus,
   CompanyType,
   JobPricingModel,
   JobStatus,
+  PlatformRole,
   ProposalStatus,
   TripExceptionStatus,
 } from '@prisma/client';
@@ -22,6 +26,8 @@ import {
 } from '../../shared/types';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
+import { carrierMatchesJob } from '../matching/matching.eligibility';
+import { NotificationsService } from '../notifications/notifications.service';
 import { PaymentsService } from '../payments/payments.service';
 import { SenderService } from '../sender/sender.service';
 import { resolveJobEditMode } from './job-edit-mode';
@@ -34,6 +40,9 @@ import {
 } from './job-pricing.util';
 import { estimateRoute, orderStopsTspObjects, routeFromDistanceKm } from './routing.mock';
 
+/** Soft cap so one publish cannot fan out unbounded SMTP work. */
+const MAX_JOB_PUBLISH_CARRIER_EMAILS = 200;
+
 const DEFAULT_MIN_BASE_CENTS = {
   PER_KM: 5_000,
   HOURLY: 20_000,
@@ -44,11 +53,14 @@ const AU_STATE_CODES = new Set(['VIC', 'NSW', 'QLD', 'SA', 'WA', 'TAS', 'NT', 'A
 
 @Injectable()
 export class JobsService {
+  private readonly logger = new Logger(JobsService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
     private readonly senderService: SenderService,
     private readonly payments: PaymentsService,
+    @Optional() private readonly notifications?: NotificationsService,
   ) {}
 
   private ensureDatabase() {
@@ -256,6 +268,7 @@ export class JobsService {
       where: { senderCompanyId: user.company.id },
       include: {
         stops: { orderBy: { sequence: 'asc' } },
+        trip: { select: { id: true, status: true, completedAt: true } },
         _count: {
           select: {
             proposals: { where: { status: ProposalStatus.SUBMITTED } },
@@ -263,9 +276,19 @@ export class JobsService {
         },
       },
       orderBy: { createdAt: 'desc' },
-      take: 50,
+      take: 100,
     });
-    return jobs.map((j) => this.mapJob(j));
+    return jobs.map((j) => ({
+      ...this.mapJob(j),
+      trip: j.trip
+        ? {
+            id: j.trip.id,
+            status: j.trip.status,
+            completedAt: j.trip.completedAt?.toISOString() ?? null,
+          }
+        : null,
+      completedAt: j.trip?.completedAt?.toISOString() ?? null,
+    }));
   }
 
   async getJobForSender(principal: AuthenticatedPrincipal, jobId: string) {
@@ -285,7 +308,7 @@ export class JobsService {
           orderBy: { createdAt: 'asc' },
         },
         assignment: true,
-        trip: { select: { id: true, status: true } },
+        trip: { select: { id: true, status: true, completedAt: true } },
         paymentEvents: { orderBy: { createdAt: 'desc' }, take: 3 },
       },
     });
@@ -337,8 +360,13 @@ export class JobsService {
       ...mapped,
       editability,
       trip: job.trip
-        ? { id: job.trip.id, status: job.trip.status }
+        ? {
+            id: job.trip.id,
+            status: job.trip.status,
+            completedAt: job.trip.completedAt?.toISOString() ?? null,
+          }
         : null,
+      completedAt: job.trip?.completedAt?.toISOString() ?? null,
       assignment: job.assignment
         ? {
             id: job.assignment.id,
@@ -847,7 +875,73 @@ export class JobsService {
       metadata: { transition: 'DRAFT→PUBLISHED→BIDDING' },
     });
 
+    void this.notifyEligibleCarriersOfPublish(job.id).catch((error: unknown) => {
+      this.logger.warn(
+        `Job publish carrier notify failed for ${job.id}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    });
+
     return this.mapJob(bidding);
+  }
+
+  /**
+   * Phase 1 marketplace broadcast: email BID_ELIGIBLE carriers that would
+   * see this job on the market board (same carrierMatchesJob rules).
+   */
+  private async notifyEligibleCarriersOfPublish(jobId: string) {
+    if (!this.notifications) return;
+
+    const job = await this.prisma.job.findUnique({
+      where: { id: jobId },
+      include: { originRegion: true },
+    });
+    if (!job || (job.status !== JobStatus.BIDDING && job.status !== JobStatus.PUBLISHED)) {
+      return;
+    }
+
+    const carriers = await this.prisma.company.findMany({
+      where: {
+        type: CompanyType.CARRIER,
+        status: CompanyStatus.BID_ELIGIBLE,
+      },
+      include: {
+        homeRegion: true,
+        vehicles: true,
+        users: {
+          where: { role: PlatformRole.TRANSPORT_COMPANY },
+          select: { email: true },
+        },
+      },
+    });
+
+    const emails: string[] = [];
+    for (const company of carriers) {
+      if (!carrierMatchesJob(company, job)) continue;
+      for (const u of company.users) {
+        const email = u.email?.trim();
+        if (email) emails.push(email);
+        if (emails.length >= MAX_JOB_PUBLISH_CARRIER_EMAILS) break;
+      }
+      if (emails.length >= MAX_JOB_PUBLISH_CARRIER_EMAILS) break;
+    }
+
+    if (emails.length === 0) return;
+
+    const result = await this.notifications.notifyJobPublishedToCarriers({
+      carrierEmails: emails,
+      jobId: job.id,
+      jobTitle: job.title ?? '',
+      minVehicleClass: job.minVehicleClass,
+      originRegionCode: job.originRegion?.code ?? null,
+      pickupAt: job.pickupAt,
+      estimateIncGstCents: job.estimateIncGstCents,
+      requiresDg: job.requiresDg,
+    });
+    this.logger.log(
+      `Job ${job.id} publish notified ${result.notified} eligible carrier mailbox(es)`,
+    );
   }
 
   async acceptProposal(principal: AuthenticatedPrincipal, jobId: string, proposalId: string) {
