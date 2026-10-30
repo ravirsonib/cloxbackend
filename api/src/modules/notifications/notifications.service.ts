@@ -68,8 +68,13 @@ export class NotificationsService {
     return `${this.emailAssetBaseUrl()}/${path}`;
   }
 
+  /** White/light logo for dark Halloween hero (transparent PNG). */
   private logoUrl(): string {
-    return this.assetUrl('logo-clox-email-header.png');
+    return this.assetUrl('logo-clox-halloween.png');
+  }
+
+  private halloweenBgUrl(): string {
+    return this.assetUrl('halloween.png');
   }
 
   private stepCircleUrl(name: 'document' | 'shield' | 'bell'): string {
@@ -252,8 +257,8 @@ export class NotificationsService {
     return `
       <tr>
         <td style="padding:0 0 ${isLast ? '4px' : '14px'} 0;">
-          <p style="margin:0 0 3px;font-size:12px;line-height:1.3;font-weight:600;color:#64748b;letter-spacing:0.02em;">${label}</p>
-          <p style="margin:0;font-size:15px;line-height:1.4;font-weight:600;color:#0a1f3c;">${trimmed}</p>
+          <p style="margin:0 0 3px;font-size:12px;line-height:1.3;font-weight:600;color:#667085;letter-spacing:0.02em;font-family:Arial,Helvetica,sans-serif;">${label}</p>
+          <p style="margin:0;font-size:15px;line-height:1.4;font-weight:600;color:#101828;font-family:Arial,Helvetica,sans-serif;">${trimmed}</p>
         </td>
       </tr>`;
   }
@@ -308,8 +313,8 @@ export class NotificationsService {
                 ${this.stepCircleImg(icon)}
               </td>
               <td valign="top" style="padding:0;vertical-align:top;">
-                <p style="margin:0 0 4px;font-size:15px;line-height:20px;font-weight:700;color:#0a1f3c;">${title}</p>
-                <p style="margin:0;font-size:14px;line-height:1.55;color:#475569;">${body}</p>
+                <p style="margin:0 0 4px;font-size:15px;line-height:20px;font-weight:700;color:#101828;font-family:Arial,Helvetica,sans-serif;">${title}</p>
+                <p style="margin:0;font-size:14px;line-height:1.55;color:#475467;font-family:Arial,Helvetica,sans-serif;">${body}</p>
               </td>
             </tr>
           </table>
@@ -329,8 +334,9 @@ export class NotificationsService {
   }) {
     const label = this.leadLabel(params.type);
     const welcome = this.welcomeCopy(params.type);
-    const siteUrl = 'https://www.clox.com.au';
-    const logoHtml = `<img src="${this.logoUrl()}" width="180" height="62" alt="CLOX Freight Forwarding" style="display:block;margin:0 auto;border:0;outline:none;width:180px;height:auto;max-width:180px;" />`;
+    const siteUrl = 'https://clox.com.au';
+    const halloweenBg = this.halloweenBgUrl();
+    const logoSrc = this.logoUrl();
     const details = this.buildDetailRows({
       type: params.type,
       label,
@@ -354,12 +360,14 @@ export class NotificationsService {
       )
       .join('');
 
-    const subject = `Welcome to CLOX — ${label} received`;
+    const subject = `Happy Halloween from CLOX — ${label} received`;
 
     const text = [
-      welcome.headline,
+      'Happy Halloween from CLOX!',
       '',
       welcome.intro,
+      '',
+      'This Halloween, the team at CLOX Freight Forwarding wishes you a fun and safe celebration — and no freight scares ahead.',
       '',
       'Your details',
       ...details.textLines,
@@ -371,76 +379,115 @@ export class NotificationsService {
       '',
       `If you have any questions, please email ${SUPPORT_EMAIL}.`,
       '',
+      'Warm regards,',
+      'CLOX Freight Forwarding Team',
+      '',
       '—',
       'CLOX Freight Forwarding',
       COMPANY_LINE,
       ABN_LINE,
-      `Enquiries: ${SUPPORT_EMAIL} | www.clox.com.au`,
+      `Enquiries: ${SUPPORT_EMAIL} | clox.com.au`,
     ].join('\n');
 
     const html = `<!DOCTYPE html>
-<html lang="en" xmlns="http://www.w3.org/1999/xhtml">
+<html lang="en" xmlns="http://www.w3.org/1999/xhtml" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="X-UA-Compatible" content="IE=edge" />
   <meta name="color-scheme" content="light only" />
   <meta name="supported-color-schemes" content="light" />
   <title>${subject}</title>
-  <style type="text/css">
-    :root { color-scheme: light only; supported-color-schemes: light; }
-    body, table, td, p, a { color-scheme: light only; }
-    /* Prevent Apple Mail / iOS / some Android clients from inverting colors */
-    @media (prefers-color-scheme: dark) {
-      body, table, td, div, p, span, h1, h2, a {
-        color-scheme: light only !important;
-      }
-    }
-  </style>
   <!--[if mso]>
   <noscript>
     <xml>
       <o:OfficeDocumentSettings>
+        <o:AllowPNG/>
         <o:PixelsPerInch>96</o:PixelsPerInch>
       </o:OfficeDocumentSettings>
     </xml>
   </noscript>
   <![endif]-->
+  <style type="text/css">
+    :root { color-scheme: light only; supported-color-schemes: light; }
+    html, body { margin: 0 !important; padding: 0 !important; background-color: #F3F4F6; }
+    body, table, td, p, a { color-scheme: light only; }
+    table, td { border-collapse: collapse !important; }
+    img { border: 0; outline: none; text-decoration: none; display: block; max-width: 100%; }
+    a { color: #FF4B0B; }
+    @media screen and (max-width: 620px) {
+      .email-container { width: 100% !important; max-width: 100% !important; border-radius: 0 !important; }
+      .hero-bg { padding: 36px 15px 34px 15px !important; }
+      .hero-logo { width: 175px !important; }
+      .content-padding { padding: 32px 20px !important; }
+      .footer-padding { padding: 28px 18px !important; }
+      .mobile-heading { font-size: 22px !important; line-height: 28px !important; }
+      .mobile-btn { display: block !important; width: 100% !important; text-align: center !important; }
+    }
+  </style>
 </head>
-<body style="margin:0;padding:0;background:#eef2f6;font-family:Arial,Helvetica,sans-serif;color:#0f172a;">
-  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#eef2f6;padding:24px 12px;">
+<body style="margin:0;padding:0;background-color:#F3F4F6;font-family:Arial,Helvetica,sans-serif;-webkit-font-smoothing:antialiased;">
+  <div style="display:none;max-height:0;overflow:hidden;font-size:1px;line-height:1px;color:#F3F4F6;opacity:0;mso-hide:all;">
+    Happy Halloween from CLOX — your ${label} submission is in. No freight scares ahead.
+  </div>
+
+  <table role="presentation" width="100%" border="0" cellpadding="0" cellspacing="0" bgcolor="#F3F4F6" style="background-color:#F3F4F6;width:100%;margin:0;padding:32px 0;">
     <tr>
-      <td align="center">
-        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:600px;background:#ffffff;border-radius:16px;overflow:hidden;border:1px solid #e2e8f0;">
+      <td align="center" style="padding:0 12px;">
+        <!--[if (gte mso 9)|(IE)]>
+        <table role="presentation" align="center" border="0" cellpadding="0" cellspacing="0" width="600"><tr><td>
+        <![endif]-->
+        <table role="presentation" class="email-container" width="600" border="0" cellpadding="0" cellspacing="0" bgcolor="#FFFFFF" style="width:100%;max-width:600px;background-color:#FFFFFF;border:1px solid #E4E7EC;border-radius:8px;overflow:hidden;margin:0 auto;">
+
           <tr>
-            <td bgcolor="#0a1f3c" style="background-color:#0a1f3c;background:#0a1f3c;padding:28px 32px;text-align:center;">
-              <table role="presentation" cellpadding="0" cellspacing="0" border="0" align="center" style="margin:0 auto;">
+            <td class="hero-bg" align="center" valign="middle" background="${halloweenBg}" bgcolor="#101828" style="background-image:url('${halloweenBg}');background-repeat:no-repeat;background-position:center top;background-size:cover;background-color:#101828;text-align:center;border-bottom:3px solid #FF4B0B;padding:46px 20px 44px 20px;">
+              <!--[if gte mso 9]>
+              <v:rect xmlns:v="urn:schemas-microsoft-com:vml" fill="true" stroke="false" style="width:600px;height:205px;">
+                <v:fill type="frame" src="${halloweenBg}" color="#101828" />
+                <v:textbox inset="0,40px,0,0">
+              <![endif]-->
+              <table role="presentation" border="0" cellpadding="0" cellspacing="0" width="100%" style="margin:0 auto;max-width:520px;">
                 <tr>
-                  <td align="center" bgcolor="#0a1f3c" style="background-color:#0a1f3c;">
-                    ${logoHtml}
+                  <td align="center">
+                    <a href="${siteUrl}" target="_blank" style="text-decoration:none;display:inline-block;">
+                      <img src="${logoSrc}" alt="CLOX Freight Forwarding" width="220" class="hero-logo" style="width:220px;max-width:100%;height:auto;display:block;margin:0 auto;border:0;" />
+                    </a>
+                  </td>
+                </tr>
+                <tr>
+                  <td align="center" style="padding-top:14px;">
+                    <p style="margin:0;font-family:Arial,Helvetica,sans-serif;font-size:11px;font-weight:800;color:#FFFFFF;letter-spacing:1.5px;text-transform:uppercase;line-height:16px;">
+                      AUSTRALIA'S DIGITAL FULL-LOAD FREIGHT MARKETPLACE
+                    </p>
                   </td>
                 </tr>
               </table>
-              <p style="margin:18px 0 0;font-size:11px;font-weight:700;color:#ffffff;letter-spacing:0.12em;text-transform:uppercase;">
-                Australia's digital full-load freight marketplace
-              </p>
+              <!--[if gte mso 9]>
+                </v:textbox>
+              </v:rect>
+              <![endif]-->
             </td>
           </tr>
+
           <tr>
-            <td bgcolor="#ffffff" style="background-color:#ffffff;padding:36px 32px 28px;">
-              <p style="margin:0 0 10px;font-size:12px;font-weight:700;color:#f15a24;text-transform:uppercase;letter-spacing:0.08em;">
-                Pre-launch confirmation
+            <td class="content-padding" style="background-color:#FFFFFF;padding:44px 40px;text-align:left;">
+              <p style="margin:0 0 10px;font-family:Arial,Helvetica,sans-serif;font-size:12px;font-weight:700;color:#FF4B0B;text-transform:uppercase;letter-spacing:0.08em;">
+                Happy Halloween · Pre-launch confirmation
               </p>
-              <h1 style="margin:0 0 14px;font-size:28px;line-height:1.2;color:#0a1f3c;">
+              <h1 class="mobile-heading" style="margin:0 0 14px 0;font-family:Arial,Helvetica,sans-serif;font-size:26px;font-weight:700;line-height:1.3;color:#101828;letter-spacing:-0.3px;">
                 ${welcome.headline}
               </h1>
-              <p style="margin:0 0 24px;font-size:15px;line-height:1.65;color:#475569;">
+              <p style="margin:0 0 14px 0;font-family:Arial,Helvetica,sans-serif;font-size:15px;line-height:1.65;color:#475467;">
                 ${welcome.intro}
               </p>
+              <p style="margin:0 0 24px 0;font-family:Arial,Helvetica,sans-serif;font-size:15px;line-height:1.65;color:#475467;">
+                This Halloween, the CLOX team wishes you a fun, safe celebration — and no freight scares ahead. Transparent bidding, vetted carriers, and planned Protected Upfront Payments are how we take the fright out of full-load freight.
+              </p>
 
-              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" bgcolor="#f4f7f9" style="background-color:#f4f7f9;background:#f4f7f9;border-radius:14px;margin:0 0 28px;">
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" bgcolor="#F8FAFC" style="background-color:#F8FAFC;border:1px solid #E4E7EC;border-radius:8px;margin:0 0 28px;">
                 <tr>
-                  <td bgcolor="#f4f7f9" style="background-color:#f4f7f9;padding:22px 22px 12px;">
-                    <p style="margin:0 0 16px;font-size:12px;font-weight:700;color:#0a1f3c;text-transform:uppercase;letter-spacing:0.08em;">Your details</p>
+                  <td bgcolor="#F8FAFC" style="background-color:#F8FAFC;padding:22px 22px 12px;">
+                    <p style="margin:0 0 16px;font-family:Arial,Helvetica,sans-serif;font-size:12px;font-weight:700;color:#101828;text-transform:uppercase;letter-spacing:0.08em;">Your details</p>
                     <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
                       ${details.html}
                     </table>
@@ -448,44 +495,68 @@ export class NotificationsService {
                 </tr>
               </table>
 
-              <h2 style="margin:0 0 18px;font-size:20px;line-height:1.3;color:#0a1f3c;">What Happens Next?</h2>
+              <h2 style="margin:0 0 18px;font-family:Arial,Helvetica,sans-serif;font-size:20px;line-height:1.3;color:#101828;">What Happens Next?</h2>
               <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 28px;">
                 ${nextStepsHtml}
               </table>
 
-              <table role="presentation" cellpadding="0" cellspacing="0" width="100%" style="margin:0 0 16px;">
+              <table role="presentation" border="0" cellpadding="0" cellspacing="0" style="margin:0 0 20px;">
                 <tr>
-                  <td align="center">
-                    <a href="${siteUrl}" style="display:inline-block;background:#f15a24;border-radius:10px;padding:14px 28px;font-size:15px;font-weight:700;color:#ffffff;text-decoration:none;">
-                      Explore CLOX →
-                    </a>
+                  <td align="center" bgcolor="#FF4B0B" style="border-radius:6px;background-color:#FF4B0B;">
+                    <!--[if mso]>
+                    <v:roundrect xmlns:v="urn:schemas-microsoft-com:vml" xmlns:w="urn:schemas-microsoft-com:office:word" href="${siteUrl}" style="height:46px;v-text-anchor:middle;width:230px;" arcsize="13%" strokecolor="#FF4B0B" fillcolor="#FF4B0B">
+                      <w:anchorlock/>
+                      <center style="color:#FFFFFF;font-family:Arial,Helvetica,sans-serif;font-size:15px;font-weight:bold;">Explore CLOX</center>
+                    </v:roundrect>
+                    <![endif]-->
+                    <!--[if !mso]><!-->
+                    <a href="${siteUrl}" class="mobile-btn" target="_blank" style="background-color:#FF4B0B;border:1px solid #FF4B0B;border-radius:6px;color:#FFFFFF;display:inline-block;font-family:Arial,Helvetica,sans-serif;font-size:15px;font-weight:bold;line-height:46px;text-align:center;text-decoration:none;padding:0 28px;">Explore CLOX &rarr;</a>
+                    <!--<![endif]-->
                   </td>
                 </tr>
               </table>
-              <p style="margin:0;text-align:center;font-size:13px;line-height:1.55;color:#64748b;">
-                If you have any questions, please email
-                <a href="mailto:${SUPPORT_EMAIL}" style="color:#0a1f3c;font-weight:700;text-decoration:underline;">${SUPPORT_EMAIL}</a>.
+
+              <p style="margin:0 0 24px;font-family:Arial,Helvetica,sans-serif;font-size:13px;line-height:1.55;color:#667085;">
+                Questions? Email
+                <a href="mailto:${SUPPORT_EMAIL}" style="color:#FF4B0B;font-weight:700;text-decoration:underline;">${SUPPORT_EMAIL}</a>.
               </p>
+
+              <table role="presentation" border="0" cellpadding="0" cellspacing="0" style="border-top:1px solid #E4E7EC;width:100%;">
+                <tr>
+                  <td style="padding-top:20px;">
+                    <p style="margin:0;font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.5;color:#475467;">
+                      Warm regards,<br />
+                      <strong style="color:#101828;">CLOX Freight Forwarding Team</strong><br />
+                      <span style="font-size:13px;color:#667085;">Australia's Digital Full-Load Freight Marketplace</span>
+                    </p>
+                  </td>
+                </tr>
+              </table>
             </td>
           </tr>
+
           <tr>
-            <td bgcolor="#0a1f3c" style="background-color:#0a1f3c;background:#0a1f3c;padding:28px 32px;border-top:3px solid #f15a24;text-align:center;">
-              <p style="margin:0 0 8px;font-size:16px;font-weight:800;color:#ffffff;">CLOX Freight Forwarding</p>
-              <p style="margin:0 0 6px;font-size:12px;line-height:1.55;color:#cbd5e1;">
-                ${COMPANY_LINE}
+            <td class="footer-padding" bgcolor="#F8FAFC" style="background-color:#F8FAFC;padding:32px 36px;text-align:center;border-top:1px solid #E4E7EC;">
+              <p style="margin:0 0 6px 0;font-family:Arial,Helvetica,sans-serif;font-size:13px;font-weight:700;color:#101828;">
+                CLOX Freight Forwarding
               </p>
-              <p style="margin:0 0 14px;font-size:12px;line-height:1.55;color:#cbd5e1;">
+              <p style="margin:0 0 8px 0;font-family:Arial,Helvetica,sans-serif;font-size:12px;line-height:1.6;color:#667085;">
+                ${COMPANY_LINE}<br />
                 ${ABN_LINE}
               </p>
-              <p style="margin:0;font-size:12px;line-height:1.55;color:#94a3b8;">
+              <p style="margin:0;font-family:Arial,Helvetica,sans-serif;font-size:12px;line-height:1.6;color:#667085;">
                 Enquiries:
-                <a href="mailto:${SUPPORT_EMAIL}" style="color:#fdba74;text-decoration:underline;">${SUPPORT_EMAIL}</a>
-                &nbsp;|&nbsp;
-                <a href="${siteUrl}" style="color:#fdba74;text-decoration:underline;">www.clox.com.au</a>
+                <a href="mailto:${SUPPORT_EMAIL}" style="color:#FF4B0B;text-decoration:none;font-weight:600;">${SUPPORT_EMAIL}</a>
+                &bull;
+                <a href="${siteUrl}" target="_blank" style="color:#FF4B0B;text-decoration:none;">clox.com.au</a>
               </p>
             </td>
           </tr>
+
         </table>
+        <!--[if (gte mso 9)|(IE)]>
+        </td></tr></table>
+        <![endif]-->
       </td>
     </tr>
   </table>
