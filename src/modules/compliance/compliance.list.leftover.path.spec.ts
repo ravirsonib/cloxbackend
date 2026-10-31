@@ -48,7 +48,7 @@ describe('ComplianceService listCases leftover filters', () => {
     );
   }
 
-  it('Super applies status + caseType filters without region constraint', async () => {
+  it('Super applies status + caseType filters without region constraint and orders DESC by createdAt', async () => {
     const count = jest.fn().mockResolvedValue(1);
     const findMany = jest.fn().mockResolvedValue([
       { id: 'case-1', status: ComplianceCaseStatus.OPEN },
@@ -71,6 +71,7 @@ describe('ComplianceService listCases leftover filters', () => {
           status: ComplianceCaseStatus.OPEN,
           caseType: 'CARRIER_KYB',
         },
+        orderBy: { createdAt: 'desc' },
         take: 10,
         skip: 0,
       }),
@@ -106,6 +107,7 @@ describe('ComplianceService listCases leftover filters', () => {
     expect(findMany).toHaveBeenCalledWith(
       expect.objectContaining({
         where: { region: { code: { in: ['VIC', 'NSW'] } } },
+        orderBy: { createdAt: 'desc' },
         skip: 5,
         take: 5,
       }),

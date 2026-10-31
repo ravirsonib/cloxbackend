@@ -373,7 +373,7 @@ export class ComplianceService {
         where,
         skip,
         take: query.pageSize,
-        orderBy: { createdAt: 'asc' },
+        orderBy: { createdAt: 'desc' },
         include: {
           company: { select: { id: true, legalName: true, type: true, abn: true, status: true } },
           region: { select: { code: true, name: true } },

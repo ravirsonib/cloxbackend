@@ -1336,6 +1336,11 @@ export class PaymentsService {
         pickupAt: locked.job?.pickupAt ?? null,
         receivers: this.collectJobReceiversForNotify(locked.job),
       });
+      await this.notifyExpiredPeerCarriersAfterLock({
+        jobId: pe.jobId,
+        jobTitle: locked.job?.title ?? '',
+        winningCarrierCompanyId: locked.carrierCompanyId,
+      });
     }
 
     return { skipped: false as const };
@@ -1459,6 +1464,58 @@ export class PaymentsService {
     } catch (err) {
       this.logger.warn(
         `Assignment-locked email failed for job ${params.jobId}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+  }
+
+  private async notifyExpiredPeerCarriersAfterLock(params: {
+    jobId: string;
+    jobTitle: string;
+    winningCarrierCompanyId: string;
+  }) {
+    if (!this.inbox || !this.prisma.proposal?.findMany) return;
+    try {
+      const expiredPeers = await this.prisma.proposal.findMany({
+        where: {
+          jobId: params.jobId,
+          status: ProposalStatus.EXPIRED,
+          carrierCompanyId: { not: params.winningCarrierCompanyId },
+        },
+        select: {
+          id: true,
+          carrierCompany: {
+            select: {
+              users: {
+                where: { role: PlatformRole.TRANSPORT_COMPANY },
+                select: { id: true },
+                take: 10,
+              },
+            },
+          },
+        },
+      });
+      const peerUserIds = Array.from(
+        new Set(
+          expiredPeers.flatMap((p) => p.carrierCompany?.users.map((u) => u.id) ?? []),
+        ),
+      );
+      if (peerUserIds.length > 0) {
+        const jobLabel = params.jobTitle || params.jobId.slice(0, 8);
+        void this.inbox.notifyUsers({
+          userIds: peerUserIds,
+          type: NotificationType.BID_RECEIVED,
+          title: `Bid expired: ${jobLabel}`,
+          body: 'Another carrier was selected for this job. Your committed vehicle and driver are now available.',
+          href: '/carrier/fleet',
+          entityType: 'Job',
+          entityId: params.jobId,
+        });
+      }
+    } catch (err) {
+      this.logger.warn(
+        `Expired-bid notify failed for job ${params.jobId}: ${
           err instanceof Error ? err.message : String(err)
         }`,
       );

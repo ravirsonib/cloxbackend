@@ -177,6 +177,23 @@ export class JobsService {
       vehicleId: string | null;
       driverId: string | null;
       vehicle?: { vehicleClass: string | null; registration: string | null; label: string | null } | null;
+      carrierCompany?: {
+        id: string;
+        legalName: string;
+        tradingName?: string | null;
+        email?: string | null;
+        phone?: string | null;
+        abn?: string | null;
+      } | null;
+      driver?: {
+        id: string;
+        licenceClass?: string | null;
+        user?: {
+          name?: string | null;
+          email?: string | null;
+          phone?: string | null;
+        } | null;
+      } | null;
       createdAt: Date;
     }>;
     _count?: { proposals?: number };
@@ -237,21 +254,47 @@ export class JobsService {
         receiverName: s.receiverName,
         receiverEmail: s.receiverEmail,
       })),
-      proposals: (job.proposals ?? []).map((p, idx) => ({
-        id: p.id,
-        status: p.status,
-        amountIncGstCents: p.amountIncGstCents,
-        amountExGstCents: p.amountExGstCents,
-        amountGstCents: p.amountGstCents,
-        etaMinutes: p.etaMinutes,
-        vehicleClass: p.vehicle?.vehicleClass ?? null,
-        vehicleLabel: p.vehicle?.label ?? p.vehicle?.registration ?? null,
-        /** Mask carrier company name for sender (policy stub) */
-        carrierLabel: `Carrier ${String.fromCharCode(65 + (idx % 26))}`,
-        carrierCompanyIdMasked: true,
-        netToCarrierCents: carrierNetPayoutCents(p.amountIncGstCents),
-        createdAt: p.createdAt,
-      })),
+      proposals: (job.proposals ?? []).map((p, idx) => {
+        const carrierName =
+          p.carrierCompany?.tradingName?.trim() ||
+          p.carrierCompany?.legalName?.trim() ||
+          `Carrier ${String.fromCharCode(65 + (idx % 26))}`;
+        return {
+          id: p.id,
+          status: p.status,
+          amountIncGstCents: p.amountIncGstCents,
+          amountExGstCents: p.amountExGstCents,
+          amountGstCents: p.amountGstCents,
+          etaMinutes: p.etaMinutes,
+          vehicleClass: p.vehicle?.vehicleClass ?? null,
+          vehicleLabel: p.vehicle?.label ?? p.vehicle?.registration ?? null,
+          vehicleRegistration: p.vehicle?.registration ?? null,
+          carrierCompanyId: p.carrierCompanyId,
+          carrierLabel: carrierName,
+          carrierCompanyIdMasked: !p.carrierCompany,
+          carrierCompany: p.carrierCompany
+            ? {
+                id: p.carrierCompany.id,
+                legalName: p.carrierCompany.legalName,
+                tradingName: p.carrierCompany.tradingName ?? null,
+                email: p.carrierCompany.email ?? null,
+                phone: p.carrierCompany.phone ?? null,
+                abn: p.carrierCompany.abn ?? null,
+              }
+            : null,
+          driver: p.driver
+            ? {
+                id: p.driver.id,
+                name: p.driver.user?.name ?? null,
+                email: p.driver.user?.email ?? null,
+                phone: p.driver.user?.phone ?? null,
+                licenceClass: p.driver.licenceClass ?? null,
+              }
+            : null,
+          netToCarrierCents: carrierNetPayoutCents(p.amountIncGstCents),
+          createdAt: p.createdAt,
+        };
+      }),
     };
   }
 
@@ -307,7 +350,32 @@ export class JobsService {
         stops: { orderBy: { sequence: 'asc' } },
         proposals: {
           where: { status: { in: [ProposalStatus.SUBMITTED, ProposalStatus.ACCEPTED, ProposalStatus.EXPIRED] } },
-          include: { vehicle: true },
+          include: {
+            vehicle: true,
+            carrierCompany: {
+              select: {
+                id: true,
+                legalName: true,
+                tradingName: true,
+                email: true,
+                phone: true,
+                abn: true,
+              },
+            },
+            driver: {
+              select: {
+                id: true,
+                licenceClass: true,
+                user: {
+                  select: {
+                    name: true,
+                    email: true,
+                    phone: true,
+                  },
+                },
+              },
+            },
+          },
           orderBy: { createdAt: 'asc' },
         },
         assignment: true,

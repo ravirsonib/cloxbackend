@@ -134,6 +134,36 @@ describe('JobsService leftover list/get/publish/bidding paths', () => {
               vehicle: { vehicleClass: 'VAN', registration: 'ABC', label: 'Van 1' },
               createdAt: new Date(),
             },
+            {
+              id: 'prop-2',
+              status: ProposalStatus.SUBMITTED,
+              amountIncGstCents: 12000,
+              amountExGstCents: 10909,
+              amountGstCents: 1091,
+              etaMinutes: 30,
+              carrierCompanyId: 'co-c2',
+              vehicleId: 'v2',
+              driverId: 'd2',
+              vehicle: { vehicleClass: 'RIGID_1_2T', registration: 'XYZ789', label: 'Rigid 1' },
+              carrierCompany: {
+                id: 'co-c2',
+                legalName: 'Acme Haulage Pty Ltd',
+                tradingName: 'Acme Haulage',
+                email: 'ops@acmehaulage.com.au',
+                phone: '0400111222',
+                abn: '12345678901',
+              },
+              driver: {
+                id: 'd2',
+                licenceClass: 'MR',
+                user: {
+                  name: 'J. Smith',
+                  email: 'jsmith@acmehaulage.com.au',
+                  phone: '0400333444',
+                },
+              },
+              createdAt: new Date(),
+            },
           ],
           assignment: {
             id: 'asg-1',
@@ -161,6 +191,24 @@ describe('JobsService leftover list/get/publish/bidding paths', () => {
     expect(result.proposals?.[0]).toMatchObject({
       id: 'prop-1',
       carrierLabel: expect.stringMatching(/^Carrier /),
+      carrierCompanyIdMasked: true,
+    });
+    expect(result.proposals?.[1]).toMatchObject({
+      id: 'prop-2',
+      carrierLabel: 'Acme Haulage',
+      carrierCompanyIdMasked: false,
+      carrierCompany: {
+        id: 'co-c2',
+        legalName: 'Acme Haulage Pty Ltd',
+        tradingName: 'Acme Haulage',
+        email: 'ops@acmehaulage.com.au',
+      },
+      driver: {
+        id: 'd2',
+        name: 'J. Smith',
+        email: 'jsmith@acmehaulage.com.au',
+        licenceClass: 'MR',
+      },
     });
   });
 
