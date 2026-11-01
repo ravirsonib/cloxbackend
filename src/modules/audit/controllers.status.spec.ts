@@ -13,17 +13,33 @@ describe('Thin controller status / meta endpoints', () => {
     });
   });
 
-  it('JobsController.status + vehicleMeta + recommend', () => {
-    const controller = new JobsController({} as never);
+  it('JobsController.status + vehicleMeta + recommend', async () => {
+    const jobsService = {
+      getVehicleClassesMeta: jest.fn().mockResolvedValue({
+        classes: [{ code: 'UTE', rank: 1 }],
+        ranks: { UTE: 1 },
+      }),
+      getActiveVehicleClasses: jest.fn().mockResolvedValue([
+        {
+          code: 'UTE',
+          rank: 1,
+          maxChargeableWeightKg: 1000,
+          maxLengthCm: 240,
+          maxWidthCm: 180,
+          maxHeightCm: 150,
+        },
+      ]),
+    };
+    const controller = new JobsController(jobsService as never);
     expect(controller.status()).toEqual({
       module: 'jobs',
       status: 'ready',
       milestone: 'M6',
     });
-    const meta = controller.vehicleMeta();
+    const meta = await controller.vehicleMeta();
     expect(meta.classes.length).toBeGreaterThan(0);
     expect(meta.ranks).toBeDefined();
-    const rec = controller.recommend({
+    const rec = await controller.recommend({
       deadWeightKg: 500,
       lengthCm: 200,
       widthCm: 100,

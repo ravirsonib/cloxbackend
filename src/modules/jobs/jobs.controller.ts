@@ -45,25 +45,23 @@ export class JobsController {
 
   @Get('meta/vehicle-classes')
   @ApiOperation({ summary: 'Vehicle class ranks + chargeable helper (FR-3)' })
-  vehicleMeta() {
-    return {
-      classes: Object.keys(VEHICLE_CLASS_RANK),
-      ranks: VEHICLE_CLASS_RANK,
-      chargeableFormula: 'max(deadKg, L×W×Hcm/4000)',
-    };
+  async vehicleMeta() {
+    return this.jobsService.getVehicleClassesMeta();
   }
 
   @Post('meta/recommend')
   @ApiOperation({
     summary: 'Recommend vehicle class from dead weight + dimensions (50 t chargeable cap)',
   })
-  recommend(@Body(new ZodValidationPipe(jobRecommendSchema)) body: JobRecommendInput) {
+  async recommend(@Body(new ZodValidationPipe(jobRecommendSchema)) body: JobRecommendInput) {
     const chargeable = chargeableWeightKg(body);
-    const recommended = recommendVehicleClass(chargeable);
+    const classes = await this.jobsService.getActiveVehicleClasses();
+    const recommended = recommendVehicleClass(chargeable, body, classes);
+    const matchedClass = classes.find((c) => c.code === recommended);
     return {
       chargeableWeightKg: chargeable,
       recommendedVehicleClass: recommended,
-      maxChargeableWeightKg: MAX_JOB_CHARGEABLE_WEIGHT_KG,
+      maxChargeableWeightKg: matchedClass?.maxChargeableWeightKg ?? MAX_JOB_CHARGEABLE_WEIGHT_KG,
     };
   }
 

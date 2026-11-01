@@ -173,6 +173,9 @@ export const AuditAction = {
   EXCEPTION_PERFORMANCE_STUB: 'exception.performance_stub',
   EXCEPTION_RELISTED: 'exception.relisted',
   PLATFORM_SETTINGS_UPDATED: 'platform.settings_updated',
+  VEHICLE_CLASS_CREATED: 'vehicle_class.created',
+  VEHICLE_CLASS_UPDATED: 'vehicle_class.updated',
+  VEHICLE_CLASS_DELETED: 'vehicle_class.deleted',
   REVENUE_SPLIT_DRAFTED: 'policy.revenue_split.drafted',
   REVENUE_SPLIT_PUBLISHED: 'policy.revenue_split.published',
   REVENUE_SPLIT_OVERRIDE_PUBLISHED: 'policy.revenue_split.override_published',
@@ -645,6 +648,14 @@ export const companyStatusSchema = z.enum([
 ]);
 export type CompanyStatusFilter = z.infer<typeof companyStatusSchema>;
 
+export const adminDashboardQuerySchema = z.object({
+  period: z.enum(['today', 'week', 'month', '30d', 'year', 'all']).optional(),
+  from: z.string().trim().optional(),
+  to: z.string().trim().optional(),
+});
+
+export type AdminDashboardQuery = z.infer<typeof adminDashboardQuerySchema>;
+
 export const adminCompanyListQuerySchema = z.object({
   page: z.coerce.number().int().positive().default(1),
   pageSize: z.coerce.number().int().min(1).max(100).default(20),
@@ -769,6 +780,7 @@ export const complianceCaseListQuerySchema = z.object({
     ])
     .optional(),
   regionCode: z.string().trim().toUpperCase().max(3).optional(),
+  search: z.string().trim().max(100).optional(),
 });
 
 export type ComplianceCaseListQuery = z.infer<typeof complianceCaseListQuerySchema>;
@@ -800,6 +812,8 @@ export const senderRegisterSchema = z.object({
   email: emailField,
   name: z.string().trim().min(2).max(120),
   phone: optionalPhoneInput,
+  alternateEmail: emailField.optional(),
+  alternatePhone: optionalPhoneInput,
   acceptedTerms: acceptedTrue,
   /** Local BDE company invite token — invalid/expired → HQ (no referrer). */
   inviteToken: z.string().trim().min(16).max(200).optional(),
@@ -867,6 +881,19 @@ export const senderProfileSchema = z
         });
       }
     }
+    if (
+      typeof value.invoiceState === 'string' &&
+      typeof value.invoicePostcode === 'string' &&
+      value.invoiceState.trim() &&
+      value.invoicePostcode.trim() &&
+      !isValidAuPostcodeForState(value.invoicePostcode, value.invoiceState)
+    ) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['invoicePostcode'],
+        message: `Invalid postcode ${value.invoicePostcode} for state ${value.invoiceState}`,
+      });
+    }
   });
 
 export type SenderProfileInput = z.infer<typeof senderProfileSchema>;
@@ -888,6 +915,8 @@ export const carrierRegisterSchema = z.object({
   email: emailField,
   name: z.string().trim().min(2).max(120),
   phone: optionalPhoneInput,
+  alternateEmail: emailField.optional(),
+  alternatePhone: optionalPhoneInput,
   acceptedTerms: acceptedTrue,
   /** Local BDE company invite token — invalid/expired → HQ (no referrer). */
   inviteToken: z.string().trim().min(16).max(200).optional(),
@@ -1201,33 +1230,95 @@ const auStateField = z
   .toUpperCase()
   .regex(/^(NSW|VIC|QLD|SA|WA|TAS|NT|ACT)$/, 'Invalid AU state');
 
+const AU_STATE_POSTCODE_RANGES: Record<string, ReadonlyArray<[number, number]>> = {
+  NSW: [
+    [1000, 2599],
+    [2619, 2899],
+    [2921, 2999],
+  ],
+  ACT: [
+    [200, 299],
+    [2600, 2618],
+    [2900, 2920],
+  ],
+  VIC: [
+    [3000, 3999],
+    [8000, 8999],
+  ],
+  QLD: [
+    [4000, 4999],
+    [9000, 9999],
+  ],
+  SA: [[5000, 5999]],
+  WA: [
+    [6000, 6797],
+    [6800, 6999],
+  ],
+  TAS: [[7000, 7999]],
+  NT: [[800, 999]],
+};
+
+export function isValidAuPostcode(postcode: string): boolean {
+  const trimmed = postcode.trim();
+  if (!/^\d{4}$/.test(trimmed)) return false;
+  const num = Number.parseInt(trimmed, 10);
+  if (!Number.isFinite(num) || num < 200) return false;
+  return Object.values(AU_STATE_POSTCODE_RANGES).some((ranges) =>
+    ranges.some(([min, max]) => num >= min && num <= max),
+  );
+}
+
+export function isValidAuPostcodeForState(postcode: string, state: string): boolean {
+  const trimmed = postcode.trim();
+  if (!/^\d{4}$/.test(trimmed)) return false;
+  const num = Number.parseInt(trimmed, 10);
+  if (!Number.isFinite(num) || num < 200) return false;
+  const ranges = AU_STATE_POSTCODE_RANGES[state.trim().toUpperCase()];
+  if (!ranges) return isValidAuPostcode(trimmed);
+  return ranges.some(([min, max]) => num >= min && num <= max);
+}
+
 const auPostcodeField = z
   .string()
   .trim()
-  .regex(/^\d{4}$/, 'Postcode must be 4 digits');
+  .regex(/^\d{4}$/, 'Postcode must be 4 digits')
+  .refine(isValidAuPostcode, 'Enter a valid 4-digit Australian postcode');
 
-export const driverProfileSchema = z.object({
-  /** Legal / preferred name — stored on User */
-  name: personNameField(2, 120),
-  /** Personal mobile — stored on User.phone */
-  phone: phoneField,
-  emergencyContactName: personNameField(2, 120),
-  emergencyContactPhone: phoneField,
-  addressLine1: z.string().trim().min(3).max(200),
-  suburb: z.string().trim().min(2).max(100),
-  state: auStateField,
-  postcode: auPostcodeField,
-  licenceNo: z.string().trim().min(3).max(40),
-  licenceClass: z
-    .string()
-    .trim()
-    .toUpperCase()
-    .regex(/^(C|LR|MR|HR|HC|MC)$/, 'Invalid licence class'),
-  licenceExpiry: z.string().datetime({ offset: true }).or(z.string().regex(/^\d{4}-\d{2}-\d{2}$/)),
-  nhvrAcknowledged: z.literal(true),
-  /** Required DRIVER_LICENCE document id after upload */
-  licenceDocumentId: z.string().uuid(),
-});
+export const driverProfileSchema = z
+  .object({
+    /** Legal / preferred name — stored on User */
+    name: personNameField(2, 120),
+    /** Personal mobile — stored on User.phone */
+    phone: phoneField,
+    emergencyContactName: personNameField(2, 120),
+    emergencyContactPhone: phoneField,
+    addressLine1: z.string().trim().min(3).max(200),
+    suburb: z.string().trim().min(2).max(100),
+    state: auStateField,
+    postcode: auPostcodeField,
+    licenceNo: z.string().trim().min(3).max(40),
+    licenceClass: z
+      .string()
+      .trim()
+      .toUpperCase()
+      .regex(/^(C|LR|MR|HR|HC|MC)$/, 'Invalid licence class'),
+    licenceExpiry: z
+      .string()
+      .datetime({ offset: true })
+      .or(z.string().regex(/^\d{4}-\d{2}-\d{2}$/)),
+    nhvrAcknowledged: z.literal(true),
+    /** Required DRIVER_LICENCE document id after upload */
+    licenceDocumentId: z.string().uuid(),
+  })
+  .superRefine((val, ctx) => {
+    if (!isValidAuPostcodeForState(val.postcode, val.state)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['postcode'],
+        message: `Invalid postcode ${val.postcode} for state ${val.state}`,
+      });
+    }
+  });
 
 export type DriverProfileInput = z.infer<typeof driverProfileSchema>;
 
@@ -1237,19 +1328,29 @@ const vehicleClassField = z
   .toUpperCase()
   .regex(/^(UTE|VAN|RIGID_1_2T|RIGID_3_4T|SEMI|BDOUBLE)$/);
 
-const jobStopSchema = z.object({
-  sequence: z.number().int().min(0).max(3),
-  stopType: z.enum(['PICKUP', 'DROPOFF', 'WAYPOINT']),
-  label: z.string().trim().max(120).optional(),
-  addressLine: z.string().trim().min(3).max(200),
-  suburb: z.string().trim().min(2).max(80),
-  state: z.string().trim().toUpperCase().regex(/^[A-Z]{2,3}$/),
-  postcode: z.string().trim().min(4).max(8),
-  lat: z.number().min(-90).max(90),
-  lng: z.number().min(-180).max(180),
-  receiverName: z.string().trim().min(2).max(120).optional(),
-  receiverEmail: z.string().trim().email().optional(),
-});
+const jobStopSchema = z
+  .object({
+    sequence: z.number().int().min(0).max(50),
+    stopType: z.enum(['PICKUP', 'DROPOFF', 'WAYPOINT']),
+    label: z.string().trim().max(120).optional(),
+    addressLine: z.string().trim().min(3).max(200),
+    suburb: z.string().trim().min(2).max(80),
+    state: z.string().trim().toUpperCase().regex(/^[A-Z]{2,3}$/),
+    postcode: z.string().trim().regex(/^\d{4}$/, 'Postcode must be 4 digits'),
+    lat: z.number().min(-90).max(90),
+    lng: z.number().min(-180).max(180),
+    receiverName: z.string().trim().min(2).max(120).optional(),
+    receiverEmail: z.string().trim().email().optional(),
+  })
+  .superRefine((stop, ctx) => {
+    if (!isValidAuPostcodeForState(stop.postcode, stop.state)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['postcode'],
+        message: `Invalid postcode ${stop.postcode} for state ${stop.state}`,
+      });
+    }
+  });
 
 function refineJobStops(
   val: { pricingModel: 'PER_KM' | 'HOURLY'; stops: Array<{ stopType: string }> },
@@ -1321,25 +1422,45 @@ export const jobCreateSchema = z
     receiverName: z.string().trim().min(2).max(120),
     receiverEmail: z.string().trim().email(),
     receiverPhone: z.string().trim().min(8).max(32).optional(),
+    receiverAltEmail: z.preprocess(
+      (v) => (typeof v === 'string' && v.trim() === '' ? undefined : v),
+      z.string().trim().email().optional().nullable(),
+    ),
+    receiverAltPhone: z.preprocess(
+      (v) => (typeof v === 'string' && v.trim() === '' ? undefined : v),
+      z.string().trim().min(8).max(32).optional().nullable(),
+    ),
     deadWeightKg: z.number().positive().max(MAX_JOB_DEAD_WEIGHT_KG),
     lengthCm: z.number().positive().max(MAX_JOB_LENGTH_CM),
     widthCm: z.number().positive().max(MAX_JOB_WIDTH_CM),
     heightCm: z.number().positive().max(MAX_JOB_HEIGHT_CM),
-    /** Sender-entered route distance; must be a real positive km (never null/0). */
-    distanceKm: z.number().positive().max(20_000),
+    /** Sender-entered route distance (required for PER_KM; optional for HOURLY, derived from stops when omitted). */
+    distanceKm: z.number().positive().max(20_000).optional(),
     loadTypes: z
       .array(z.enum(['GENERAL', 'DG', 'REEFER', 'OVERSIZE']))
       .min(1)
       .max(4)
       .default(['GENERAL']),
+    /** Required when loadTypes includes DG (dangerous goods manifest / SDS document). */
+    dgDocumentId: z.string().uuid().optional().nullable(),
     /** Optional override; otherwise recommended from chargeable weight */
     minVehicleClass: vehicleClassField.optional(),
     siteManeuverability: z.enum(['EASY', 'MODERATE', 'TIGHT']),
     siteFacility: z.enum(['DOCK', 'GROUND', 'FORKLIFT', 'CRANE', 'OTHER']),
     siteDisclaimerAccepted: z.literal(true),
-    stops: z.array(jobStopSchema).min(2).max(4),
+    stops: z.array(jobStopSchema).min(2).max(50),
   })
   .superRefine((val, ctx) => {
+    if (
+      val.pricingModel === 'PER_KM' &&
+      (val.distanceKm === undefined || !Number.isFinite(val.distanceKm) || val.distanceKm <= 0)
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Per-km jobs require a positive distance (km)',
+        path: ['distanceKm'],
+      });
+    }
     refineJobStops(val, ctx, {
       requireHourlyPattern: true,
       hourlyPattern: val.hourlyPattern,
@@ -1354,6 +1475,14 @@ export const jobReceiverUpdateSchema = z.object({
   receiverName: z.string().trim().min(2).max(120),
   receiverEmail: z.string().trim().email(),
   receiverPhone: z.string().trim().min(8).max(32).optional().nullable(),
+  receiverAltEmail: z.preprocess(
+    (v) => (typeof v === 'string' && v.trim() === '' ? null : v),
+    z.string().trim().email().optional().nullable(),
+  ),
+  receiverAltPhone: z.preprocess(
+    (v) => (typeof v === 'string' && v.trim() === '' ? null : v),
+    z.string().trim().min(8).max(32).optional().nullable(),
+  ),
   stops: z
     .array(
       z.object({
@@ -1362,7 +1491,7 @@ export const jobReceiverUpdateSchema = z.object({
         receiverEmail: z.string().trim().email().optional().nullable(),
       }),
     )
-    .max(4)
+    .max(50)
     .optional(),
 });
 
@@ -1392,7 +1521,7 @@ export type AdminJobListQuery = z.infer<typeof adminJobListQuerySchema>;
 export const jobRouteEstimateSchema = z
   .object({
     pricingModel: z.enum(['PER_KM', 'HOURLY']),
-    stops: z.array(jobStopSchema).min(2).max(4),
+    stops: z.array(jobStopSchema).min(2).max(50),
   })
   .superRefine((val, ctx) => {
     refineJobStops(val, ctx);
@@ -1406,6 +1535,7 @@ export const proposalSubmitSchema = z.object({
   driverId: z.string().uuid(),
   amountIncGstCents: z.number().int().positive().max(50_000_000),
   etaMinutes: z.number().int().positive().max(10_000),
+  dgDocumentId: z.string().uuid().optional().nullable(),
 });
 
 export type ProposalSubmitInput = z.infer<typeof proposalSubmitSchema>;
@@ -1492,6 +1622,61 @@ export const platformSettingsPatchSchema = z.object({
 });
 
 export type PlatformSettingsPatchInput = z.infer<typeof platformSettingsPatchSchema>;
+
+export const vehicleClassCodeSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(32)
+  .regex(/^[A-Za-z0-9_]+$/, 'Code must be alphanumeric with underscores only')
+  .transform((v) => v.toUpperCase());
+
+export const vehicleClassCreateSchema = z.object({
+  code: vehicleClassCodeSchema,
+  name: z.string().trim().min(1).max(64),
+  rank: z.number().int().min(1).max(999),
+  maxChargeableWeightKg: z.number().positive().max(100_000),
+  maxLengthCm: z.number().positive().max(10_000),
+  maxWidthCm: z.number().positive().max(1_000),
+  maxHeightCm: z.number().positive().max(1_000),
+  minLicenceClass: z.string().trim().min(1).max(10),
+  suggestedGvmKg: z.number().int().positive().max(200_000),
+  suggestedTareKg: z.number().int().positive().max(200_000),
+  isActive: z.boolean().default(true),
+});
+
+export const vehicleClassUpdateSchema = z.object({
+  name: z.string().trim().min(1).max(64).optional(),
+  rank: z.number().int().min(1).max(999).optional(),
+  maxChargeableWeightKg: z.number().positive().max(100_000).optional(),
+  maxLengthCm: z.number().positive().max(10_000).optional(),
+  maxWidthCm: z.number().positive().max(1_000).optional(),
+  maxHeightCm: z.number().positive().max(1_000).optional(),
+  minLicenceClass: z.string().trim().min(1).max(10).optional(),
+  suggestedGvmKg: z.number().int().positive().max(200_000).optional(),
+  suggestedTareKg: z.number().int().positive().max(200_000).optional(),
+  isActive: z.boolean().optional(),
+});
+
+export type VehicleClassCreateInput = z.infer<typeof vehicleClassCreateSchema>;
+export type VehicleClassUpdateInput = z.infer<typeof vehicleClassUpdateSchema>;
+
+export type VehicleClassDto = {
+  id: string;
+  code: string;
+  name: string;
+  rank: number;
+  maxChargeableWeightKg: number;
+  maxLengthCm: number;
+  maxWidthCm: number;
+  maxHeightCm: number;
+  minLicenceClass: string;
+  suggestedGvmKg: number;
+  suggestedTareKg: number;
+  isActive: boolean;
+  createdAt: string;
+  updatedAt: string;
+};
 
 const adminPoolPercentsSchema = z
   .object({

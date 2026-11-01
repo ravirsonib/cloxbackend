@@ -378,6 +378,9 @@ export class CarrierService {
         const rwcDoc = company.complianceDocuments.find(
           (d) => d.docType === ComplianceDocType.RWC && d.vehicleId === v.id,
         );
+        const dgDoc = company.complianceDocuments.find(
+          (d) => d.docType === ComplianceDocType.DG_LICENCE && d.vehicleId === v.id,
+        );
         return {
           id: v.id,
           status: v.status,
@@ -389,6 +392,8 @@ export class CarrierService {
           gcmKg: v.gcmKg,
           hasRwc: Boolean(rwcDoc),
           rwcDocumentId: rwcDoc?.id ?? null,
+          hasDg: Boolean(dgDoc),
+          dgDocumentId: dgDoc?.id ?? null,
         };
       }),
       drivers: company.drivers.map((d) => ({
@@ -705,6 +710,40 @@ export class CarrierService {
       }
     }
 
+    const dgDocs =
+      (await this.prisma.complianceDocument.findMany({
+        where: {
+          companyId: company.id,
+          docType: ComplianceDocType.DG_LICENCE,
+          status: {
+            in: [
+              ComplianceDocStatus.UPLOADED,
+              ComplianceDocStatus.UNDER_REVIEW,
+              ComplianceDocStatus.APPROVED,
+            ],
+          },
+        },
+        orderBy: [{ updatedAt: 'desc' }],
+        select: {
+          id: true,
+          vehicleId: true,
+          status: true,
+          originalFilename: true,
+        },
+      })) ?? [];
+    const dgByVehicle = new Map<string, (typeof dgDocs)[number]>();
+    let companyDgDoc: (typeof dgDocs)[number] | null = null;
+    for (const doc of dgDocs) {
+      if (doc.vehicleId) {
+        if (!dgByVehicle.has(doc.vehicleId)) {
+          dgByVehicle.set(doc.vehicleId, doc);
+        }
+      } else if (!companyDgDoc) {
+        companyDgDoc = doc;
+      }
+    }
+    const hasPerVehicleDgDocs = dgByVehicle.size > 0;
+
     const activeAssignments =
       vehicleIds.length === 0
         ? []
@@ -786,10 +825,16 @@ export class CarrierService {
               ? 'BID_COMMITTED'
               : null;
         const bidAvailable = v.status === VehicleStatus.ACTIVE && activityStatus == null;
+        const vehicleDgDoc =
+          dgByVehicle.get(v.id) ??
+          (!hasPerVehicleDgDocs && company.capabilities.includes('DG') ? companyDgDoc : null);
         return {
           ...v,
           activityStatus,
           bidAvailable,
+          hasDg: Boolean(vehicleDgDoc),
+          dgDocumentId: vehicleDgDoc?.id ?? null,
+          dgDocumentFilename: vehicleDgDoc?.originalFilename ?? null,
           committedJob: active
             ? { id: active.job.id, title: active.job.title }
             : openBid
@@ -1731,7 +1776,6 @@ export class CarrierService {
         where: {
           companyId: company.id,
           docType: ComplianceDocType.DG_LICENCE,
-          vehicleId: null,
           status: {
             in: [
               ComplianceDocStatus.UPLOADED,
@@ -1811,22 +1855,21 @@ export class CarrierService {
 
     const attachIds = [...latestRwcByVehicle.values()];
     if (company.capabilities.includes('DG')) {
-      const dgDoc = await this.prisma.complianceDocument.findFirst({
+      const dg = await this.prisma.complianceDocument.findFirst({
         where: {
           companyId: company.id,
           docType: ComplianceDocType.DG_LICENCE,
-          vehicleId: null,
           status: { in: allowedDocStatuses },
         },
         orderBy: { updatedAt: 'desc' },
         select: { id: true },
       });
-      if (!dgDoc) {
+      if (!dg) {
         throw new BadRequestException(
           'Missing required doc: DG_LICENCE (required when Dangerous goods capability is set)',
         );
       }
-      attachIds.push(dgDoc.id);
+      attachIds.push(dg.id);
     }
     return attachIds;
   }

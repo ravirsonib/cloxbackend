@@ -19,6 +19,7 @@ import {
   ComplianceCaseStatus,
   ComplianceCaseType,
   ComplianceDocStatus,
+  JobStatus,
   NotificationType,
 } from '@prisma/client';
 import type { AppEnv } from '../../config/env.validation';
@@ -230,7 +231,11 @@ export class DocumentsService {
     doc: { docType: string; driverId?: string | null; companyId?: string | null },
   ) {
     let companyType: CompanyType | undefined;
-    if (doc.companyId) {
+    if (
+      doc.companyId &&
+      doc.docType === ComplianceDocType.DG_LICENCE &&
+      this.prisma.company?.findUnique
+    ) {
       const company = await this.prisma.company.findUnique({
         where: { id: doc.companyId },
         select: { type: true },
@@ -240,13 +245,54 @@ export class DocumentsService {
     this.assertUploadRoleAllowed(principal, { docType: doc.docType }, companyType);
   }
 
-  /** Company members (carrier/sender) and Ops may read; drivers only their own allowed types. */
+  /** Company members (carrier/sender) and Ops may read; drivers only their own allowed types; cross-party read allowed for DG job/bid documents. */
   private async assertDocReadAllowed(
     principal: AuthenticatedPrincipal,
-    doc: { companyId: string | null; driverId: string | null; docType: string },
+    doc: { id: string; companyId: string | null; driverId: string | null; docType: string },
   ) {
     if (!doc.companyId) {
       throw new NotFoundException('Document not found');
+    }
+    if (
+      principal.kind === 'user' &&
+      doc.docType === ComplianceDocType.DG_LICENCE &&
+      this.prisma.user?.findUnique
+    ) {
+      const user = await this.prisma.user.findUnique({
+        where: { id: principal.id },
+        select: { id: true, companyId: true, role: true },
+      });
+      if (user?.companyId && user.companyId !== doc.companyId) {
+        if (principal.role === 'TRANSPORT_COMPANY' && this.prisma.job?.findFirst) {
+          const sharedJob = await this.prisma.job.findFirst({
+            where: {
+              dgDocument: { id: doc.id },
+              OR: [
+                { status: { in: [JobStatus.PUBLISHED, JobStatus.BIDDING] } },
+                { proposals: { some: { carrierCompanyId: user.companyId } } },
+                { assignment: { carrierCompanyId: user.companyId } },
+              ],
+            },
+            select: { id: true },
+          });
+          if (sharedJob) return;
+        }
+        if (principal.role === 'SENDER' && this.prisma.proposal?.findFirst) {
+          const sharedProposal = await this.prisma.proposal.findFirst({
+            where: {
+              job: { senderCompanyId: user.companyId },
+              OR: [
+                { dgDocumentId: doc.id },
+                ...(doc.docType === ComplianceDocType.DG_LICENCE
+                  ? [{ carrierCompanyId: doc.companyId }]
+                  : []),
+              ],
+            },
+            select: { id: true },
+          });
+          if (sharedProposal) return;
+        }
+      }
     }
     await this.assertCompanyAccess(principal, doc.companyId);
     await this.assertDriverOwnsDoc(principal, doc);
@@ -449,7 +495,7 @@ export class DocumentsService {
 
     if (!mimeMatchesIntent(doc.mimeType, file.mimetype)) {
       throw new BadRequestException(
-        'This file type does not match what was selected. Please try again with a PDF or photo.',
+        'This file type does not match what was selected. Please try again with a document or photo.',
       );
     }
     // Platform ceiling is 10MB; declared intent size is advisory (clients may recompress).
@@ -536,6 +582,26 @@ export class DocumentsService {
       updated.companyId
     ) {
       await this.attachVehicleRwcToFleetCaseIfBidEligible(updated.companyId, updated.id);
+    }
+
+    if (
+      updated.docType === ComplianceDocType.DG_LICENCE &&
+      updated.companyId
+    ) {
+      const carrier = await this.prisma.company.findUnique({
+        where: { id: updated.companyId },
+        select: { id: true, type: true, capabilities: true },
+      });
+      if (
+        carrier &&
+        carrier.type === CompanyType.CARRIER &&
+        !carrier.capabilities.includes('DG')
+      ) {
+        await this.prisma.company.update({
+          where: { id: carrier.id },
+          data: { capabilities: [...carrier.capabilities, 'DG'] },
+        });
+      }
     }
 
     return {

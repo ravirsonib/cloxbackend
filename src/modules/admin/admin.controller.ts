@@ -16,6 +16,7 @@ import {
   AdminRole,
   adminAuditQuerySchema,
   adminCompanyListQuerySchema,
+  adminDashboardQuerySchema,
   adminJobListQuerySchema,
   adminLeadExportQuerySchema,
   adminLeadListQuerySchema,
@@ -23,8 +24,11 @@ import {
   disableCompanySchema,
   platformSettingsPatchSchema,
   updateLeadSchema,
+  vehicleClassCreateSchema,
+  vehicleClassUpdateSchema,
   type AdminAuditQuery,
   type AdminCompanyListQuery,
+  type AdminDashboardQuery,
   type AdminJobListQuery,
   type AdminLeadExportQuery,
   type AdminLeadListQuery,
@@ -32,6 +36,8 @@ import {
   type DisableCompanyInput,
   type PlatformSettingsPatchInput,
   type UpdateLeadInput,
+  type VehicleClassCreateInput,
+  type VehicleClassUpdateInput,
 } from '../../shared/types';
 import { CurrentAdmin } from '../../common/decorators/current-admin.decorator';
 import { Roles } from '../../common/decorators/roles.decorator';
@@ -50,8 +56,10 @@ export class AdminController {
 
   @Get('dashboard/stats')
   @ApiOperation({ summary: 'Dashboard KPIs and recent activity' })
-  getDashboardStats() {
-    return this.adminService.getDashboardStats();
+  getDashboardStats(
+    @Query(new ZodValidationPipe(adminDashboardQuerySchema)) query?: AdminDashboardQuery,
+  ) {
+    return this.adminService.getDashboardStats(query);
   }
 
   @Get('leads/export')
@@ -204,5 +212,39 @@ export class AdminController {
     @CurrentAdmin() admin: AuthenticatedAdmin,
   ) {
     return this.adminService.patchPlatformSettings(body, admin.id);
+  }
+
+  @Get('vehicle-classes')
+  @ApiOperation({ summary: 'List all configured vehicle classes (Super Admin)' })
+  listVehicleClasses() {
+    return this.adminService.listVehicleClasses();
+  }
+
+  @Post('vehicle-classes')
+  @ApiOperation({ summary: 'Create a new vehicle class (Super Admin)' })
+  createVehicleClass(
+    @Body(new ZodValidationPipe(vehicleClassCreateSchema)) body: VehicleClassCreateInput,
+    @CurrentAdmin() admin: AuthenticatedAdmin,
+  ) {
+    return this.adminService.createVehicleClass(body, admin.id);
+  }
+
+  @Patch('vehicle-classes/:id')
+  @ApiOperation({ summary: 'Update a vehicle class (Super Admin)' })
+  updateVehicleClass(
+    @Param('id') id: string,
+    @Body(new ZodValidationPipe(vehicleClassUpdateSchema)) body: VehicleClassUpdateInput,
+    @CurrentAdmin() admin: AuthenticatedAdmin,
+  ) {
+    return this.adminService.updateVehicleClass(id, body, admin.id);
+  }
+
+  @Delete('vehicle-classes/:id')
+  @ApiOperation({ summary: 'Delete a vehicle class if unused (Super Admin)' })
+  deleteVehicleClass(
+    @Param('id') id: string,
+    @CurrentAdmin() admin: AuthenticatedAdmin,
+  ) {
+    return this.adminService.deleteVehicleClass(id, admin.id);
   }
 }

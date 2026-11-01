@@ -496,6 +496,8 @@ export class TripsService {
     job?: {
       title: string | null;
       status: JobStatus;
+      pricingModel?: JobPricingModel | string;
+      hourlyPattern?: string | null;
       siteManeuverability: string | null;
       siteFacility: string | null;
       deadWeightKg: number | null;
@@ -618,6 +620,8 @@ export class TripsService {
         ? {
             title: trip.job.title,
             status: trip.job.status,
+            pricingModel: trip.job.pricingModel,
+            hourlyPattern: trip.job.hourlyPattern,
             deadWeightKg: trip.job.deadWeightKg,
             chargeableWeightKg: trip.job.chargeableWeightKg,
             stops: (trip.job.stops ?? []).map((s) => ({

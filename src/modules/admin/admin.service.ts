@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ConflictException,
   Injectable,
   NotFoundException,
   ServiceUnavailableException,
@@ -9,6 +10,7 @@ import {
   LeadType,
   type AdminAuditQuery,
   type AdminCompanyListQuery,
+  type AdminDashboardQuery,
   type AdminJobListQuery,
   type AdminLeadExportQuery,
   type AdminLeadListQuery,
@@ -16,7 +18,11 @@ import {
   type DisableCompanyInput,
   type PlatformSettingsPatchInput,
   type UpdateLeadInput,
+  type VehicleClassCreateInput,
+  type VehicleClassDto,
+  type VehicleClassUpdateInput,
 } from '../../shared/types';
+import { DEFAULT_VEHICLE_CLASSES } from '../jobs/job-pricing.util';
 import {
   AdminUserStatus,
   AssignmentStatus,
@@ -27,6 +33,8 @@ import {
   JobStatus,
   Prisma,
   ProposalStatus,
+  TripExceptionKind,
+  TripExceptionStatus,
   TripStatus,
   UserStatus,
   VehicleStatus,
@@ -105,24 +113,114 @@ export class AdminService {
     return where;
   }
 
-  async getDashboardStats() {
+  async getDashboardStats(query?: AdminDashboardQuery) {
     this.ensureDatabase();
 
-    const startOfToday = new Date();
-    startOfToday.setHours(0, 0, 0, 0);
-
+    const now = new Date();
+    const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
     const startOfWeek = new Date(startOfToday);
     startOfWeek.setDate(startOfWeek.getDate() - 6);
 
+    // Determine filter range
+    let startDate: Date | undefined;
+    let endDate: Date = now;
+    const period = query?.period ?? (query?.from ? 'custom' : '30d');
+
+    if (query?.from) {
+      startDate = new Date(query.from);
+      if (query?.to) {
+        endDate = new Date(query.to);
+      }
+    } else if (period === 'today') {
+      startDate = startOfToday;
+    } else if (period === 'week') {
+      startDate = new Date(now);
+      startDate.setDate(startDate.getDate() - 7);
+    } else if (period === 'month') {
+      startDate = new Date(now.getFullYear(), now.getMonth(), 1);
+    } else if (period === '30d') {
+      startDate = new Date(now);
+      startDate.setDate(startDate.getDate() - 30);
+    } else if (period === 'year') {
+      startDate = new Date(now.getFullYear(), 0, 1);
+    } else if (period === 'all') {
+      startDate = undefined;
+    } else {
+      startDate = new Date(now);
+      startDate.setDate(startDate.getDate() - 30);
+    }
+
+    const inDateRange = startDate ? { gte: startDate, lte: endDate } : undefined;
+    const createdAtFilter = inDateRange ? { createdAt: inDateRange } : {};
+    const openedAtFilter = inDateRange ? { openedAt: inDateRange } : {};
+
     const [
-      total,
-      today,
-      week,
+      // Phase 0 compatibility
+      totalLeads,
+      todayLeads,
+      weekLeads,
       byType,
       byStatus,
       recentLeads,
       recentEvents,
+
+      // 1. Senders
+      totalSenders,
+      activeSenders,
+      pendingSenders,
+      newSendersInPeriod,
+
+      // 2. Carriers
+      totalCarriers,
+      activeCarriers,
+      pendingCarriers,
+      newCarriersInPeriod,
+
+      // 3. Trucks / Vehicles
+      totalTrucks,
+      activeTrucks,
+      pendingTrucks,
+      newTrucksInPeriod,
+      trucksByClassRaw,
+      inTransitTrucksCount,
+
+      // 4. Drivers
+      totalDrivers,
+      activeDrivers,
+      pendingDrivers,
+      newDriversInPeriod,
+      onTripDriversCount,
+
+      // 5. Receivers & Jobs
+      totalJobs,
+      jobsInPeriod,
+      jobsByStatusRaw,
+      jobsAggregate,
+      recentJobs,
+      recentReceiversRaw,
+
+      // 6. Trips
+      totalTrips,
+      tripsInPeriod,
+      activeTrips,
+      completedTrips,
+      breakdownTrips,
+
+      // 7. Breakdowns / Trip Exceptions
+      totalExceptions,
+      exceptionsInPeriod,
+      openExceptions,
+      resolvedExceptions,
+      exceptionsByKindRaw,
+      recentExceptionsRaw,
+
+      // 8. Timeline series sources
+      timelineJobsRaw,
+      timelineTripsRaw,
+      timelineExceptionsRaw,
+      timelineCompaniesRaw,
     ] = await Promise.all([
+      // Leads
       this.prisma.lead.count(),
       this.prisma.lead.count({ where: { createdAt: { gte: startOfToday } } }),
       this.prisma.lead.count({ where: { createdAt: { gte: startOfWeek } } }),
@@ -141,17 +239,262 @@ export class AdminService {
           lead: { select: { id: true, type: true, email: true, companyName: true } },
         },
       }),
+
+      // Senders
+      this.prisma.company.count({ where: { type: CompanyType.SENDER } }),
+      this.prisma.company.count({ where: { type: CompanyType.SENDER, status: CompanyStatus.ACTIVE } }),
+      this.prisma.company.count({ where: { type: CompanyType.SENDER, status: CompanyStatus.PENDING_REVIEW } }),
+      this.prisma.company.count({ where: { type: CompanyType.SENDER, ...createdAtFilter } }),
+
+      // Carriers
+      this.prisma.company.count({ where: { type: CompanyType.CARRIER } }),
+      this.prisma.company.count({ where: { type: CompanyType.CARRIER, status: CompanyStatus.ACTIVE } }),
+      this.prisma.company.count({ where: { type: CompanyType.CARRIER, status: CompanyStatus.PENDING_REVIEW } }),
+      this.prisma.company.count({ where: { type: CompanyType.CARRIER, ...createdAtFilter } }),
+
+      // Trucks
+      this.prisma.vehicle.count(),
+      this.prisma.vehicle.count({ where: { status: VehicleStatus.ACTIVE } }),
+      this.prisma.vehicle.count({ where: { status: VehicleStatus.PENDING_REVIEW } }),
+      this.prisma.vehicle.count({ where: createdAtFilter }),
+      this.prisma.vehicle.groupBy({ by: ['vehicleClass'], _count: { _all: true } }),
+      this.prisma.trip.count({
+        where: {
+          status: { in: [TripStatus.EN_ROUTE_PICKUP, TripStatus.AT_PICKUP, TripStatus.IN_TRANSIT, TripStatus.AT_DROPOFF] },
+          assignment: { vehicleId: { not: null } },
+        },
+      }),
+
+      // Drivers
+      this.prisma.driver.count(),
+      this.prisma.driver.count({ where: { status: DriverStatus.ACTIVE } }),
+      this.prisma.driver.count({ where: { status: DriverStatus.PENDING_REVIEW } }),
+      this.prisma.driver.count({ where: createdAtFilter }),
+      this.prisma.trip.count({
+        where: {
+          status: { in: [TripStatus.EN_ROUTE_PICKUP, TripStatus.AT_PICKUP, TripStatus.IN_TRANSIT, TripStatus.AT_DROPOFF] },
+          assignment: { driverId: { not: null } },
+        },
+      }),
+
+      // Jobs
+      this.prisma.job.count(),
+      this.prisma.job.count({ where: createdAtFilter }),
+      this.prisma.job.groupBy({ by: ['status'], _count: { _all: true } }),
+      this.prisma.job.aggregate({
+        _sum: { estimateIncGstCents: true },
+        where: createdAtFilter,
+      }),
+      this.prisma.job.findMany({
+        take: 6,
+        orderBy: { createdAt: 'desc' },
+        select: {
+          id: true,
+          title: true,
+          status: true,
+          pricingModel: true,
+          estimateIncGstCents: true,
+          receiverName: true,
+          createdAt: true,
+          senderCompany: { select: { id: true, legalName: true, tradingName: true } },
+        },
+      }),
+      this.prisma.job.findMany({
+        where: { receiverName: { not: null } },
+        select: { receiverName: true, receiverEmail: true, receiverPhone: true, title: true },
+        take: 10,
+        orderBy: { createdAt: 'desc' },
+      }),
+
+      // Trips
+      this.prisma.trip.count(),
+      this.prisma.trip.count({ where: createdAtFilter }),
+      this.prisma.trip.count({
+        where: {
+          status: { in: [TripStatus.EN_ROUTE_PICKUP, TripStatus.AT_PICKUP, TripStatus.IN_TRANSIT, TripStatus.AT_DROPOFF] },
+        },
+      }),
+      this.prisma.trip.count({ where: { status: TripStatus.COMPLETED } }),
+      this.prisma.trip.count({ where: { status: TripStatus.BREAKDOWN } }),
+
+      // Exceptions & Breakdowns
+      this.prisma.tripException.count(),
+      this.prisma.tripException.count({ where: openedAtFilter }),
+      this.prisma.tripException.count({
+        where: {
+          status: {
+            in: [
+              TripExceptionStatus.OPEN,
+              TripExceptionStatus.AWAITING_CARRIER,
+              TripExceptionStatus.REASSIGN_IN_PROGRESS,
+              TripExceptionStatus.AWAITING_SENDER_APPROVAL,
+              TripExceptionStatus.ESCALATED,
+            ],
+          },
+        },
+      }),
+      this.prisma.tripException.count({
+        where: {
+          status: {
+            in: [
+              TripExceptionStatus.RESOLVED_REASSIGNED,
+              TripExceptionStatus.RESOLVED_CONTINUED,
+              TripExceptionStatus.RESOLVED_CANCELLED,
+              TripExceptionStatus.RESOLVED_RELISTED,
+              TripExceptionStatus.CLOSED,
+            ],
+          },
+        },
+      }),
+      this.prisma.tripException.groupBy({ by: ['kind'], _count: { _all: true } }),
+      this.prisma.tripException.findMany({
+        take: 6,
+        orderBy: { openedAt: 'desc' },
+        select: {
+          id: true,
+          tripId: true,
+          kind: true,
+          status: true,
+          note: true,
+          openedAt: true,
+          company: { select: { id: true, legalName: true, tradingName: true } },
+        },
+      }),
+
+      // Timeline sources
+      this.prisma.job.findMany({
+        where: inDateRange ? { createdAt: inDateRange } : { createdAt: { gte: new Date(Date.now() - 30 * 86400000) } },
+        select: { createdAt: true, estimateIncGstCents: true },
+        take: 2000,
+      }),
+      this.prisma.trip.findMany({
+        where: inDateRange ? { createdAt: inDateRange } : { createdAt: { gte: new Date(Date.now() - 30 * 86400000) } },
+        select: { createdAt: true },
+        take: 2000,
+      }),
+      this.prisma.tripException.findMany({
+        where: inDateRange ? { openedAt: inDateRange } : { openedAt: { gte: new Date(Date.now() - 30 * 86400000) } },
+        select: { openedAt: true },
+        take: 2000,
+      }),
+      this.prisma.company.findMany({
+        where: inDateRange ? { createdAt: inDateRange } : { createdAt: { gte: new Date(Date.now() - 30 * 86400000) } },
+        select: { type: true, createdAt: true },
+        take: 2000,
+      }),
     ]);
 
     const typeCounts = Object.fromEntries(
       byType.map((row) => [row.type, row._count._all]),
     ) as Partial<Record<LeadType, number>>;
 
+    // Timeline bucket generation
+    const effectiveStart = startDate ?? new Date(now.getTime() - 30 * 86400000);
+    const totalMs = Math.max(86400000, endDate.getTime() - effectiveStart.getTime());
+    const bucketCount = period === 'today' ? 6 : period === 'week' ? 7 : 8;
+    const bucketDurationMs = totalMs / bucketCount;
+
+    const timeline = Array.from({ length: bucketCount }, (_, idx) => {
+      const bStart = new Date(effectiveStart.getTime() + idx * bucketDurationMs);
+      const bEnd = new Date(effectiveStart.getTime() + (idx + 1) * bucketDurationMs);
+
+      const label =
+        period === 'today'
+          ? `${bStart.getHours()}:00`
+          : period === 'week'
+          ? bStart.toLocaleDateString('en-AU', { weekday: 'short' })
+          : bStart.toLocaleDateString('en-AU', { month: 'short', day: 'numeric' });
+
+      let jobs = 0;
+      let volumeCents = 0;
+      for (const j of timelineJobsRaw) {
+        if (j.createdAt >= bStart && j.createdAt < bEnd) {
+          jobs++;
+          volumeCents += j.estimateIncGstCents ?? 0;
+        }
+      }
+
+      let trips = 0;
+      for (const t of timelineTripsRaw) {
+        if (t.createdAt >= bStart && t.createdAt < bEnd) trips++;
+      }
+
+      let exceptions = 0;
+      for (const e of timelineExceptionsRaw) {
+        if (e.openedAt >= bStart && e.openedAt < bEnd) exceptions++;
+      }
+
+      let senders = 0;
+      let carriers = 0;
+      for (const c of timelineCompaniesRaw) {
+        if (c.createdAt >= bStart && c.createdAt < bEnd) {
+          if (c.type === CompanyType.SENDER) senders++;
+          else if (c.type === CompanyType.CARRIER) carriers++;
+        }
+      }
+
+      return {
+        date: bStart.toISOString(),
+        label,
+        jobs,
+        trips,
+        exceptions,
+        senders,
+        carriers,
+        volumeCents,
+      };
+    });
+
+    const exceptionsByKind = {
+      breakdown: 0,
+      accident: 0,
+      traffic: 0,
+      driverUnavailable: 0,
+      other: 0,
+    };
+    for (const row of exceptionsByKindRaw) {
+      if (row.kind === TripExceptionKind.VEHICLE_BREAKDOWN) exceptionsByKind.breakdown = row._count._all;
+      else if (row.kind === TripExceptionKind.ACCIDENT) exceptionsByKind.accident = row._count._all;
+      else if (row.kind === TripExceptionKind.TRAFFIC) exceptionsByKind.traffic = row._count._all;
+      else if (row.kind === TripExceptionKind.DRIVER_UNAVAILABLE) exceptionsByKind.driverUnavailable = row._count._all;
+      else exceptionsByKind.other += row._count._all;
+    }
+
+    const jobsByStatus: Record<string, number> = {};
+    for (const row of jobsByStatusRaw) {
+      jobsByStatus[row.status] = row._count._all;
+    }
+
+    const trucksByClass: Record<string, number> = {};
+    for (const row of trucksByClassRaw) {
+      if (row.vehicleClass) trucksByClass[row.vehicleClass] = row._count._all;
+    }
+
+    const uniqueReceiversSet = new Set<string>();
+    const recentReceivers: Array<{ name: string | null; email: string | null; phone: string | null; jobTitle?: string | null }> = [];
+    for (const r of recentReceiversRaw) {
+      const key = r.receiverEmail || r.receiverName || '';
+      if (key && !uniqueReceiversSet.has(key)) {
+        uniqueReceiversSet.add(key);
+        recentReceivers.push({
+          name: r.receiverName,
+          email: r.receiverEmail,
+          phone: r.receiverPhone,
+          jobTitle: r.title,
+        });
+      }
+    }
+
     return {
+      period,
+      from: startDate?.toISOString(),
+      to: endDate.toISOString(),
+
+      // Backward-compatibility
       totals: {
-        all: total,
-        today,
-        week,
+        all: totalLeads,
+        today: todayLeads,
+        week: weekLeads,
         registrySenders: typeCounts.REGISTRY_SENDER ?? 0,
         registryCarriers: typeCounts.REGISTRY_CARRIER ?? 0,
         eoiStateMasters: typeCounts.EOI_STATE_MASTER ?? 0,
@@ -163,6 +506,88 @@ export class AdminService {
       ),
       recentLeads,
       recentActivity: recentEvents,
+
+      // Rich Marketplace Analytics
+      analytics: {
+        senders: {
+          total: totalSenders,
+          active: activeSenders,
+          pending: pendingSenders,
+          inPeriod: newSendersInPeriod,
+        },
+        carriers: {
+          total: totalCarriers,
+          active: activeCarriers,
+          pending: pendingCarriers,
+          inPeriod: newCarriersInPeriod,
+        },
+        trucks: {
+          total: totalTrucks,
+          active: activeTrucks,
+          inTransit: inTransitTrucksCount,
+          pending: pendingTrucks,
+          inPeriod: newTrucksInPeriod,
+          byClass: trucksByClass,
+        },
+        drivers: {
+          total: totalDrivers,
+          active: activeDrivers,
+          onTrip: onTripDriversCount,
+          pending: pendingDrivers,
+          inPeriod: newDriversInPeriod,
+        },
+        receivers: {
+          total: uniqueReceiversSet.size,
+          inPeriod: recentReceivers.length,
+          recent: recentReceivers,
+        },
+        breakdowns: {
+          total: totalExceptions,
+          inPeriod: exceptionsInPeriod,
+          open: openExceptions,
+          resolved: resolvedExceptions,
+          byKind: exceptionsByKind,
+          recent: recentExceptionsRaw.map((e) => ({
+            id: e.id,
+            tripId: e.tripId ?? '',
+            kind: e.kind,
+            status: e.status,
+            createdAt: e.openedAt.toISOString(),
+            note: e.note,
+            companyName: e.company?.tradingName || e.company?.legalName || 'Unknown Carrier',
+          })),
+        },
+        jobs: {
+          total: totalJobs,
+          inPeriod: jobsInPeriod,
+          active: (jobsByStatus[JobStatus.PUBLISHED] ?? 0) + (jobsByStatus[JobStatus.BIDDING] ?? 0),
+          assigned: jobsByStatus[JobStatus.ASSIGNED] ?? 0,
+          inTransit: jobsByStatus[JobStatus.IN_TRANSIT] ?? 0,
+          completed: jobsByStatus[JobStatus.COMPLETED] ?? 0,
+          cancelled: jobsByStatus[JobStatus.CANCELLED] ?? 0,
+          draft: jobsByStatus[JobStatus.DRAFT] ?? 0,
+          totalEstimateCents: jobsAggregate._sum.estimateIncGstCents ?? 0,
+          recent: recentJobs.map((j) => ({
+            id: j.id,
+            title: j.title || 'General Freight',
+            status: j.status,
+            pricingModel: j.pricingModel,
+            estimateIncGstCents: j.estimateIncGstCents ?? 0,
+            receiverName: j.receiverName,
+            createdAt: j.createdAt.toISOString(),
+            companyName: j.senderCompany?.tradingName || j.senderCompany?.legalName || 'Unknown Sender',
+          })),
+        },
+        trips: {
+          total: totalTrips,
+          inPeriod: tripsInPeriod,
+          active: activeTrips,
+          completed: completedTrips,
+          cancelled: 0,
+          breakdown: breakdownTrips,
+        },
+        timeline,
+      },
     };
   }
 
@@ -1261,6 +1686,214 @@ export class AdminService {
       carrierMarketplaceReleaseScoreDelta: updated.carrierMarketplaceReleaseScoreDelta,
       updatedAt: updated.updatedAt,
     };
+  }
+
+  async listVehicleClasses(): Promise<VehicleClassDto[]> {
+    this.ensureDatabase();
+    let rows = await this.prisma.vehicleClassConfig.findMany({
+      orderBy: { rank: 'asc' },
+    });
+    if (rows.length === 0) {
+      for (const c of DEFAULT_VEHICLE_CLASSES) {
+        await this.prisma.vehicleClassConfig.upsert({
+          where: { code: c.code },
+          update: {},
+          create: {
+            code: c.code,
+            name: c.name ?? c.code,
+            rank: c.rank,
+            maxChargeableWeightKg: c.maxChargeableWeightKg,
+            maxLengthCm: c.maxLengthCm,
+            maxWidthCm: c.maxWidthCm,
+            maxHeightCm: c.maxHeightCm,
+            minLicenceClass: c.minLicenceClass,
+            suggestedGvmKg: c.suggestedGvmKg ?? 3500,
+            suggestedTareKg: c.suggestedTareKg ?? 2000,
+            isActive: true,
+          },
+        });
+      }
+      rows = await this.prisma.vehicleClassConfig.findMany({
+        orderBy: { rank: 'asc' },
+      });
+    }
+
+    return rows.map((r) => ({
+      id: r.id,
+      code: r.code,
+      name: r.name,
+      rank: r.rank,
+      maxChargeableWeightKg: r.maxChargeableWeightKg,
+      maxLengthCm: r.maxLengthCm,
+      maxWidthCm: r.maxWidthCm,
+      maxHeightCm: r.maxHeightCm,
+      minLicenceClass: r.minLicenceClass,
+      suggestedGvmKg: r.suggestedGvmKg,
+      suggestedTareKg: r.suggestedTareKg,
+      isActive: r.isActive,
+      createdAt: r.createdAt.toISOString(),
+      updatedAt: r.updatedAt.toISOString(),
+    }));
+  }
+
+  async createVehicleClass(input: VehicleClassCreateInput, actorAdminId: string): Promise<VehicleClassDto> {
+    this.ensureDatabase();
+    const existing = await this.prisma.vehicleClassConfig.findUnique({
+      where: { code: input.code },
+    });
+    if (existing) {
+      throw new ConflictException(`A vehicle class with code '${input.code}' already exists`);
+    }
+
+    const row = await this.prisma.vehicleClassConfig.create({
+      data: {
+        code: input.code,
+        name: input.name,
+        rank: input.rank,
+        maxChargeableWeightKg: input.maxChargeableWeightKg,
+        maxLengthCm: input.maxLengthCm,
+        maxWidthCm: input.maxWidthCm,
+        maxHeightCm: input.maxHeightCm,
+        minLicenceClass: input.minLicenceClass,
+        suggestedGvmKg: input.suggestedGvmKg,
+        suggestedTareKg: input.suggestedTareKg,
+        isActive: input.isActive ?? true,
+      },
+    });
+
+    await this.audit.recordPlatform({
+      action: AuditAction.VEHICLE_CLASS_CREATED,
+      actorAdminId,
+      entityType: 'VehicleClassConfig',
+      entityId: row.id,
+      metadata: input,
+    });
+
+    return {
+      id: row.id,
+      code: row.code,
+      name: row.name,
+      rank: row.rank,
+      maxChargeableWeightKg: row.maxChargeableWeightKg,
+      maxLengthCm: row.maxLengthCm,
+      maxWidthCm: row.maxWidthCm,
+      maxHeightCm: row.maxHeightCm,
+      minLicenceClass: row.minLicenceClass,
+      suggestedGvmKg: row.suggestedGvmKg,
+      suggestedTareKg: row.suggestedTareKg,
+      isActive: row.isActive,
+      createdAt: row.createdAt.toISOString(),
+      updatedAt: row.updatedAt.toISOString(),
+    };
+  }
+
+  async updateVehicleClass(
+    id: string,
+    input: VehicleClassUpdateInput,
+    actorAdminId: string,
+  ): Promise<VehicleClassDto> {
+    this.ensureDatabase();
+    const existing = await this.prisma.vehicleClassConfig.findUnique({
+      where: { id },
+    });
+    if (!existing) {
+      throw new NotFoundException('Vehicle class not found');
+    }
+
+    const row = await this.prisma.vehicleClassConfig.update({
+      where: { id },
+      data: {
+        ...(input.name !== undefined ? { name: input.name } : {}),
+        ...(input.rank !== undefined ? { rank: input.rank } : {}),
+        ...(input.maxChargeableWeightKg !== undefined
+          ? { maxChargeableWeightKg: input.maxChargeableWeightKg }
+          : {}),
+        ...(input.maxLengthCm !== undefined ? { maxLengthCm: input.maxLengthCm } : {}),
+        ...(input.maxWidthCm !== undefined ? { maxWidthCm: input.maxWidthCm } : {}),
+        ...(input.maxHeightCm !== undefined ? { maxHeightCm: input.maxHeightCm } : {}),
+        ...(input.minLicenceClass !== undefined ? { minLicenceClass: input.minLicenceClass } : {}),
+        ...(input.suggestedGvmKg !== undefined ? { suggestedGvmKg: input.suggestedGvmKg } : {}),
+        ...(input.suggestedTareKg !== undefined ? { suggestedTareKg: input.suggestedTareKg } : {}),
+        ...(input.isActive !== undefined ? { isActive: input.isActive } : {}),
+      },
+    });
+
+    await this.audit.recordPlatform({
+      action: AuditAction.VEHICLE_CLASS_UPDATED,
+      actorAdminId,
+      entityType: 'VehicleClassConfig',
+      entityId: row.id,
+      metadata: input,
+    });
+
+    return {
+      id: row.id,
+      code: row.code,
+      name: row.name,
+      rank: row.rank,
+      maxChargeableWeightKg: row.maxChargeableWeightKg,
+      maxLengthCm: row.maxLengthCm,
+      maxWidthCm: row.maxWidthCm,
+      maxHeightCm: row.maxHeightCm,
+      minLicenceClass: row.minLicenceClass,
+      suggestedGvmKg: row.suggestedGvmKg,
+      suggestedTareKg: row.suggestedTareKg,
+      isActive: row.isActive,
+      createdAt: row.createdAt.toISOString(),
+      updatedAt: row.updatedAt.toISOString(),
+    };
+  }
+
+  async deleteVehicleClass(
+    id: string,
+    actorAdminId: string,
+  ): Promise<{ success: boolean; deletedCode: string }> {
+    this.ensureDatabase();
+    const existing = await this.prisma.vehicleClassConfig.findUnique({
+      where: { id },
+    });
+    if (!existing) {
+      throw new NotFoundException('Vehicle class not found');
+    }
+
+    const vehicleCount = await this.prisma.vehicle.count({
+      where: { vehicleClass: existing.code },
+    });
+    if (vehicleCount > 0) {
+      throw new BadRequestException({
+        message: `Cannot delete vehicle class '${existing.code}' because it is in use by ${vehicleCount} vehicle(s). Deactivate it instead.`,
+        code: 'VEHICLE_CLASS_IN_USE',
+      });
+    }
+
+    const jobCount = await this.prisma.job.count({
+      where: {
+        OR: [
+          { minVehicleClass: existing.code },
+          { recommendedVehicleClass: existing.code },
+        ],
+      },
+    });
+    if (jobCount > 0) {
+      throw new BadRequestException({
+        message: `Cannot delete vehicle class '${existing.code}' because it is referenced by ${jobCount} job(s). Deactivate it instead.`,
+        code: 'VEHICLE_CLASS_IN_USE',
+      });
+    }
+
+    await this.prisma.vehicleClassConfig.delete({
+      where: { id },
+    });
+
+    await this.audit.recordPlatform({
+      action: AuditAction.VEHICLE_CLASS_DELETED,
+      actorAdminId,
+      entityType: 'VehicleClassConfig',
+      entityId: id,
+      metadata: { code: existing.code, name: existing.name },
+    });
+
+    return { success: true, deletedCode: existing.code };
   }
 }
 

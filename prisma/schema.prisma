@@ -601,6 +601,27 @@ model Vehicle {
   @@index([companyId, status])
 }
 
+/// Dynamic Vehicle Class configuration managed by Super Admin (auto-recommendation + fleet specs)
+model VehicleClassConfig {
+  id                    String   @id @default(uuid())
+  code                  String   @unique
+  name                  String
+  rank                  Int
+  maxChargeableWeightKg Float
+  maxLengthCm           Float
+  maxWidthCm            Float
+  maxHeightCm           Float
+  minLicenceClass       String
+  suggestedGvmKg        Int
+  suggestedTareKg       Int
+  isActive              Boolean  @default(true)
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  @@index([rank])
+  @@index([isActive])
+}
+
 model Driver {
   id        String       @id @default(uuid())
   userId    String       @unique
@@ -665,6 +686,9 @@ model ComplianceDocument {
   reviewNote       String?
   createdAt        DateTime            @default(now())
   updatedAt        DateTime            @updatedAt
+
+  jobsAsDgDocument      Job[]      @relation("JobDgDocument")
+  proposalsAsDgDocument Proposal[] @relation("ProposalDgDocument")
 
   @@index([companyId, status])
   @@index([vehicleId])
@@ -766,6 +790,8 @@ model Job {
   receiverName         String?
   receiverEmail        String?
   receiverPhone        String?
+  receiverAltEmail     String?
+  receiverAltPhone     String?
   /// Scheduled pickup window start
   pickupAt             DateTime?
   deadWeightKg         Float?
@@ -776,6 +802,8 @@ model Job {
   /// e.g. GENERAL, DG, REEFER, OVERSIZE
   loadTypes            String[]        @default([])
   requiresDg           Boolean         @default(false)
+  dgDocumentId         String?
+  dgDocument           ComplianceDocument? @relation("JobDgDocument", fields: [dgDocumentId], references: [id], onDelete: SetNull)
   requiresReefer       Boolean         @default(false)
   requiresOversize     Boolean         @default(false)
   minVehicleClass      String?
@@ -852,6 +880,8 @@ model Proposal {
   vehicle            Vehicle?       @relation(fields: [vehicleId], references: [id], onDelete: SetNull)
   driverId           String?
   driver             Driver?        @relation(fields: [driverId], references: [id], onDelete: SetNull)
+  dgDocumentId       String?
+  dgDocument         ComplianceDocument? @relation("ProposalDgDocument", fields: [dgDocumentId], references: [id], onDelete: SetNull)
   etaMinutes         Int?
   /// Bid / quoted total in cents AUD (inc-GST gross when accepted)
   amountExGstCents   Int

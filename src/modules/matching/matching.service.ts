@@ -11,6 +11,8 @@ import {
 import {
   AssignmentStatus,
   CompanyType,
+  ComplianceDocStatus,
+  ComplianceDocType,
   DriverStatus,
   JobStatus,
   NotificationType,
@@ -94,6 +96,7 @@ export class MatchingService {
       where: { status: { in: [JobStatus.BIDDING, JobStatus.PUBLISHED] } },
       include: {
         stops: { orderBy: { sequence: 'asc' }, take: 4 },
+        dgDocument: { select: { id: true, originalFilename: true } },
         originRegion: true,
         proposals: {
           where: {
@@ -124,8 +127,14 @@ export class MatchingService {
           pricingModel: j.pricingModel,
           minVehicleClass: j.minVehicleClass,
           requiresDg: j.requiresDg,
+          dgDocumentId: j.dgDocumentId ?? null,
+          dgDocumentFilename: j.dgDocument?.originalFilename ?? null,
           requiresReefer: j.requiresReefer,
           requiresOversize: j.requiresOversize,
+          deadWeightKg: j.deadWeightKg,
+          lengthCm: j.lengthCm,
+          widthCm: j.widthCm,
+          heightCm: j.heightCm,
           chargeableWeightKg: j.chargeableWeightKg,
           routeDistanceKm: j.routeDistanceKm,
           routeDurationMinutes: j.routeDurationMinutes,
@@ -141,7 +150,21 @@ export class MatchingService {
           pickupAt: j.pickupAt,
           publishedAt: j.publishedAt,
           alreadyBid: j.proposals.length > 0,
-          stopsSummary: j.stops.map((s) => `${s.stopType}:${s.suburb ?? ''}`).join(' → '),
+          stops: j.stops.map((s) => ({
+            sequence: s.sequence,
+            stopType: s.stopType,
+            addressLine: s.addressLine,
+            suburb: s.suburb,
+            state: s.state,
+            postcode: s.postcode,
+          })),
+          stopsSummary: j.stops
+            .map((s) =>
+              s.addressLine
+                ? `${s.stopType}: ${s.addressLine}, ${s.suburb ?? ''} ${s.state ?? ''} ${s.postcode ?? ''}`.trim()
+                : `${s.stopType}:${s.suburb ?? ''}`,
+            )
+            .join(' → '),
         };
       }),
     };
@@ -319,6 +342,52 @@ export class MatchingService {
       throw new BadRequestException('Already submitted a proposal for this job');
     }
 
+    let resolvedDgDocumentId: string | null = null;
+    if (job.requiresDg) {
+      const dgDocs = await this.prisma.complianceDocument.findMany({
+        where: {
+          companyId: company.id,
+          docType: ComplianceDocType.DG_LICENCE,
+          status: {
+            in: [
+              ComplianceDocStatus.UPLOADED,
+              ComplianceDocStatus.UNDER_REVIEW,
+              ComplianceDocStatus.APPROVED,
+            ],
+          },
+        },
+        orderBy: { updatedAt: 'desc' },
+        select: { id: true, vehicleId: true },
+      });
+      const hasPerVehicleDg = dgDocs.some((d) => Boolean(d.vehicleId));
+      const vehicleDgDoc = dgDocs.find((d) => d.vehicleId === vehicle.id) ?? null;
+      const companyDgDoc = dgDocs.find((d) => !d.vehicleId) ?? null;
+
+      if (input.dgDocumentId) {
+        const explicitDoc = await this.prisma.complianceDocument.findFirst({
+          where: { id: input.dgDocumentId, companyId: company.id },
+          select: { id: true, vehicleId: true },
+        });
+        if (!explicitDoc) {
+          throw new BadRequestException('Selected DG document does not belong to this carrier');
+        }
+        if (explicitDoc.vehicleId && explicitDoc.vehicleId !== vehicle.id) {
+          throw new BadRequestException('DG document does not match the selected vehicle');
+        }
+        resolvedDgDocumentId = explicitDoc.id;
+      } else if (hasPerVehicleDg) {
+        if (!vehicleDgDoc) {
+          throw new BadRequestException({
+            message: 'Only a Dangerous Goods (DG) licensed vehicle can bid on a DG job',
+            code: 'VEHICLE_NOT_DG_ELIGIBLE',
+          });
+        }
+        resolvedDgDocumentId = vehicleDgDoc.id;
+      } else {
+        resolvedDgDocumentId = vehicleDgDoc?.id ?? companyDgDoc?.id ?? null;
+      }
+    }
+
     const amounts = gstSplitFromIncCents(input.amountIncGstCents);
     const proposal = await this.prisma.proposal.create({
       data: {
@@ -326,6 +395,7 @@ export class MatchingService {
         carrierCompanyId: company.id,
         vehicleId: vehicle.id,
         driverId: driver.id,
+        dgDocumentId: resolvedDgDocumentId,
         etaMinutes: input.etaMinutes,
         status: ProposalStatus.SUBMITTED,
         ...amounts,

@@ -194,4 +194,107 @@ describe('DocumentsService ACL leftovers batch 2', () => {
       }),
     ).rejects.toBeInstanceOf(NotFoundException);
   });
+
+  it('allows carrier to read DG document for a published/bidding job via dgDocument relation', async () => {
+    const carrierPrincipal: AuthenticatedPrincipal = {
+      id: 'user-carrier',
+      email: 'carrier@yopmail.com',
+      role: 'TRANSPORT_COMPANY',
+      kind: 'user',
+      regionCodes: [],
+      territoryCodes: [],
+    };
+    const prisma = {
+      isConnected: () => true,
+      complianceDocument: {
+        findUnique: jest.fn().mockResolvedValue({
+          id: 'doc-dg-1',
+          companyId: 'co-sender',
+          docType: 'DG_LICENCE',
+          driverId: null,
+          status: ComplianceDocStatus.UPLOADED,
+          mimeType: 'application/pdf',
+          sizeBytes: 100,
+          originalFilename: 'dg.pdf',
+          contentHash: 'hash',
+          expiresAt: null,
+          createdAt: new Date(),
+        }),
+      },
+      user: {
+        findUnique: jest.fn().mockResolvedValue({
+          id: 'user-carrier',
+          companyId: 'co-carrier',
+          role: 'TRANSPORT_COMPANY',
+        }),
+      },
+      job: {
+        findFirst: jest.fn().mockResolvedValue({ id: 'job-1' }),
+      },
+    };
+    const meta = await makeService(prisma).getMetadata(carrierPrincipal, 'doc-dg-1');
+    expect(meta.id).toBe('doc-dg-1');
+    expect(prisma.job.findFirst).toHaveBeenCalledWith({
+      where: {
+        dgDocument: { id: 'doc-dg-1' },
+        OR: [
+          { status: { in: ['PUBLISHED', 'BIDDING'] } },
+          { proposals: { some: { carrierCompanyId: 'co-carrier' } } },
+          { assignment: { carrierCompanyId: 'co-carrier' } },
+        ],
+      },
+      select: { id: true },
+    });
+  });
+
+  it('allows sender to read DG document for proposal with dgDocumentId', async () => {
+    const senderPrincipal: AuthenticatedPrincipal = {
+      id: 'user-sender',
+      email: 'sender@yopmail.com',
+      role: 'SENDER',
+      kind: 'user',
+      regionCodes: [],
+      territoryCodes: [],
+    };
+    const prisma = {
+      isConnected: () => true,
+      complianceDocument: {
+        findUnique: jest.fn().mockResolvedValue({
+          id: 'doc-dg-carrier',
+          companyId: 'co-carrier',
+          docType: 'DG_LICENCE',
+          driverId: null,
+          status: ComplianceDocStatus.UPLOADED,
+          mimeType: 'application/pdf',
+          sizeBytes: 100,
+          originalFilename: 'dg.pdf',
+          contentHash: 'hash',
+          expiresAt: null,
+          createdAt: new Date(),
+        }),
+      },
+      user: {
+        findUnique: jest.fn().mockResolvedValue({
+          id: 'user-sender',
+          companyId: 'co-sender',
+          role: 'SENDER',
+        }),
+      },
+      proposal: {
+        findFirst: jest.fn().mockResolvedValue({ id: 'prop-1' }),
+      },
+    };
+    const meta = await makeService(prisma).getMetadata(senderPrincipal, 'doc-dg-carrier');
+    expect(meta.id).toBe('doc-dg-carrier');
+    expect(prisma.proposal.findFirst).toHaveBeenCalledWith({
+      where: {
+        job: { senderCompanyId: 'co-sender' },
+        OR: [
+          { dgDocumentId: 'doc-dg-carrier' },
+          { carrierCompanyId: 'co-carrier' },
+        ],
+      },
+      select: { id: true },
+    });
+  });
 });

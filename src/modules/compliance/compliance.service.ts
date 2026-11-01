@@ -351,6 +351,17 @@ export class ComplianceService {
     if (query.caseType) {
       where.caseType = query.caseType;
     }
+    if (query.search?.trim()) {
+      const term = query.search.trim();
+      const searchCondition: Prisma.ComplianceCaseWhereInput = {
+        OR: [
+          { company: { legalName: { contains: term, mode: 'insensitive' } } },
+          { company: { abn: { contains: term } } },
+          { id: { contains: term, mode: 'insensitive' } },
+        ],
+      };
+      where.AND = [...(Array.isArray(where.AND) ? where.AND : where.AND ? [where.AND] : []), searchCondition];
+    }
 
     const allowedRegions = this.scope.allowedRegionCodes(principal);
     if (query.regionCode) {

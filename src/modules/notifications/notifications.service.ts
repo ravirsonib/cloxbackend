@@ -575,7 +575,7 @@ export class NotificationsService {
         },
         {
           title: 'Upload documents',
-          body: 'Use Upload & submit to add the requested files (PDF or images).',
+          body: 'Use Upload & submit to add the requested files (documents or images).',
         },
         {
           title: 'Re-submit for review',

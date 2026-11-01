@@ -112,6 +112,7 @@ describe('shared/types leftover schema paths', () => {
       senderProfileSchema.safeParse({
         accountType: 'BUSINESS',
         legalName: 'Biz Co',
+        abn: '',
         invoiceLegalName: 'Biz Co',
         invoiceAddressLine1: '1 St',
         invoiceSuburb: 'Melbourne',
@@ -212,7 +213,7 @@ describe('shared/types leftover schema paths', () => {
       }).success,
     ).toBe(false);
 
-    // valid hourly
+    // valid hourly (with and without explicit distanceKm)
     expect(
       jobCreateSchema.safeParse({
         pricingModel: 'HOURLY',
@@ -224,7 +225,6 @@ describe('shared/types leftover schema paths', () => {
         lengthCm: 100,
         widthCm: 100,
         heightCm: 100,
-        distanceKm: 12,
         siteManeuverability: 'EASY',
         siteFacility: 'DOCK',
         siteDisclaimerAccepted: true,
@@ -232,5 +232,27 @@ describe('shared/types leftover schema paths', () => {
         vehicleId: uuid,
       }).success,
     ).toBe(true);
+
+    // rejects invalid postcode for state on stop
+    expect(
+      jobCreateSchema.safeParse({
+        pricingModel: 'HOURLY',
+        hourlyPattern: 'A',
+        pickupAt: '2026-10-10T10:00:00+11:00',
+        receiverName: 'Recv',
+        receiverEmail: 'recv@yopmail.com',
+        deadWeightKg: 100,
+        lengthCm: 100,
+        widthCm: 100,
+        heightCm: 100,
+        siteManeuverability: 'EASY',
+        siteFacility: 'DOCK',
+        siteDisclaimerAccepted: true,
+        stops: [
+          { ...baseStop(0, 'PICKUP'), state: 'VIC', postcode: '2000' },
+          baseStop(1, 'DROPOFF'),
+        ],
+      }).success,
+    ).toBe(false);
   });
 });

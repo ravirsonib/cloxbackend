@@ -34,6 +34,8 @@ import { SenderService } from '../sender/sender.service';
 import { NotificationType } from '@prisma/client';
 import { resolveJobEditMode } from './job-edit-mode';
 import {
+  DEFAULT_VEHICLE_CLASSES,
+  VehicleClassSpec,
   carrierNetPayoutCents,
   chargeableWeightKg,
   gstSplitFromIncCents,
@@ -119,6 +121,97 @@ export class JobsService {
     return payload.perKmMinCents ?? DEFAULT_MIN_BASE_CENTS.PER_KM;
   }
 
+  async getActiveVehicleClasses(): Promise<VehicleClassSpec[]> {
+    try {
+      const list = await this.prisma.vehicleClassConfig.findMany({
+        where: { isActive: true },
+        orderBy: { rank: 'asc' },
+      });
+      if (list.length > 0) {
+        return list.map((c) => ({
+          code: c.code,
+          name: c.name,
+          rank: c.rank,
+          maxChargeableWeightKg: c.maxChargeableWeightKg,
+          maxLengthCm: c.maxLengthCm,
+          maxWidthCm: c.maxWidthCm,
+          maxHeightCm: c.maxHeightCm,
+          minLicenceClass: c.minLicenceClass,
+          suggestedGvmKg: c.suggestedGvmKg,
+          suggestedTareKg: c.suggestedTareKg,
+          isActive: c.isActive,
+        }));
+      }
+      await this.seedDefaultVehicleClasses();
+      return DEFAULT_VEHICLE_CLASSES;
+    } catch {
+      return DEFAULT_VEHICLE_CLASSES;
+    }
+  }
+
+  async seedDefaultVehicleClasses(): Promise<void> {
+    try {
+      const count = await this.prisma.vehicleClassConfig.count();
+      if (count > 0) return;
+      for (const c of DEFAULT_VEHICLE_CLASSES) {
+        await this.prisma.vehicleClassConfig.upsert({
+          where: { code: c.code },
+          update: {},
+          create: {
+            code: c.code,
+            name: c.name ?? c.code,
+            rank: c.rank,
+            maxChargeableWeightKg: c.maxChargeableWeightKg,
+            maxLengthCm: c.maxLengthCm,
+            maxWidthCm: c.maxWidthCm,
+            maxHeightCm: c.maxHeightCm,
+            minLicenceClass: c.minLicenceClass,
+            suggestedGvmKg: c.suggestedGvmKg ?? 3500,
+            suggestedTareKg: c.suggestedTareKg ?? 2000,
+            isActive: true,
+          },
+        });
+      }
+    } catch {
+      // Non-fatal if table not yet migrated during isolated unit tests
+    }
+  }
+
+  async getVehicleClassesMeta() {
+    const classes = await this.getActiveVehicleClasses();
+    const rankMap: Record<string, number> = {};
+    const minLicenceMap: Record<string, string> = {};
+    const maxChargeableMap: Record<string, number> = {};
+    const maxDimsMap: Record<string, { lengthCm: number; widthCm: number; heightCm: number }> = {};
+    const suggestedGvmMap: Record<string, number> = {};
+    const suggestedTareMap: Record<string, number> = {};
+
+    for (const c of classes) {
+      rankMap[c.code] = c.rank;
+      minLicenceMap[c.code] = c.minLicenceClass;
+      maxChargeableMap[c.code] = c.maxChargeableWeightKg;
+      maxDimsMap[c.code] = {
+        lengthCm: c.maxLengthCm,
+        widthCm: c.maxWidthCm,
+        heightCm: c.maxHeightCm,
+      };
+      if (c.suggestedGvmKg) suggestedGvmMap[c.code] = c.suggestedGvmKg;
+      if (c.suggestedTareKg) suggestedTareMap[c.code] = c.suggestedTareKg;
+    }
+
+    return {
+      classes,
+      classCodes: classes.map((c) => c.code),
+      ranks: rankMap,
+      minLicences: minLicenceMap,
+      maxChargeableKg: maxChargeableMap,
+      maxDimsCm: maxDimsMap,
+      suggestedGvmKg: suggestedGvmMap,
+      suggestedTareKg: suggestedTareMap,
+      chargeableFormula: 'max(deadKg, L×W×Hcm/4000)',
+    };
+  }
+
   private mapJob(job: {
     id: string;
     status: JobStatus;
@@ -127,6 +220,8 @@ export class JobsService {
     receiverName: string | null;
     receiverEmail: string | null;
     receiverPhone: string | null;
+    receiverAltEmail?: string | null;
+    receiverAltPhone?: string | null;
     pickupAt: Date | null;
     deadWeightKg: number | null;
     lengthCm: number | null;
@@ -135,6 +230,8 @@ export class JobsService {
     chargeableWeightKg: number | null;
     loadTypes: string[];
     requiresDg: boolean;
+    dgDocumentId?: string | null;
+    dgDocument?: { id: string; originalFilename: string | null } | null;
     requiresReefer: boolean;
     requiresOversize: boolean;
     minVehicleClass: string | null;
@@ -194,6 +291,8 @@ export class JobsService {
           phone?: string | null;
         } | null;
       } | null;
+      dgDocumentId?: string | null;
+      dgDocument?: { id: string; originalFilename: string | null } | null;
       createdAt: Date;
     }>;
     _count?: { proposals?: number };
@@ -209,6 +308,8 @@ export class JobsService {
       receiverName: job.receiverName,
       receiverEmail: job.receiverEmail,
       receiverPhone: job.receiverPhone,
+      receiverAltEmail: job.receiverAltEmail ?? null,
+      receiverAltPhone: job.receiverAltPhone ?? null,
       pickupAt: job.pickupAt,
       deadWeightKg: job.deadWeightKg,
       lengthCm: job.lengthCm,
@@ -217,6 +318,8 @@ export class JobsService {
       chargeableWeightKg: job.chargeableWeightKg,
       loadTypes: job.loadTypes,
       requiresDg: job.requiresDg,
+      dgDocumentId: job.dgDocumentId ?? null,
+      dgDocumentFilename: job.dgDocument?.originalFilename ?? null,
       requiresReefer: job.requiresReefer,
       requiresOversize: job.requiresOversize,
       minVehicleClass: job.minVehicleClass,
@@ -291,6 +394,8 @@ export class JobsService {
                 licenceClass: p.driver.licenceClass ?? null,
               }
             : null,
+          dgDocumentId: p.dgDocumentId ?? p.dgDocument?.id ?? null,
+          dgDocumentFilename: p.dgDocument?.originalFilename ?? null,
           netToCarrierCents: carrierNetPayoutCents(p.amountIncGstCents),
           createdAt: p.createdAt,
         };
@@ -348,10 +453,12 @@ export class JobsService {
       where: { id: jobId, senderCompanyId: user.companyId },
       include: {
         stops: { orderBy: { sequence: 'asc' } },
+        dgDocument: { select: { id: true, originalFilename: true } },
         proposals: {
           where: { status: { in: [ProposalStatus.SUBMITTED, ProposalStatus.ACCEPTED, ProposalStatus.EXPIRED] } },
           include: {
             vehicle: true,
+            dgDocument: { select: { id: true, originalFilename: true } },
             carrierCompany: {
               select: {
                 id: true,
@@ -493,12 +600,28 @@ export class JobsService {
       stops: orderedStops.map((s) => ({ lat: s.lat, lng: s.lng })),
       pricingModel: input.pricingModel,
     });
+    const minBaseCents = DEFAULT_MIN_BASE_CENTS[input.pricingModel];
+    const minBillableHours = input.pricingModel === 'HOURLY' ? 4 : null;
+    const hourlyRateCents = input.pricingModel === 'HOURLY' ? 8_000 : null;
+    const minChargeIncGstCents =
+      input.pricingModel === 'HOURLY'
+        ? Math.max(minBaseCents, 4 * 8_000)
+        : minBaseCents;
+    const estimateIncGstCents =
+      input.pricingModel === 'PER_KM'
+        ? Math.max(minBaseCents, Math.round(route.distanceKm * 250))
+        : Math.max(minBaseCents, Math.round((route.billableHours ?? 4) * 8_000));
     return {
       distanceKm: route.distanceKm,
       durationMinutes: route.totalDurationMinutes,
       drivingMinutes: route.drivingMinutes,
       fatigueBreakMinutes: route.fatigueBreakMinutes,
       billableHours: route.billableHours,
+      minBillableHours,
+      hourlyRateCents,
+      minBaseCents,
+      minChargeIncGstCents,
+      estimateIncGstCents,
       mock: route.mock,
     };
   }
@@ -543,9 +666,19 @@ export class JobsService {
       widthCm: input.widthCm,
       heightCm: input.heightCm,
     });
-    const recommended = recommendVehicleClass(chargeable);
+    const vehicleClasses = await this.getActiveVehicleClasses();
+    const rankMap = Object.fromEntries(vehicleClasses.map((c) => [c.code, c.rank]));
+    const recommended = recommendVehicleClass(
+      chargeable,
+      {
+        lengthCm: input.lengthCm,
+        widthCm: input.widthCm,
+        heightCm: input.heightCm,
+      },
+      vehicleClasses,
+    );
     const minClass = input.minVehicleClass ?? recommended;
-    if (!isVehicleClassAdequate(minClass, recommended)) {
+    if (!isVehicleClassAdequate(minClass, recommended, rankMap)) {
       throw new BadRequestException({
         message: `Vehicle class ${minClass} is undersized for chargeable ${chargeable.toFixed(1)} kg (min ${recommended})`,
         code: 'VEHICLE_CLASS_UNDERSIZE',
@@ -558,13 +691,31 @@ export class JobsService {
     const requiresReefer = input.loadTypes.includes('REEFER');
     const requiresOversize = input.loadTypes.includes('OVERSIZE');
 
+    let dgDocumentId: string | null = null;
+    if (requiresDg && input.dgDocumentId) {
+      const dgDoc = await this.prisma.complianceDocument.findFirst({
+        where: { id: input.dgDocumentId, companyId: user.company.id },
+        select: { id: true },
+      });
+      if (!dgDoc) {
+        throw new BadRequestException('DG document not found for this sender company');
+      }
+      dgDocumentId = dgDoc.id;
+    }
+
     const sortedStops = input.stops.slice().sort((a, b) => a.sequence - b.sequence);
     const persistedStops =
       input.pricingModel === 'HOURLY' && sortedStops.length > 2
         ? orderStopsTspObjects(sortedStops)
         : sortedStops;
-    // Sender-entered km is source of truth; suggestion is UI-only via previewRoute.
-    const route = routeFromDistanceKm(input.distanceKm, input.pricingModel);
+    // Sender-entered km is source of truth when provided; for HOURLY without manual km, derive from stops.
+    const route =
+      input.distanceKm != null && Number.isFinite(input.distanceKm) && input.distanceKm > 0
+        ? routeFromDistanceKm(input.distanceKm, input.pricingModel)
+        : estimateRoute({
+            stops: persistedStops.map((s) => ({ lat: s.lat, lng: s.lng })),
+            pricingModel: input.pricingModel,
+          });
 
     const minBase = await this.getMinBaseCents(input.pricingModel);
     let estimateInc = minBase;
@@ -589,6 +740,8 @@ export class JobsService {
         receiverName: input.receiverName,
         receiverEmail: input.receiverEmail,
         receiverPhone: input.receiverPhone,
+        receiverAltEmail: input.receiverAltEmail ?? null,
+        receiverAltPhone: input.receiverAltPhone ?? null,
         pickupAt: new Date(input.pickupAt),
         deadWeightKg: input.deadWeightKg,
         lengthCm: input.lengthCm,
@@ -597,6 +750,7 @@ export class JobsService {
         chargeableWeightKg: Math.round(chargeable * 10) / 10,
         loadTypes: input.loadTypes,
         requiresDg,
+        dgDocumentId,
         requiresReefer,
         requiresOversize,
         minVehicleClass: minClass,
@@ -628,7 +782,10 @@ export class JobsService {
           })),
         },
       },
-      include: { stops: { orderBy: { sequence: 'asc' } } },
+      include: {
+        stops: { orderBy: { sequence: 'asc' } },
+        dgDocument: { select: { id: true, originalFilename: true } },
+      },
     });
 
     await this.audit.recordPlatform({
@@ -713,9 +870,19 @@ export class JobsService {
       widthCm: input.widthCm,
       heightCm: input.heightCm,
     });
-    const recommended = recommendVehicleClass(chargeable);
+    const vehicleClasses = await this.getActiveVehicleClasses();
+    const rankMap = Object.fromEntries(vehicleClasses.map((c) => [c.code, c.rank]));
+    const recommended = recommendVehicleClass(
+      chargeable,
+      {
+        lengthCm: input.lengthCm,
+        widthCm: input.widthCm,
+        heightCm: input.heightCm,
+      },
+      vehicleClasses,
+    );
     const minClass = input.minVehicleClass ?? recommended;
-    if (!isVehicleClassAdequate(minClass, recommended)) {
+    if (!isVehicleClassAdequate(minClass, recommended, rankMap)) {
       throw new BadRequestException({
         message: `Vehicle class ${minClass} is undersized for chargeable ${chargeable.toFixed(1)} kg (min ${recommended})`,
         code: 'VEHICLE_CLASS_UNDERSIZE',
@@ -728,12 +895,30 @@ export class JobsService {
     const requiresReefer = input.loadTypes.includes('REEFER');
     const requiresOversize = input.loadTypes.includes('OVERSIZE');
 
+    let dgDocumentId: string | null | undefined = requiresDg ? undefined : null;
+    if (requiresDg && input.dgDocumentId) {
+      const dgDoc = await this.prisma.complianceDocument.findFirst({
+        where: { id: input.dgDocumentId, companyId: user.company.id },
+        select: { id: true },
+      });
+      if (!dgDoc) {
+        throw new BadRequestException('DG document not found for this sender company');
+      }
+      dgDocumentId = dgDoc.id;
+    }
+
     const sortedStops = input.stops.slice().sort((a, b) => a.sequence - b.sequence);
     const persistedStops =
       input.pricingModel === 'HOURLY' && sortedStops.length > 2
         ? orderStopsTspObjects(sortedStops)
         : sortedStops;
-    const route = routeFromDistanceKm(input.distanceKm, input.pricingModel);
+    const route =
+      input.distanceKm != null && Number.isFinite(input.distanceKm) && input.distanceKm > 0
+        ? routeFromDistanceKm(input.distanceKm, input.pricingModel)
+        : estimateRoute({
+            stops: persistedStops.map((s) => ({ lat: s.lat, lng: s.lng })),
+            pricingModel: input.pricingModel,
+          });
 
     const minBase = await this.getMinBaseCents(input.pricingModel);
     let estimateInc = minBase;
@@ -756,6 +941,8 @@ export class JobsService {
         receiverName: input.receiverName,
         receiverEmail: input.receiverEmail,
         receiverPhone: input.receiverPhone,
+        receiverAltEmail: input.receiverAltEmail ?? null,
+        receiverAltPhone: input.receiverAltPhone ?? null,
         pickupAt: new Date(input.pickupAt),
         deadWeightKg: input.deadWeightKg,
         lengthCm: input.lengthCm,
@@ -764,6 +951,7 @@ export class JobsService {
         chargeableWeightKg: Math.round(chargeable * 10) / 10,
         loadTypes: input.loadTypes,
         requiresDg,
+        ...(dgDocumentId !== undefined ? { dgDocumentId } : {}),
         requiresReefer,
         requiresOversize,
         minVehicleClass: minClass,
@@ -796,7 +984,10 @@ export class JobsService {
           })),
         },
       },
-      include: { stops: { orderBy: { sequence: 'asc' } } },
+      include: {
+        stops: { orderBy: { sequence: 'asc' } },
+        dgDocument: { select: { id: true, originalFilename: true } },
+      },
     });
 
     await this.audit.recordPlatform({
@@ -879,8 +1070,15 @@ export class JobsService {
           receiverEmail: input.receiverEmail,
           receiverPhone:
             input.receiverPhone === undefined ? undefined : input.receiverPhone,
+          receiverAltEmail:
+            input.receiverAltEmail === undefined ? undefined : input.receiverAltEmail,
+          receiverAltPhone:
+            input.receiverAltPhone === undefined ? undefined : input.receiverAltPhone,
         },
-        include: { stops: { orderBy: { sequence: 'asc' } } },
+        include: {
+          stops: { orderBy: { sequence: 'asc' } },
+          dgDocument: { select: { id: true, originalFilename: true } },
+        },
       });
     });
 
