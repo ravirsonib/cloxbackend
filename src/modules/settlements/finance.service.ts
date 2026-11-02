@@ -7,6 +7,7 @@ import {
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { PLATFORM_TIMEZONE } from '../../shared/timezone';
 import {
   AdminRole,
   CompanyType,
@@ -427,8 +428,8 @@ export class FinanceService {
         query.period === 'today'
           ? `${bStart.getHours()}:00`
           : query.period === 'week'
-          ? bStart.toLocaleDateString('en-AU', { weekday: 'short' })
-          : bStart.toLocaleDateString('en-AU', { month: 'short', day: 'numeric' });
+          ? bStart.toLocaleDateString('en-AU', { timeZone: PLATFORM_TIMEZONE, weekday: 'short' })
+          : bStart.toLocaleDateString('en-AU', { timeZone: PLATFORM_TIMEZONE, month: 'short', day: 'numeric' });
 
       let bGmv = 0;
       for (const j of jobs) {

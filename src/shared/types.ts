@@ -173,6 +173,7 @@ export const AuditAction = {
   EXCEPTION_PERFORMANCE_STUB: 'exception.performance_stub',
   EXCEPTION_RELISTED: 'exception.relisted',
   PLATFORM_SETTINGS_UPDATED: 'platform.settings_updated',
+  GEOGRAPHY_REGION_UPDATED: 'geography.region_updated',
   VEHICLE_CLASS_CREATED: 'vehicle_class.created',
   VEHICLE_CLASS_UPDATED: 'vehicle_class.updated',
   VEHICLE_CLASS_DELETED: 'vehicle_class.deleted',
@@ -1848,4 +1849,10 @@ export const notificationItemSchema = z.object({
   unread: z.boolean(),
 });
 export type NotificationItem = z.infer<typeof notificationItemSchema>;
+
+export const updateRegionEnabledSchema = z.object({
+  enabled: z.boolean(),
+});
+export type UpdateRegionEnabledInput = z.infer<typeof updateRegionEnabledSchema>;
+
 

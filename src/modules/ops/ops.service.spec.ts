@@ -187,4 +187,61 @@ describe('OpsService.provisionAdmin paths', () => {
       version: 123,
     });
   });
+
+  describe('setRegionEnabled', () => {
+    it('updates region enabled status and records audit', async () => {
+      const prisma = {
+        isConnected: () => true,
+        region: {
+          findUnique: jest.fn().mockResolvedValue({ id: 'reg-qld', code: 'QLD', name: 'Queensland', enabled: false }),
+          update: jest.fn().mockResolvedValue({ id: 'reg-qld', code: 'QLD', name: 'Queensland', enabled: true }),
+        },
+      };
+      const audit = { recordPlatform: jest.fn().mockResolvedValue(undefined) };
+      const service = new OpsService(
+        prisma as never,
+        audit as never,
+        { sendAdminProvisionedEmail: jest.fn() } as never,
+        config as never,
+      );
+
+      const res = await service.setRegionEnabled(superP, 'qld', true);
+      expect(res).toEqual({
+        id: 'reg-qld',
+        code: 'QLD',
+        name: 'Queensland',
+        enabled: true,
+      });
+      expect(prisma.region.update).toHaveBeenCalledWith({
+        where: { code: 'QLD' },
+        data: { enabled: true },
+      });
+      expect(audit.recordPlatform).toHaveBeenCalledWith(
+        expect.objectContaining({
+          action: 'geography.region_updated',
+          actorAdminId: 'super-1',
+          entityId: 'reg-qld',
+        }),
+      );
+    });
+
+    it('throws NotFoundException for unknown region code', async () => {
+      const prisma = {
+        isConnected: () => true,
+        region: {
+          findUnique: jest.fn().mockResolvedValue(null),
+        },
+      };
+      const service = new OpsService(
+        prisma as never,
+        { record: jest.fn() } as never,
+        { sendAdminProvisionedEmail: jest.fn() } as never,
+        config as never,
+      );
+
+      await expect(service.setRegionEnabled(superP, 'XYZ', true)).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
+    });
+  });
 });

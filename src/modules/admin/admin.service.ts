@@ -23,6 +23,7 @@ import {
   type VehicleClassUpdateInput,
 } from '../../shared/types';
 import { DEFAULT_VEHICLE_CLASSES } from '../jobs/job-pricing.util';
+import { PLATFORM_TIMEZONE } from '../../shared/timezone';
 import {
   AdminUserStatus,
   AssignmentStatus,
@@ -402,8 +403,8 @@ export class AdminService {
         period === 'today'
           ? `${bStart.getHours()}:00`
           : period === 'week'
-          ? bStart.toLocaleDateString('en-AU', { weekday: 'short' })
-          : bStart.toLocaleDateString('en-AU', { month: 'short', day: 'numeric' });
+          ? bStart.toLocaleDateString('en-AU', { timeZone: PLATFORM_TIMEZONE, weekday: 'short' })
+          : bStart.toLocaleDateString('en-AU', { timeZone: PLATFORM_TIMEZONE, month: 'short', day: 'numeric' });
 
       let jobs = 0;
       let volumeCents = 0;

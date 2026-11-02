@@ -15,11 +15,13 @@ import {
   partnerOnboardingSubmitSchema,
   partnerOnboardingUpdateSchema,
   resendAdminInviteSchema,
+  updateRegionEnabledSchema,
   type AdminAcceptInviteInput,
   type InviteAdminInput,
   type PartnerOnboardingSubmitInput,
   type PartnerOnboardingUpdateInput,
   type ResendAdminInviteInput,
+  type UpdateRegionEnabledInput,
 } from '../../shared/types';
 import { AllowPendingPartner } from '../../common/decorators/allow-pending-partner.decorator';
 import { CurrentPrincipal } from '../../common/decorators/current-admin.decorator';
@@ -83,6 +85,19 @@ export class OpsController {
   @ApiOperation({ summary: 'List AU regions and local territories (invite pickers)' })
   listGeography(@CurrentPrincipal() principal: AuthenticatedPrincipal) {
     return this.opsService.listGeography(principal);
+  }
+
+  @Patch('geography/regions/:code')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(AdminRole.SUPER_ADMIN)
+  @ApiOperation({ summary: 'Enable or disable an AU service region (Super Admin)' })
+  updateRegion(
+    @CurrentPrincipal() principal: AuthenticatedPrincipal,
+    @Param('code') code: string,
+    @Body(new ZodValidationPipe(updateRegionEnabledSchema)) body: UpdateRegionEnabledInput,
+  ) {
+    return this.opsService.setRegionEnabled(principal, code, body.enabled);
   }
 
   /** @deprecated Prefer POST /ops/admins/invite — same invite-only behaviour. */

@@ -452,6 +452,37 @@ export class OpsService {
     };
   }
 
+  async setRegionEnabled(actor: AuthenticatedPrincipal, code: string, enabled: boolean) {
+    this.ensureDatabase();
+    if (actor.kind !== 'admin' || actor.role !== AdminRole.SUPER_ADMIN) {
+      throw new ForbiddenException('Super Admin required');
+    }
+    const normalizedCode = code.trim().toUpperCase();
+    const region = await this.prisma.region.findUnique({
+      where: { code: normalizedCode },
+    });
+    if (!region) {
+      throw new NotFoundException(`Region '${normalizedCode}' not found`);
+    }
+    const updated = await this.prisma.region.update({
+      where: { code: normalizedCode },
+      data: { enabled },
+    });
+    await this.audit.recordPlatform({
+      action: AuditAction.GEOGRAPHY_REGION_UPDATED,
+      actorAdminId: actor.id,
+      entityType: 'Region',
+      entityId: updated.id,
+      metadata: { code: updated.code, name: updated.name, enabled },
+    });
+    return {
+      id: updated.id,
+      code: updated.code,
+      name: updated.name,
+      enabled: updated.enabled,
+    };
+  }
+
   async peekAdminInvite(token: string) {
     this.ensureDatabase();
     const hash = hashValue(token);

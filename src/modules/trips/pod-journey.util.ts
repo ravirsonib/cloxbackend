@@ -2,6 +2,8 @@
  * Milestone driver journey for POD package — not raw GPS samples.
  */
 
+import { PLATFORM_TIMEZONE } from '../../shared/timezone';
+
 export type PodJourneyEvent = {
   at: Date;
   event: string;
@@ -143,10 +145,10 @@ export function buildPodJourney(input: PodJourneyInput): PodJourneyEvent[] {
   return events;
 }
 
-/** Melbourne local display matching POD HTML mock (label Time (AEST)). */
+/** Sydney/Melbourne local display matching POD HTML mock (label Time (AEST)). */
 export function formatPodDateTime(
   at: Date,
-  timeZone = 'Australia/Melbourne',
+  timeZone = PLATFORM_TIMEZONE,
 ): string {
   return new Intl.DateTimeFormat('en-AU', {
     timeZone,
@@ -162,7 +164,7 @@ export function formatPodDateTime(
 
 export function formatJourneyForTable(
   events: PodJourneyEvent[],
-  timeZone = 'Australia/Melbourne',
+  timeZone = PLATFORM_TIMEZONE,
 ): { headers: string[]; rows: string[][] } {
   return {
     headers: ['Time (AEST)', 'Event', 'Detail'],
