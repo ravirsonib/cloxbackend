@@ -310,6 +310,7 @@ export class GrowthService {
           phone: true,
           abn: true,
           referredAt: true,
+          reliabilityScore: true,
           createdAt: true,
           homeRegion: { select: { code: true, name: true } },
         },

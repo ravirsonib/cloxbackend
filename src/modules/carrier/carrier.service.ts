@@ -372,6 +372,7 @@ export class CarrierService {
         stripeConnectPayoutsEnabled: company.stripeConnectPayoutsEnabled,
         capabilities: company.capabilities,
         serviceRegionCodes: company.serviceRegionCodes,
+        reliabilityScore: company.reliabilityScore,
       },
       vehicles: company.vehicles.map((v) => {
         // complianceDocuments are ordered updatedAt desc — first match is latest RWC.

@@ -70,6 +70,12 @@ describe('IdentityService.getMe paths', () => {
             type: 'SENDER',
             legalName: 'Acme',
             status: 'ACTIVE',
+            reliabilityScore: 100,
+          },
+          driver: {
+            id: 'dr1',
+            status: 'ACTIVE',
+            reliabilityScore: 95,
           },
         }),
       },
@@ -85,7 +91,8 @@ describe('IdentityService.getMe paths', () => {
     });
     expect(me).toMatchObject({
       kind: 'user',
-      company: { id: 'co1', legalName: 'Acme' },
+      company: { id: 'co1', legalName: 'Acme', reliabilityScore: 100 },
+      driver: { id: 'dr1', status: 'ACTIVE', reliabilityScore: 95 },
     });
   });
 

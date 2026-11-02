@@ -88,6 +88,15 @@ export class AdminController {
     return this.adminService.listCompanies(query);
   }
 
+  @Get('companies/:id')
+  @ApiOperation({
+    summary:
+      'Get full company details including company docs, fleet with vehicle docs, and drivers with driver docs',
+  })
+  getCompany(@Param('id', ParseUUIDPipe) id: string) {
+    return this.adminService.getCompany(id);
+  }
+
   @Post('companies/:id/disable')
   @ApiOperation({
     summary: 'Soft-disable (suspend) company + cascade users/drivers/vehicles (Super Admin)',

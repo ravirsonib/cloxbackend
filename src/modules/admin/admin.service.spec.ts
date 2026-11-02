@@ -103,4 +103,140 @@ describe('AdminService', () => {
     expect(csv.split('\n')[0]).toContain('id,type,status,email');
     expect(csv).toContain('partner@example.com');
   });
+
+  it('getCompany throws NotFoundException when company missing', async () => {
+    (prisma.isConnected as jest.Mock).mockReturnValue(true);
+    (prisma as unknown as { company: { findUnique: jest.Mock } }).company = {
+      findUnique: jest.fn().mockResolvedValue(null),
+    };
+
+    await expect(service.getCompany('unknown-id')).rejects.toBeInstanceOf(NotFoundException);
+  });
+
+  it('getCompany returns company details with nested documents, vehicles, and drivers', async () => {
+    (prisma.isConnected as jest.Mock).mockReturnValue(true);
+    (prisma as unknown as { company: { findUnique: jest.Mock } }).company = {
+      findUnique: jest.fn().mockResolvedValue({
+        id: 'co-1',
+        type: 'CARRIER',
+        status: 'ACTIVE',
+        legalName: 'Acme Carrier',
+        tradingName: 'Acme',
+        abn: '12345678901',
+        acn: null,
+        email: 'carrier@acme.com',
+        phone: '+61400000000',
+        address: '100 King St',
+        serviceRegionCodes: ['VIC'],
+        capabilities: ['GENERAL_FREIGHT'],
+        stripeConnectAccountId: 'acct_123',
+        stripeConnectPayoutsEnabled: true,
+        reliabilityScore: 98,
+        homeRegion: { code: 'VIC', name: 'Victoria' },
+        referredByAdminUser: null,
+        users: [
+          {
+            id: 'u-1',
+            email: 'admin@acme.com',
+            name: 'John',
+            phone: null,
+            role: 'TRANSPORT_COMPANY',
+            status: 'ACTIVE',
+            createdAt: new Date(),
+          },
+        ],
+        complianceDocuments: [
+          {
+            id: 'doc-co-1',
+            docType: 'COI',
+            status: 'VERIFIED',
+            originalFilename: 'coi.pdf',
+            mimeType: 'application/pdf',
+            sizeBytes: 1024,
+            expiresAt: new Date(),
+            reviewedAt: null,
+            reviewNote: null,
+            createdAt: new Date(),
+          },
+        ],
+        vehicles: [
+          {
+            id: 'v-1',
+            label: 'Truck 1',
+            registration: 'XYZ123',
+            vehicleClass: 'RIGID_HEAVY',
+            tareKg: 5000,
+            gvmKg: 15000,
+            gcmKg: null,
+            status: 'ACTIVE',
+            disabledAt: null,
+            disabledReason: null,
+            disabledNote: null,
+            createdAt: new Date(),
+            complianceDocuments: [
+              {
+                id: 'doc-v-1',
+                docType: 'RWC',
+                status: 'VERIFIED',
+                originalFilename: 'rwc.pdf',
+                mimeType: 'application/pdf',
+                sizeBytes: 2048,
+                expiresAt: new Date(),
+                reviewedAt: null,
+                reviewNote: null,
+                createdAt: new Date(),
+              },
+            ],
+          },
+        ],
+        drivers: [
+          {
+            id: 'd-1',
+            status: 'ACTIVE',
+            licenceNo: 'L987654',
+            licenceClass: 'HC',
+            licenceExpiry: new Date(),
+            reliabilityScore: 100,
+            disabledAt: null,
+            disabledReason: null,
+            disabledNote: null,
+            createdAt: new Date(),
+            user: {
+              id: 'u-2',
+              email: 'driver@acme.com',
+              name: 'Dave Driver',
+              phone: '+61411111111',
+              status: 'ACTIVE',
+            },
+            complianceDocuments: [
+              {
+                id: 'doc-d-1',
+                docType: 'DRIVERS_LICENCE',
+                status: 'VERIFIED',
+                originalFilename: 'licence.pdf',
+                mimeType: 'application/pdf',
+                sizeBytes: 4096,
+                expiresAt: new Date(),
+                reviewedAt: null,
+                reviewNote: null,
+                createdAt: new Date(),
+              },
+            ],
+          },
+        ],
+        complianceCases: [],
+      }),
+    };
+
+    const res = await service.getCompany('co-1');
+    expect(res.company.legalName).toBe('Acme Carrier');
+    expect(res.documents).toHaveLength(1);
+    expect(res.documents[0].docType).toBe('COI');
+    expect(res.vehicles).toHaveLength(1);
+    expect(res.vehicles[0].documents).toHaveLength(1);
+    expect(res.vehicles[0].documents[0].docType).toBe('RWC');
+    expect(res.drivers).toHaveLength(1);
+    expect(res.drivers[0].documents).toHaveLength(1);
+    expect(res.drivers[0].documents[0].docType).toBe('DRIVERS_LICENCE');
+  });
 });

@@ -44,7 +44,10 @@ export class IdentityService {
 
     const user = await this.prisma.user.findUniqueOrThrow({
       where: { id: principal.id },
-      include: { company: true },
+      include: {
+        company: true,
+        driver: true,
+      },
     });
 
     return {
@@ -61,6 +64,14 @@ export class IdentityService {
             type: user.company.type,
             legalName: user.company.legalName,
             status: user.company.status,
+            reliabilityScore: user.company.reliabilityScore,
+          }
+        : null,
+      driver: user.driver
+        ? {
+            id: user.driver.id,
+            status: user.driver.status,
+            reliabilityScore: user.driver.reliabilityScore,
           }
         : null,
     };

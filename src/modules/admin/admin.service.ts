@@ -617,11 +617,169 @@ export class AdminService {
     };
   }
 
+  /**
+   * Get full company details including company docs, fleet with vehicle docs, and drivers with driver docs.
+   */
+  async getCompany(id: string) {
+    this.ensureDatabase();
+
+    const company = await this.prisma.company.findUnique({
+      where: { id },
+      include: {
+        homeRegion: { select: { code: true, name: true } },
+        referredByAdminUser: {
+          select: { id: true, name: true, email: true, role: true },
+        },
+        users: {
+          select: {
+            id: true,
+            email: true,
+            name: true,
+            phone: true,
+            role: true,
+            status: true,
+            createdAt: true,
+          },
+          orderBy: { createdAt: 'asc' },
+        },
+        complianceDocuments: {
+          where: {
+            driverId: null,
+            vehicleId: null,
+          },
+          orderBy: { createdAt: 'desc' },
+          select: {
+            id: true,
+            docType: true,
+            status: true,
+            originalFilename: true,
+            mimeType: true,
+            sizeBytes: true,
+            expiresAt: true,
+            reviewedAt: true,
+            reviewNote: true,
+            createdAt: true,
+          },
+        },
+        vehicles: {
+          orderBy: { createdAt: 'desc' },
+          select: {
+            id: true,
+            label: true,
+            registration: true,
+            vehicleClass: true,
+            tareKg: true,
+            gvmKg: true,
+            gcmKg: true,
+            status: true,
+            disabledAt: true,
+            disabledReason: true,
+            disabledNote: true,
+            createdAt: true,
+            complianceDocuments: {
+              orderBy: { createdAt: 'desc' },
+              select: {
+                id: true,
+                docType: true,
+                status: true,
+                originalFilename: true,
+                mimeType: true,
+                sizeBytes: true,
+                expiresAt: true,
+                reviewedAt: true,
+                reviewNote: true,
+                createdAt: true,
+              },
+            },
+          },
+        },
+        drivers: {
+          orderBy: { createdAt: 'desc' },
+          select: {
+            id: true,
+            status: true,
+            licenceNo: true,
+            licenceClass: true,
+            licenceExpiry: true,
+            reliabilityScore: true,
+            disabledAt: true,
+            disabledReason: true,
+            disabledNote: true,
+            createdAt: true,
+            user: {
+              select: {
+                id: true,
+                email: true,
+                name: true,
+                phone: true,
+                status: true,
+              },
+            },
+            complianceDocuments: {
+              orderBy: { createdAt: 'desc' },
+              select: {
+                id: true,
+                docType: true,
+                status: true,
+                originalFilename: true,
+                mimeType: true,
+                sizeBytes: true,
+                expiresAt: true,
+                reviewedAt: true,
+                reviewNote: true,
+                createdAt: true,
+              },
+            },
+          },
+        },
+        complianceCases: {
+          orderBy: { createdAt: 'desc' },
+          select: {
+            id: true,
+            caseType: true,
+            status: true,
+            decisionNote: true,
+            createdAt: true,
+            updatedAt: true,
+          },
+        },
+      },
+    });
+
+    if (!company) {
+      throw new NotFoundException('Company not found');
+    }
+
+    const {
+      complianceDocuments,
+      vehicles,
+      drivers,
+      users,
+      complianceCases,
+      ...companyDetails
+    } = company;
+
+    return {
+      company: companyDetails,
+      documents: complianceDocuments,
+      vehicles: vehicles.map((v) => ({
+        ...v,
+        documents: v.complianceDocuments,
+      })),
+      drivers: drivers.map((d) => ({
+        ...d,
+        documents: d.complianceDocuments,
+      })),
+      users,
+      complianceCases,
+    };
+  }
+
   async listCompanies(query: AdminCompanyListQuery) {
     this.ensureDatabase();
 
     const where: Prisma.CompanyWhereInput = {};
-    // Marketplace companies only — admin partners live under Ops → Admin partners.
+    // Marketplace companies only â€” admin partners live under Ops â†’ Admin partners.
     where.type = query.type
       ? query.type
       : { in: [CompanyType.SENDER, CompanyType.CARRIER] };
@@ -713,7 +871,7 @@ export class AdminService {
 
   /**
    * Soft-disable company (SUSPENDED) with required reason.
-   * Cascades users → SUSPENDED, drivers → SUSPENDED, active vehicles → SUSPENDED,
+   * Cascades users â†’ SUSPENDED, drivers â†’ SUSPENDED, active vehicles â†’ SUSPENDED,
    * revokes sessions, and emails account holders.
    */
   async disableCompany(id: string, input: DisableCompanyInput, actorId: string) {
@@ -734,14 +892,14 @@ export class AdminService {
     }
     if (company.status === CompanyStatus.DRAFT) {
       throw new BadRequestException(
-        'Draft companies cannot be suspended — use permanent delete instead',
+        'Draft companies cannot be suspended â€” use permanent delete instead',
       );
     }
 
     const reason = input.reason.trim();
     const note = input.note?.trim() || null;
     const now = new Date();
-    const partnerAdminIds = company.adminUsers.map((a) => a.id);
+    const partnerAdminIds = (company.adminUsers ?? []).map((a) => a.id);
 
     const result = await this.prisma.$transaction(async (tx) => {
       const updated = await tx.company.update({
@@ -836,7 +994,7 @@ export class AdminService {
     for (const user of company.users) {
       if (user.email?.trim()) notifyEmails.add(user.email.trim().toLowerCase());
     }
-    for (const partner of company.adminUsers) {
+    for (const partner of company.adminUsers ?? []) {
       if (partner.email?.trim()) notifyEmails.add(partner.email.trim().toLowerCase());
     }
 
@@ -894,7 +1052,7 @@ export class AdminService {
 
     const restoreStatus = company.statusBeforeSuspend ?? CompanyStatus.PENDING_REVIEW;
     const userIds = company.users.map((u) => u.id);
-    const partnerAdminIds = company.adminUsers.map((a) => a.id);
+    const partnerAdminIds = (company.adminUsers ?? []).map((a) => a.id);
 
     const partnerRestore =
       restoreStatus === CompanyStatus.ACTIVE
@@ -961,7 +1119,7 @@ export class AdminService {
     };
   }
 
-  /** Permanent delete — DRAFT companies only. */
+  /** Permanent delete â€” DRAFT companies only. */
   async deleteCompany(id: string, actorId: string) {
     this.ensureDatabase();
 
@@ -998,7 +1156,7 @@ export class AdminService {
     }
 
     const userIds = company.users.map((u) => u.id);
-    const partnerAdminIds = company.adminUsers.map((a) => a.id);
+    const partnerAdminIds = (company.adminUsers ?? []).map((a) => a.id);
 
     await this.prisma.$transaction(async (tx) => {
       await tx.driver.deleteMany({
