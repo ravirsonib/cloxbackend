@@ -158,4 +158,44 @@ describe('RevenueSplitService.resolveForJob (per-admin packages)', () => {
       localPercent: 5,
     });
   });
+
+  it('allocates expanded platform margin to Super Admin (HQ) if carrier drops to 50%', async () => {
+    const service = buildService({
+      referredBy: amitId,
+      packageFor: {
+        adminUserId: amitId,
+        id: 'pkg-amit',
+        superPercent: 15,
+        statePercent: 10,
+        localPercent: 5,
+      },
+      referrer: {
+        id: amitId,
+        role: AdminRole.LOCAL_BDE,
+        status: AdminUserStatus.ACTIVE,
+        active: true,
+      },
+    });
+
+    // Mock national policy with carrier = 50%
+    jest.spyOn(service as any, 'getEffectiveNational').mockResolvedValue({
+      percents: { carrierPercent: 50, superPercent: 35, statePercent: 10, localPercent: 5 },
+      policyVersionId: 'pol-50',
+    });
+
+    const resolved = await service.resolveForJob({
+      grossIncGstCents: 10_000,
+      originRegionId: regionId,
+      originTerritoryId: territoryId,
+      senderCompanyId: 'sender-1',
+    });
+
+    // Amit stays at contracted 5%, State stays at 10%, Super Admin receives the remaining 35% (including the extra 20%)
+    expect(resolved.percents).toEqual({
+      carrierPercent: 50,
+      superPercent: 35,
+      statePercent: 10,
+      localPercent: 5,
+    });
+  });
 });

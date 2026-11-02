@@ -70,11 +70,14 @@ export class GrowthService {
 
   private requireActiveLocal(principal: AuthenticatedPrincipal) {
     this.scope.assertAdmin(principal);
-    if (principal.role !== AdminRole.LOCAL_BDE) {
-      throw new ForbiddenException('Active Local BDE required');
+    if (
+      principal.role !== AdminRole.LOCAL_BDE &&
+      principal.role !== AdminRole.SUPER_ADMIN
+    ) {
+      throw new ForbiddenException('Active Local BDE or Super Admin required');
     }
     if (principal.adminStatus !== AdminUserStatus.ACTIVE) {
-      throw new ForbiddenException('Local BDE must be ACTIVE to manage growth');
+      throw new ForbiddenException('Admin must be ACTIVE to manage growth');
     }
   }
 
@@ -97,7 +100,10 @@ export class GrowthService {
 
     if (input.prospectId) {
       const prospect = await this.prisma.prospect.findUnique({ where: { id: input.prospectId } });
-      if (!prospect || prospect.ownerAdminUserId !== principal.id) {
+      if (
+        !prospect ||
+        (principal.role !== AdminRole.SUPER_ADMIN && prospect.ownerAdminUserId !== principal.id)
+      ) {
         throw new NotFoundException('Prospect not found');
       }
       if (prospect.companyType !== input.companyType) {
@@ -169,7 +175,10 @@ export class GrowthService {
     this.requireActiveLocal(principal);
 
     const existing = await this.prisma.companyInvite.findUnique({ where: { id: inviteId } });
-    if (!existing || existing.invitedByAdminUserId !== principal.id) {
+    if (
+      !existing ||
+      (principal.role !== AdminRole.SUPER_ADMIN && existing.invitedByAdminUserId !== principal.id)
+    ) {
       throw new NotFoundException('Invite not found');
     }
     if (existing.acceptedAt) {
@@ -221,8 +230,12 @@ export class GrowthService {
   async listInvites(principal: AuthenticatedPrincipal) {
     this.ensureDatabase();
     this.requireActiveLocal(principal);
+    const where: Prisma.CompanyInviteWhereInput = {};
+    if (principal.role !== AdminRole.SUPER_ADMIN) {
+      where.invitedByAdminUserId = principal.id;
+    }
     const rows = await this.prisma.companyInvite.findMany({
-      where: { invitedByAdminUserId: principal.id },
+      where,
       orderBy: { createdAt: 'desc' },
       take: 100,
       select: {
@@ -264,10 +277,13 @@ export class GrowthService {
     this.ensureDatabase();
     this.requireActiveLocal(principal);
 
+    const isSuper = principal.role === AdminRole.SUPER_ADMIN;
     const where: Prisma.CompanyWhereInput = {
-      referredByAdminUserId: principal.id,
       type: query.type ?? { in: [CompanyType.SENDER, CompanyType.CARRIER] },
     };
+    if (!isSuper) {
+      where.referredByAdminUserId = principal.id;
+    }
     if (query.q) {
       const q = query.q;
       where.OR = [
@@ -444,7 +460,10 @@ export class GrowthService {
     this.ensureDatabase();
     this.requireActiveLocal(principal);
     const existing = await this.prisma.prospect.findUnique({ where: { id } });
-    if (!existing || existing.ownerAdminUserId !== principal.id) {
+    if (
+      !existing ||
+      (principal.role !== AdminRole.SUPER_ADMIN && existing.ownerAdminUserId !== principal.id)
+    ) {
       throw new NotFoundException('Prospect not found');
     }
 

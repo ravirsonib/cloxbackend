@@ -656,6 +656,17 @@ export const adminDashboardQuerySchema = z.object({
 
 export type AdminDashboardQuery = z.infer<typeof adminDashboardQuerySchema>;
 
+export const financeQuerySchema = z.object({
+  period: z.enum(['today', 'week', 'month', '30d', 'quarter', 'year', 'all']).optional(),
+  from: z.string().trim().optional(),
+  to: z.string().trim().optional(),
+  regionCode: z.string().trim().optional(),
+  companyId: z.string().uuid().optional(),
+  status: z.string().trim().optional(),
+});
+
+export type FinanceQuery = z.infer<typeof financeQuerySchema>;
+
 export const adminCompanyListQuerySchema = z.object({
   page: z.coerce.number().int().positive().default(1),
   pageSize: z.coerce.number().int().min(1).max(100).default(20),
@@ -1619,6 +1630,7 @@ export const platformSettingsPatchSchema = z.object({
   marketplaceRelistSlaMs: z.number().int().min(60_000).max(3_600_000).optional(),
   driverUnavailableScoreDelta: z.number().int().min(0).max(50).optional(),
   carrierMarketplaceReleaseScoreDelta: z.number().int().min(0).max(50).optional(),
+  carrierClearingDays: z.number().int().min(0).max(90).optional(),
 });
 
 export type PlatformSettingsPatchInput = z.infer<typeof platformSettingsPatchSchema>;
@@ -1688,17 +1700,29 @@ const adminPoolPercentsSchema = z
     message: 'superPercent + statePercent + localPercent must equal 30',
   });
 
-export const revenueSplitDraftSchema = adminPoolPercentsSchema.and(
-  z.object({ notes: z.string().trim().max(500).optional() }),
-);
+export const revenueSplitDraftSchema = z
+  .object({
+    carrierPercent: z.number().int().min(1).max(99).optional().default(70),
+    superPercent: z.number().int().min(0).max(100),
+    statePercent: z.number().int().min(0).max(100),
+    localPercent: z.number().int().min(0).max(100),
+    notes: z.string().trim().max(500).optional(),
+  })
+  .refine(
+    (v) => (v.carrierPercent ?? 70) + v.superPercent + v.statePercent + v.localPercent === 100,
+    {
+      message: 'carrierPercent + superPercent + statePercent + localPercent must equal 100',
+    },
+  );
 export type RevenueSplitDraftInput = z.infer<typeof revenueSplitDraftSchema>;
 
 export const revenueSplitPublishSchema = z
   .object({
     draftId: z.string().uuid().optional(),
-    superPercent: z.number().int().min(0).max(30).optional(),
-    statePercent: z.number().int().min(0).max(30).optional(),
-    localPercent: z.number().int().min(0).max(30).optional(),
+    carrierPercent: z.number().int().min(1).max(99).optional(),
+    superPercent: z.number().int().min(0).max(100).optional(),
+    statePercent: z.number().int().min(0).max(100).optional(),
+    localPercent: z.number().int().min(0).max(100).optional(),
     notes: z.string().trim().max(500).optional(),
     effectiveFrom: z.string().datetime().optional(),
   })
@@ -1715,34 +1739,37 @@ export const revenueSplitPublishSchema = z
       });
       return;
     }
-    if (value.superPercent + value.statePercent + value.localPercent !== 30) {
+    const carrier = value.carrierPercent ?? 70;
+    if (carrier + value.superPercent + value.statePercent + value.localPercent !== 100) {
       ctx.addIssue({
         code: 'custom',
-        message: 'superPercent + statePercent + localPercent must equal 30',
+        message: 'carrierPercent + superPercent + statePercent + localPercent must equal 100',
       });
     }
   });
 export type RevenueSplitPublishInput = z.infer<typeof revenueSplitPublishSchema>;
 
-export const revenueSplitOverridePublishSchema = adminPoolPercentsSchema.and(
-  z.object({
-    scopeType: z.enum(['REGION', 'TERRITORY']),
-    scopeId: z.string().uuid(),
-    notes: z.string().trim().max(500).optional(),
-    effectiveFrom: z.string().datetime().optional(),
-  }),
-);
+export const revenueSplitOverridePublishSchema = z.object({
+  scopeType: z.enum(['REGION', 'TERRITORY']),
+  scopeId: z.string().uuid(),
+  superPercent: z.number().int().min(0).max(100),
+  statePercent: z.number().int().min(0).max(100),
+  localPercent: z.number().int().min(0).max(100),
+  notes: z.string().trim().max(500).optional(),
+  effectiveFrom: z.string().datetime().optional(),
+});
 export type RevenueSplitOverridePublishInput = z.infer<
   typeof revenueSplitOverridePublishSchema
 >;
 
-export const revenueSplitAdminPackagePublishSchema = adminPoolPercentsSchema.and(
-  z.object({
-    adminUserId: z.string().uuid(),
-    notes: z.string().trim().max(500).optional(),
-    effectiveFrom: z.string().datetime().optional(),
-  }),
-);
+export const revenueSplitAdminPackagePublishSchema = z.object({
+  adminUserId: z.string().uuid(),
+  superPercent: z.number().int().min(0).max(100),
+  statePercent: z.number().int().min(0).max(100),
+  localPercent: z.number().int().min(0).max(100),
+  notes: z.string().trim().max(500).optional(),
+  effectiveFrom: z.string().datetime().optional(),
+});
 export type RevenueSplitAdminPackagePublishInput = z.infer<
   typeof revenueSplitAdminPackagePublishSchema
 >;

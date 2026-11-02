@@ -57,7 +57,20 @@ export class PaymentsService {
     @Optional() private readonly inbox?: InAppNotificationsService,
   ) {}
 
-  private carrierClearingDays() {
+  private async carrierClearingDays(): Promise<number> {
+    if (this.prisma?.isConnected()) {
+      try {
+        const settings = await this.prisma.platformSettings.findUnique({
+          where: { id: 'default' },
+          select: { carrierClearingDays: true },
+        });
+        if (settings?.carrierClearingDays != null) {
+          return settings.carrierClearingDays;
+        }
+      } catch {
+        // Fallback to env or default
+      }
+    }
     return this.config?.get('STRIPE_CARRIER_CLEARING_DAYS', { infer: true }) ?? 7;
   }
 
@@ -2286,7 +2299,8 @@ export class PaymentsService {
       return { transferred: false, reason: 'trip_not_completed' };
     }
 
-    const clearingMs = this.carrierClearingDays() * 24 * 60 * 60 * 1000;
+    const clearingDays = await this.carrierClearingDays();
+    const clearingMs = clearingDays * 24 * 60 * 60 * 1000;
     if (Date.now() < trip.completedAt.getTime() + clearingMs) {
       return { transferred: false, reason: 'clearing_hold' };
     }

@@ -1,5 +1,7 @@
 export const REVENUE_SPLIT_POLICY_KEY = 'revenue_split.v1' as const;
 
+export const CARRIER_PERCENT_DEFAULT = 70;
+/** @deprecated Use CARRIER_PERCENT_DEFAULT or dynamic carrierPercent from policy. Kept for backward compatibility. */
 export const CARRIER_PERCENT_FIXED = 70;
 export const PLATFORM_PERCENT_FIXED = 30;
 
@@ -42,32 +44,54 @@ export function assertAdminPool(percents: {
   superPercent: number;
   statePercent: number;
   localPercent: number;
+  carrierPercent?: number;
 }): void {
-  const { superPercent, statePercent, localPercent } = percents;
+  const { superPercent, statePercent, localPercent, carrierPercent } = percents;
   if (
     ![superPercent, statePercent, localPercent].every(
-      (n) => Number.isInteger(n) && n >= 0 && n <= 30,
+      (n) => Number.isInteger(n) && n >= 0 && n <= 100,
     )
   ) {
-    throw new Error('Admin share percents must be integers between 0 and 30');
+    throw new Error('Admin share percents must be integers between 0 and 100');
   }
-  if (superPercent + statePercent + localPercent !== PLATFORM_PERCENT_FIXED) {
+  const expectedPool = carrierPercent != null ? 100 - carrierPercent : PLATFORM_PERCENT_FIXED;
+  if (superPercent + statePercent + localPercent !== expectedPool) {
     throw new Error(
-      `Admin shares must sum to ${PLATFORM_PERCENT_FIXED} (got ${superPercent + statePercent + localPercent})`,
+      `Admin shares must sum to ${expectedPool} (got ${superPercent + statePercent + localPercent})`,
     );
   }
 }
 
-export function assertNationalPayload(payload: RevenueSplitPolicyPayload): RevenueSplitPercents {
-  if (payload.carrierPercent !== CARRIER_PERCENT_FIXED) {
-    throw new Error(`carrierPercent must be ${CARRIER_PERCENT_FIXED}`);
+export function assertNationalPayload(payload: Partial<RevenueSplitPolicyPayload>): RevenueSplitPercents {
+  const carrierPercent = payload.carrierPercent ?? CARRIER_PERCENT_DEFAULT;
+  const superPercent = payload.superPercent ?? 0;
+  const statePercent = payload.statePercent ?? 0;
+  const localPercent = payload.localPercent ?? 0;
+
+  if (
+    ![carrierPercent, superPercent, statePercent, localPercent].every(
+      (n) => Number.isInteger(n) && n >= 0 && n <= 100,
+    )
+  ) {
+    throw new Error('All revenue split percents must be integers between 0 and 100');
   }
-  assertAdminPool(payload);
+
+  if (carrierPercent <= 0) {
+    throw new Error('carrierPercent must be greater than 0');
+  }
+
+  const total = carrierPercent + superPercent + statePercent + localPercent;
+  if (total !== 100) {
+    throw new Error(
+      `Total revenue split must equal 100% (carrier ${carrierPercent} + super ${superPercent} + state ${statePercent} + local ${localPercent} = ${total}%)`,
+    );
+  }
+
   return {
-    carrierPercent: CARRIER_PERCENT_FIXED,
-    superPercent: payload.superPercent,
-    statePercent: payload.statePercent,
-    localPercent: payload.localPercent,
+    carrierPercent,
+    superPercent,
+    statePercent,
+    localPercent,
   };
 }
 

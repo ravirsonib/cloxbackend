@@ -1000,15 +1000,17 @@ enum TripExceptionStatus {
 
 /// Singleton platform knobs (id = "default")
 model PlatformSettings {
-  id                                 String   @id @default("default")
+  id                                  String   @id @default("default")
   /// Carrier-facing discount % on marketplace rescue re-list (0–50)
-  rescueDiscountPercent              Int      @default(10)
+  rescueDiscountPercent               Int      @default(10)
   /// Auto re-list after this many ms in AWAITING_CARRIER (pre-trip)
-  marketplaceRelistSlaMs             Int      @default(300000)
-  driverUnavailableScoreDelta        Int      @default(5)
-  carrierMarketplaceReleaseScoreDelta Int     @default(10)
-  updatedAt                          DateTime @updatedAt
-  createdAt                          DateTime @default(now())
+  marketplaceRelistSlaMs              Int      @default(300000)
+  driverUnavailableScoreDelta         Int      @default(5)
+  carrierMarketplaceReleaseScoreDelta Int      @default(10)
+  /// Days before carrier completed trip funds clear for bank payout (0 = instant)
+  carrierClearingDays                 Int      @default(7)
+  updatedAt                           DateTime @updatedAt
+  createdAt                           DateTime @default(now())
 }
 
 model TripException {

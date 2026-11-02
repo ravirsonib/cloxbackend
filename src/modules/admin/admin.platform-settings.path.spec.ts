@@ -8,6 +8,7 @@ describe('AdminService platform settings', () => {
       marketplaceRelistSlaMs: 300_000,
       driverUnavailableScoreDelta: 5,
       carrierMarketplaceReleaseScoreDelta: 10,
+      carrierClearingDays: 1,
       updatedAt: new Date('2026-10-26T00:00:00.000Z'),
     };
     const prisma = {
@@ -27,6 +28,7 @@ describe('AdminService platform settings', () => {
       id: 'default',
       rescueDiscountPercent: 10,
       marketplaceRelistSlaMs: 300_000,
+      carrierClearingDays: 1,
     });
     expect(prisma.platformSettings.upsert).toHaveBeenCalledWith({
       where: { id: 'default' },
@@ -42,6 +44,7 @@ describe('AdminService platform settings', () => {
       marketplaceRelistSlaMs: 600_000,
       driverUnavailableScoreDelta: 7,
       carrierMarketplaceReleaseScoreDelta: 12,
+      carrierClearingDays: 2,
       updatedAt: new Date('2026-10-26T01:00:00.000Z'),
     };
     const audit = { recordPlatform: jest.fn() };
@@ -60,11 +63,13 @@ describe('AdminService platform settings', () => {
         marketplaceRelistSlaMs: 600_000,
         driverUnavailableScoreDelta: 7,
         carrierMarketplaceReleaseScoreDelta: 12,
+        carrierClearingDays: 2,
       },
       'admin-1',
     );
 
     expect(result.rescueDiscountPercent).toBe(15);
+    expect(result.carrierClearingDays).toBe(2);
     expect(prisma.platformSettings.update).toHaveBeenCalledWith({
       where: { id: 'default' },
       data: {
@@ -72,6 +77,7 @@ describe('AdminService platform settings', () => {
         marketplaceRelistSlaMs: 600_000,
         driverUnavailableScoreDelta: 7,
         carrierMarketplaceReleaseScoreDelta: 12,
+        carrierClearingDays: 2,
       },
     });
     expect(audit.recordPlatform).toHaveBeenCalledWith(

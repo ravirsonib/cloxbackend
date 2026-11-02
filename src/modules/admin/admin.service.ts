@@ -1647,6 +1647,7 @@ export class AdminService {
       marketplaceRelistSlaMs: row.marketplaceRelistSlaMs,
       driverUnavailableScoreDelta: row.driverUnavailableScoreDelta,
       carrierMarketplaceReleaseScoreDelta: row.carrierMarketplaceReleaseScoreDelta,
+      carrierClearingDays: row.carrierClearingDays ?? 7,
       updatedAt: row.updatedAt,
     };
   }
@@ -1667,6 +1668,9 @@ export class AdminService {
     if (input.carrierMarketplaceReleaseScoreDelta !== undefined) {
       data.carrierMarketplaceReleaseScoreDelta = input.carrierMarketplaceReleaseScoreDelta;
     }
+    if (input.carrierClearingDays !== undefined) {
+      data.carrierClearingDays = input.carrierClearingDays;
+    }
     const updated = await this.prisma.platformSettings.update({
       where: { id: 'default' },
       data,
@@ -1684,6 +1688,7 @@ export class AdminService {
       marketplaceRelistSlaMs: updated.marketplaceRelistSlaMs,
       driverUnavailableScoreDelta: updated.driverUnavailableScoreDelta,
       carrierMarketplaceReleaseScoreDelta: updated.carrierMarketplaceReleaseScoreDelta,
+      carrierClearingDays: updated.carrierClearingDays ?? 7,
       updatedAt: updated.updatedAt,
     };
   }

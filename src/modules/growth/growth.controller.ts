@@ -39,8 +39,8 @@ export class GrowthController {
   @Post('invites')
   @ApiBearerAuth()
   @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles(AdminRole.LOCAL_BDE)
-  @ApiOperation({ summary: 'Local BDE: invite sender or carrier into book of business' })
+  @Roles(AdminRole.LOCAL_BDE, AdminRole.SUPER_ADMIN)
+  @ApiOperation({ summary: 'Local BDE or Super Admin: invite sender or carrier into book of business' })
   createInvite(
     @CurrentPrincipal() principal: AuthenticatedPrincipal,
     @Body(new ZodValidationPipe(createCompanyInviteSchema)) body: CreateCompanyInviteInput,
@@ -51,8 +51,8 @@ export class GrowthController {
   @Post('invites/:id/resend')
   @ApiBearerAuth()
   @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles(AdminRole.LOCAL_BDE)
-  @ApiOperation({ summary: 'Local BDE: resend company invite' })
+  @Roles(AdminRole.LOCAL_BDE, AdminRole.SUPER_ADMIN)
+  @ApiOperation({ summary: 'Local BDE or Super Admin: resend company invite' })
   resendInvite(
     @CurrentPrincipal() principal: AuthenticatedPrincipal,
     @Param('id') id: string,
@@ -63,8 +63,8 @@ export class GrowthController {
   @Get('invites')
   @ApiBearerAuth()
   @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles(AdminRole.LOCAL_BDE)
-  @ApiOperation({ summary: 'Local BDE: list own company invites' })
+  @Roles(AdminRole.LOCAL_BDE, AdminRole.SUPER_ADMIN)
+  @ApiOperation({ summary: 'Local BDE or Super Admin: list company invites' })
   listInvites(@CurrentPrincipal() principal: AuthenticatedPrincipal) {
     return this.growth.listInvites(principal);
   }
@@ -72,8 +72,8 @@ export class GrowthController {
   @Get('my-companies')
   @ApiBearerAuth()
   @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles(AdminRole.LOCAL_BDE)
-  @ApiOperation({ summary: 'Local BDE: companies referred by self' })
+  @Roles(AdminRole.LOCAL_BDE, AdminRole.SUPER_ADMIN)
+  @ApiOperation({ summary: 'Local BDE or Super Admin: companies referred' })
   listMyCompanies(
     @CurrentPrincipal() principal: AuthenticatedPrincipal,
     @Query(new ZodValidationPipe(growthMyCompaniesQuerySchema)) query: GrowthMyCompaniesQuery,
@@ -96,8 +96,8 @@ export class GrowthController {
   @Post('prospects')
   @ApiBearerAuth()
   @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles(AdminRole.LOCAL_BDE)
-  @ApiOperation({ summary: 'Local BDE: create prospect' })
+  @Roles(AdminRole.LOCAL_BDE, AdminRole.SUPER_ADMIN)
+  @ApiOperation({ summary: 'Local BDE or Super Admin: create prospect' })
   createProspect(
     @CurrentPrincipal() principal: AuthenticatedPrincipal,
     @Body(new ZodValidationPipe(createProspectSchema)) body: CreateProspectInput,
@@ -120,8 +120,8 @@ export class GrowthController {
   @Patch('prospects/:id')
   @ApiBearerAuth()
   @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles(AdminRole.LOCAL_BDE)
-  @ApiOperation({ summary: 'Local BDE: update own prospect' })
+  @Roles(AdminRole.LOCAL_BDE, AdminRole.SUPER_ADMIN)
+  @ApiOperation({ summary: 'Local BDE or Super Admin: update prospect' })
   updateProspect(
     @CurrentPrincipal() principal: AuthenticatedPrincipal,
     @Param('id') id: string,

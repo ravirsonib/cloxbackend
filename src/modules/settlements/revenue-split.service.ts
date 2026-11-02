@@ -194,10 +194,19 @@ export class RevenueSplitService {
         params.at,
       );
       if (pkg) {
+        const expectedPool = 100 - national.percents.carrierPercent;
+        const currentPkgPool = pkg.superPercent + pkg.statePercent + pkg.localPercent;
+        // If national carrier share changed after the package was created,
+        // any expanded platform margin accrues to Super Admin (HQ) by default
+        const superPercent =
+          currentPkgPool === expectedPool
+            ? pkg.superPercent
+            : Math.max(0, expectedPool - pkg.statePercent - pkg.localPercent);
+
         return {
           percents: {
-            carrierPercent: CARRIER_PERCENT_FIXED,
-            superPercent: pkg.superPercent,
+            carrierPercent: national.percents.carrierPercent,
+            superPercent,
             statePercent: pkg.statePercent,
             localPercent: pkg.localPercent,
           },
@@ -235,10 +244,7 @@ export class RevenueSplitService {
       if (effectiveFrom.getTime() > at.getTime()) continue;
       try {
         return {
-          percents: assertNationalPayload({
-            ...payload,
-            carrierPercent: CARRIER_PERCENT_FIXED,
-          }),
+          percents: assertNationalPayload(payload),
           policyVersionId: row.id,
         };
       } catch {
@@ -298,8 +304,10 @@ export class RevenueSplitService {
       orderBy: [{ publishedAt: 'desc' }, { version: 'desc' }],
     });
     return {
-      carrierPercentFixed: CARRIER_PERCENT_FIXED,
-      platformPercentFixed: 30,
+      carrierPercent: effective.percents.carrierPercent,
+      carrierPercentFixed: effective.percents.carrierPercent,
+      platformPercent: 100 - effective.percents.carrierPercent,
+      platformPercentFixed: 100 - effective.percents.carrierPercent,
       effective: {
         policyVersionId: effective.policyVersionId,
         percents: effective.percents,
@@ -342,6 +350,7 @@ export class RevenueSplitService {
     superPercent: number;
     statePercent: number;
     localPercent: number;
+    carrierPercent?: number;
   }) {
     try {
       assertAdminPool(input);
@@ -351,16 +360,28 @@ export class RevenueSplitService {
   }
 
   async saveDraft(
-    input: { superPercent: number; statePercent: number; localPercent: number; notes?: string },
+    input: {
+      carrierPercent?: number;
+      superPercent: number;
+      statePercent: number;
+      localPercent: number;
+      notes?: string;
+    },
     actorAdminId: string,
   ) {
     this.ensureDatabase();
-    this.requireAdminPool(input);
+    let validatedPercents: RevenueSplitPercents;
+    try {
+      validatedPercents = assertNationalPayload(input);
+    } catch (error: unknown) {
+      throw new BadRequestException(error instanceof Error ? error.message : String(error));
+    }
+
     const payload: RevenueSplitPolicyPayload = {
-      carrierPercent: CARRIER_PERCENT_FIXED,
-      superPercent: input.superPercent,
-      statePercent: input.statePercent,
-      localPercent: input.localPercent,
+      carrierPercent: validatedPercents.carrierPercent,
+      superPercent: validatedPercents.superPercent,
+      statePercent: validatedPercents.statePercent,
+      localPercent: validatedPercents.localPercent,
       notes: input.notes,
     };
 
@@ -403,6 +424,7 @@ export class RevenueSplitService {
   async publishDraft(
     input: {
       draftId?: string;
+      carrierPercent?: number;
       superPercent?: number;
       statePercent?: number;
       localPercent?: number;
@@ -428,6 +450,7 @@ export class RevenueSplitService {
       }
       const saved = await this.saveDraft(
         {
+          carrierPercent: input.carrierPercent,
           superPercent: input.superPercent,
           statePercent: input.statePercent,
           localPercent: input.localPercent,
@@ -447,11 +470,13 @@ export class RevenueSplitService {
     }
 
     const base = draft.payload as RevenueSplitPolicyPayload;
-    let percents;
+    let percents: RevenueSplitPercents;
     try {
       percents = assertNationalPayload({
-        ...base,
-        carrierPercent: CARRIER_PERCENT_FIXED,
+        carrierPercent: input.carrierPercent ?? base.carrierPercent,
+        superPercent: input.superPercent ?? base.superPercent,
+        statePercent: input.statePercent ?? base.statePercent,
+        localPercent: input.localPercent ?? base.localPercent,
       });
     } catch (error: unknown) {
       throw new BadRequestException(error instanceof Error ? error.message : String(error));
@@ -515,7 +540,14 @@ export class RevenueSplitService {
     actorAdminId: string,
   ) {
     this.ensureDatabase();
-    this.requireAdminPool(input);
+    const now = new Date();
+    const national = await this.getEffectiveNational(now);
+    this.requireAdminPool({
+      superPercent: input.superPercent,
+      statePercent: input.statePercent,
+      localPercent: input.localPercent,
+      carrierPercent: national.percents.carrierPercent,
+    });
 
     if (input.scopeType === 'REGION') {
       const region = await this.prisma.region.findUnique({ where: { id: input.scopeId } });
@@ -593,7 +625,14 @@ export class RevenueSplitService {
     actorAdminId: string,
   ) {
     this.ensureDatabase();
-    this.requireAdminPool(input);
+    const now = new Date();
+    const national = await this.getEffectiveNational(now);
+    this.requireAdminPool({
+      superPercent: input.superPercent,
+      statePercent: input.statePercent,
+      localPercent: input.localPercent,
+      carrierPercent: national.percents.carrierPercent,
+    });
 
     const admin = await this.prisma.adminUser.findUnique({
       where: { id: input.adminUserId },
