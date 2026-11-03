@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Post, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Param, Post, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import {
   AppRole,
@@ -42,5 +42,29 @@ export class MatchingController {
     @Body(new ZodValidationPipe(proposalSubmitSchema)) body: ProposalSubmitInput,
   ) {
     return this.matchingService.submitProposal(principal, body);
+  }
+
+  @Post('proposals/:id/withdraw')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(AppRole.TRANSPORT_COMPANY)
+  @ApiOperation({ summary: 'Withdraw submitted proposal to unlock carrier vehicle/driver' })
+  withdrawProposal(
+    @CurrentPrincipal() principal: AuthenticatedPrincipal,
+    @Param('id') id: string,
+  ) {
+    return this.matchingService.withdrawProposal(principal, id);
+  }
+
+  @Post('jobs/:jobId/withdraw')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(AppRole.TRANSPORT_COMPANY)
+  @ApiOperation({ summary: 'Withdraw submitted proposal for a job by jobId' })
+  withdrawByJobId(
+    @CurrentPrincipal() principal: AuthenticatedPrincipal,
+    @Param('jobId') jobId: string,
+  ) {
+    return this.matchingService.withdrawProposalByJobId(principal, jobId);
   }
 }

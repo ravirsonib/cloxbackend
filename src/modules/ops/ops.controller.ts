@@ -10,12 +10,14 @@ import {
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import {
   AdminRole,
+  addBdeCoachingNoteSchema,
   adminAcceptInviteSchema,
   inviteAdminSchema,
   partnerOnboardingSubmitSchema,
   partnerOnboardingUpdateSchema,
   resendAdminInviteSchema,
   updateRegionEnabledSchema,
+  type AddBdeCoachingNoteInput,
   type AdminAcceptInviteInput,
   type InviteAdminInput,
   type PartnerOnboardingSubmitInput,
@@ -36,6 +38,49 @@ import { OpsService } from './ops.service';
 @Controller('ops')
 export class OpsController {
   constructor(private readonly opsService: OpsService) {}
+
+  @Get('dashboard/stats')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(AdminRole.SUPER_ADMIN, AdminRole.STATE_MASTER, AdminRole.LOCAL_BDE)
+  @ApiOperation({ summary: 'Role-scoped operational dashboard stats' })
+  getDashboardStats(@CurrentPrincipal() principal: AuthenticatedPrincipal) {
+    return this.opsService.getDashboardStats(principal);
+  }
+
+  @Get('team')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(AdminRole.SUPER_ADMIN, AdminRole.STATE_MASTER)
+  @ApiOperation({ summary: 'List Local BDE field team (OPS-STA-TEAM-01)' })
+  listTeam(@CurrentPrincipal() principal: AuthenticatedPrincipal) {
+    return this.opsService.listBdeTeam(principal);
+  }
+
+  @Get('team/:id')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(AdminRole.SUPER_ADMIN, AdminRole.STATE_MASTER)
+  @ApiOperation({ summary: 'Get Local BDE field member detail (OPS-STA-TEAM-02)' })
+  getTeamMember(
+    @CurrentPrincipal() principal: AuthenticatedPrincipal,
+    @Param('id') id: string,
+  ) {
+    return this.opsService.getBdeTeamMember(principal, id);
+  }
+
+  @Post('team/:id/notes')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(AdminRole.SUPER_ADMIN, AdminRole.STATE_MASTER)
+  @ApiOperation({ summary: 'Add coaching note for Local BDE member' })
+  addTeamCoachingNote(
+    @CurrentPrincipal() principal: AuthenticatedPrincipal,
+    @Param('id') id: string,
+    @Body(new ZodValidationPipe(addBdeCoachingNoteSchema)) body: AddBdeCoachingNoteInput,
+  ) {
+    return this.opsService.addBdeCoachingNote(principal, id, body);
+  }
 
   @Get('_status')
   @ApiOperation({ summary: 'Ops module status' })

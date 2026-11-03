@@ -57,6 +57,18 @@ export class MatchingService {
     }
   }
 
+  private async getPlatformGstPercent(): Promise<number> {
+    try {
+      const settings = await this.prisma.platformSettings.findUnique({
+        where: { id: 'default' },
+        select: { gstPercent: true },
+      });
+      return settings?.gstPercent ?? 10.0;
+    } catch {
+      return 10.0;
+    }
+  }
+
   private async requireCarrierCompany(principal: AuthenticatedPrincipal) {
     if (principal.kind !== 'user' || principal.role !== 'TRANSPORT_COMPANY') {
       throw new ForbiddenException('Carrier required');
@@ -388,7 +400,8 @@ export class MatchingService {
       }
     }
 
-    const amounts = gstSplitFromIncCents(input.amountIncGstCents);
+    const gstRatePercent = await this.getPlatformGstPercent();
+    const amounts = gstSplitFromIncCents(input.amountIncGstCents, gstRatePercent);
     const proposal = await this.prisma.proposal.create({
       data: {
         jobId: job.id,
@@ -484,5 +497,80 @@ export class MatchingService {
       vehicleId: proposal.vehicleId,
       driverId: proposal.driverId,
     };
+  }
+
+  async withdrawProposal(principal: AuthenticatedPrincipal, proposalId: string) {
+    this.ensureDatabase();
+    const user = await this.prisma.user.findUnique({ where: { id: principal.id } });
+    if (!user?.companyId) throw new NotFoundException('Carrier company not found');
+
+    const proposal = await this.prisma.proposal.findFirst({
+      where: {
+        id: proposalId,
+        carrierCompanyId: user.companyId,
+      },
+      include: {
+        job: {
+          include: {
+            assignment: true,
+          },
+        },
+      },
+    });
+    if (!proposal) throw new NotFoundException('Proposal not found');
+
+    if (proposal.status !== ProposalStatus.SUBMITTED) {
+      throw new BadRequestException(`Cannot withdraw proposal with status ${proposal.status}`);
+    }
+
+    if (
+      proposal.job.assignment &&
+      proposal.job.assignment.proposalId === proposal.id &&
+      proposal.job.assignment.status === AssignmentStatus.LOCKED
+    ) {
+      throw new BadRequestException('Cannot withdraw proposal after it has been awarded and locked');
+    }
+
+    const updated = await this.prisma.proposal.update({
+      where: { id: proposal.id },
+      data: { status: ProposalStatus.WITHDRAWN },
+    });
+
+    await this.audit.recordPlatform({
+      action: AuditAction.PROPOSAL_WITHDRAWN,
+      actorUserId: user.id,
+      entityType: 'Proposal',
+      entityId: proposal.id,
+      metadata: {
+        jobId: proposal.jobId,
+        vehicleId: proposal.vehicleId,
+        driverId: proposal.driverId,
+      },
+    });
+
+    return {
+      id: updated.id,
+      jobId: updated.jobId,
+      status: updated.status,
+    };
+  }
+
+  async withdrawProposalByJobId(principal: AuthenticatedPrincipal, jobId: string) {
+    this.ensureDatabase();
+    const user = await this.prisma.user.findUnique({ where: { id: principal.id } });
+    if (!user?.companyId) throw new NotFoundException('Carrier company not found');
+
+    const proposal = await this.prisma.proposal.findFirst({
+      where: {
+        jobId,
+        carrierCompanyId: user.companyId,
+        status: ProposalStatus.SUBMITTED,
+      },
+    });
+    if (!proposal) {
+      throw new NotFoundException('No active submitted proposal found for this job');
+    }
+
+    return this.withdrawProposal(principal, proposal.id);
   }
 }

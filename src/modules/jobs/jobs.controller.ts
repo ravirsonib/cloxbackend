@@ -159,4 +159,13 @@ export class JobsController {
   ) {
     return this.jobsService.acceptProposal(principal, id, proposalId);
   }
+
+  @Post(':id/cancel')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(AppRole.SENDER)
+  @ApiOperation({ summary: 'Cancel unawarded job → frees carrier assets and marks proposals EXPIRED' })
+  cancel(@CurrentPrincipal() principal: AuthenticatedPrincipal, @Param('id') id: string) {
+    return this.jobsService.cancelJob(principal, id);
+  }
 }

@@ -91,6 +91,9 @@ model AdminUser {
   companyInvites    CompanyInvite[] @relation("CompanyInviteInviter")
   prospects         Prospect[]      @relation("ProspectOwner")
   notifications     Notification[]
+  triagedDisputes   Dispute[]       @relation("DisputeTriagedBy")
+  assignedDisputes  Dispute[]       @relation("DisputeAssignedTo")
+  resolvedDisputes  Dispute[]       @relation("DisputeResolvedBy")
 
   @@index([companyId])
   @@index([status])
@@ -264,6 +267,7 @@ model Region {
   companies   Company[]        @relation("CompanyHomeRegion")
   jobsOrigin  Job[]            @relation("JobOriginRegion")
   complianceCases ComplianceCase[]
+  disputes    Dispute[]        @relation("DisputeRegion")
 }
 
 model LocalTerritory {
@@ -278,6 +282,7 @@ model LocalTerritory {
 
   scopes     AdminScope[]
   jobsOrigin Job[]        @relation("JobOriginTerritory")
+  disputes   Dispute[]    @relation("DisputeTerritory")
 
   @@unique([regionId, code])
   @@index([regionId])
@@ -316,6 +321,7 @@ model User {
   otpChallenges   OtpChallenge[]
   sessions        AuthSession[]
   notifications   Notification[]
+  disputesOpened  Dispute[]      @relation("DisputeOpenedBy")
 
   @@index([companyId])
   @@index([role, status])
@@ -442,6 +448,7 @@ model Company {
   tripExceptions      TripException[]
   companyInvites      CompanyInvite[]
   prospects           Prospect[]
+  disputes            Dispute[]            @relation("DisputeCompany")
 
   @@index([type, status])
   @@index([abn])
@@ -836,6 +843,7 @@ model Job {
   settlementLines SettlementLine[]
   surcharges    Surcharge[]
   tripExceptions TripException[]
+  disputes      Dispute[]        @relation("JobDisputes")
 
   @@index([senderCompanyId, status])
   @@index([originRegionId])
@@ -965,6 +973,7 @@ model Trip {
   stopProgress  TripStopProgress[]
   surcharges    Surcharge[]
   tripExceptions TripException[]
+  disputes      Dispute[]            @relation("TripDisputes")
 
   @@index([status])
 }
@@ -1009,6 +1018,8 @@ model PlatformSettings {
   carrierMarketplaceReleaseScoreDelta Int      @default(10)
   /// Days before carrier completed trip funds clear for bank payout (0 = instant)
   carrierClearingDays                 Int      @default(7)
+  /// Platform GST rate percentage (e.g. 10.0 for 10% GST)
+  gstPercent                          Float    @default(10.0)
   updatedAt                           DateTime @updatedAt
   createdAt                           DateTime @default(now())
 }
@@ -1121,6 +1132,7 @@ enum SurchargeStatus {
   PENDING_PAYMENT
   PAID
   WAIVED
+  DISPUTED
 }
 
 model Surcharge {
@@ -1147,8 +1159,106 @@ model Surcharge {
   createdAt         DateTime        @default(now())
   updatedAt         DateTime        @updatedAt
 
+  disputes          Dispute[]       @relation("SurchargeDisputes")
+
   @@index([jobId, status])
   @@index([tripId, kind, status])
+  @@index([status])
+}
+
+enum DisputeType {
+  WAITING_SURCHARGE
+  MASS_SURCHARGE
+  DAMAGE
+  CANCELLATION
+  GENERAL
+}
+
+enum DisputeStatus {
+  OPEN_TRIAGE
+  TRIAGED
+  ESCALATED_STATE
+  ESCALATED_SUPER
+  RESOLVED
+  REJECTED
+  CLOSED
+}
+
+enum DisputeRuling {
+  FAVOR_SENDER
+  FAVOR_CARRIER
+  SPLIT
+}
+
+enum DisputeFinancialAdjustment {
+  NONE
+  REFUND_SENDER
+  WAIVE_SURCHARGE
+  ADJUST_PAYOUT
+}
+
+model Dispute {
+  id                    String                      @id @default(uuid())
+  disputeNumber         String                      @unique
+  type                  DisputeType
+  status                DisputeStatus               @default(OPEN_TRIAGE)
+
+  jobId                 String
+  job                   Job                         @relation("JobDisputes", fields: [jobId], references: [id], onDelete: Cascade)
+  tripId                String?
+  trip                  Trip?                       @relation("TripDisputes", fields: [tripId], references: [id], onDelete: SetNull)
+  surchargeId           String?
+  surcharge             Surcharge?                  @relation("SurchargeDisputes", fields: [surchargeId], references: [id], onDelete: SetNull)
+
+  openedByUserId        String
+  openedByUser          User                        @relation("DisputeOpenedBy", fields: [openedByUserId], references: [id], onDelete: Restrict)
+  companyId             String
+  company               Company                     @relation("DisputeCompany", fields: [companyId], references: [id], onDelete: Restrict)
+
+  regionId              String?
+  region                Region?                     @relation("DisputeRegion", fields: [regionId], references: [id], onDelete: SetNull)
+  territoryId           String?
+  territory             LocalTerritory?             @relation("DisputeTerritory", fields: [territoryId], references: [id], onDelete: SetNull)
+
+  reason                String
+  description           String
+  disputedAmountCents   Int?
+  currency              String                      @default("AUD")
+  evidenceUrls          String[]                    @default([])
+
+  // Local BDE First-Line Triage Checklist (WF-OPS-002, OPS-LOC-DSP-02)
+  contactedSender       Boolean                     @default(false)
+  contactedCarrier      Boolean                     @default(false)
+  evidenceComplete      Boolean                     @default(false)
+  triageNotes           String?
+  triagedByAdminId      String?
+  triagedByAdmin        AdminUser?                  @relation("DisputeTriagedBy", fields: [triagedByAdminId], references: [id], onDelete: SetNull)
+  triagedAt             DateTime?
+
+  // Assigned to specific admin (Local BDE or State Master)
+  assignedAdminId       String?
+  assignedAdmin         AdminUser?                  @relation("DisputeAssignedTo", fields: [assignedAdminId], references: [id], onDelete: SetNull)
+
+  // Ruling & Adjudication (State Master / Super Admin)
+  ruling                DisputeRuling?
+  rulingNotes           String?
+  resolvedByAdminId     String?
+  resolvedByAdmin       AdminUser?                  @relation("DisputeResolvedBy", fields: [resolvedByAdminId], references: [id], onDelete: SetNull)
+  resolvedAt            DateTime?
+
+  // Financial Adjustment Hooks
+  financialAdjustment   DisputeFinancialAdjustment?
+  adjustmentAmountCents Int?
+
+  createdAt             DateTime                    @default(now())
+  updatedAt             DateTime                    @updatedAt
+
+  @@index([jobId])
+  @@index([tripId])
+  @@index([surchargeId])
+  @@index([companyId])
+  @@index([regionId, status])
+  @@index([territoryId, status])
   @@index([status])
 }
 

@@ -8,7 +8,7 @@ import {
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { randomBytes } from 'crypto';
+import { randomBytes, randomUUID } from 'crypto';
 import {
   AdminRole,
   AdminScopeType,
@@ -24,8 +24,13 @@ import {
 } from '@prisma/client';
 import {
   AuditAction,
+  type AddBdeCoachingNoteInput,
   type AdminAcceptInviteInput,
+  type BdeTeamListResponse,
+  type BdeTeamMemberDetail,
+  type BdeTeamMemberSummary,
   type InviteAdminInput,
+  type OpsDashboardStatsResponse,
   type PartnerOnboardingSubmitInput,
   type PartnerOnboardingUpdateInput,
   type ResendAdminInviteInput,
@@ -890,5 +895,628 @@ export class OpsService {
       },
     });
     return { id: version.id, key: version.key, version: version.version };
+  }
+
+  /**
+   * Scoped Dashboard Stats for Ops Roles:
+   * - State Master: Regional metrics (VIC/NSW/etc.), state active jobs, state carriers, 10% gross split.
+   * - Local BDE: Territory metrics, prospects in pipeline, stuck onboardings, 5% gross split.
+   * - Super Admin: National overview.
+   */
+  async getDashboardStats(actor: AuthenticatedPrincipal): Promise<OpsDashboardStatsResponse> {
+    this.ensureDatabase();
+
+    if (actor.role === AdminRole.STATE_MASTER) {
+      const regionCode = actor.regionCodes[0] || 'VIC';
+      const region = await this.prisma.region.findUnique({
+        where: { code: regionCode },
+      });
+
+      const regionId = region?.id;
+
+      const [
+        activeCarriers,
+        activeJobs,
+        openDisputes,
+        pendingCompliance,
+        revenueSum,
+        recentDisputes,
+        recentComplianceCases,
+        recentJobs,
+      ] = await Promise.all([
+        this.prisma.company.count({
+          where: {
+            type: CompanyType.CARRIER,
+            ...(regionId ? { homeRegionId: regionId } : {}),
+            status: { in: [CompanyStatus.ACTIVE, 'BID_ELIGIBLE' as any] },
+          },
+        }),
+        this.prisma.job.count({
+          where: {
+            ...(regionId ? { originRegionId: regionId } : {}),
+            status: { in: ['PUBLISHED', 'ASSIGNED', 'IN_TRANSIT'] as any },
+          },
+        }),
+        this.prisma.dispute.count({
+          where: {
+            ...(regionId ? { regionId } : {}),
+            status: { in: ['OPEN_TRIAGE', 'TRIAGED', 'ESCALATED_STATE'] as any },
+          },
+        }),
+        this.prisma.complianceCase.count({
+          where: {
+            ...(regionId ? { regionId } : {}),
+            status: { in: [ComplianceCaseStatus.OPEN, 'INFO_REQUESTED' as any] },
+          },
+        }),
+        this.prisma.settlementLine.aggregate({
+          where: {
+            OR: [
+              { adminUserId: actor.id },
+              regionId ? { regionId, recipientType: 'STATE_MASTER' } : null,
+            ].filter(Boolean) as any,
+          },
+          _sum: { amountCents: true },
+        }),
+        this.prisma.dispute.findMany({
+          where: { ...(regionId ? { regionId } : {}) },
+          take: 5,
+          orderBy: { createdAt: 'desc' },
+          include: { company: { select: { legalName: true } } },
+        }),
+        this.prisma.complianceCase.findMany({
+          where: { ...(regionId ? { regionId } : {}) },
+          take: 5,
+          orderBy: { createdAt: 'desc' },
+          include: { company: { select: { legalName: true } } },
+        }),
+        this.prisma.job.findMany({
+          where: { ...(regionId ? { originRegionId: regionId } : {}) },
+          take: 5,
+          orderBy: { createdAt: 'desc' },
+          include: { stops: { orderBy: { sequence: 'asc' } } },
+        }),
+      ]);
+
+      return {
+        role: actor.role as any,
+        scope: {
+          type: 'STATE',
+          regionCode: region?.code,
+          regionName: region?.name,
+        },
+        kpis: {
+          activeCarriers,
+          activeJobs,
+          openDisputes,
+          pendingCompliance,
+          accruedRevenueCents: revenueSum._sum.amountCents || 0,
+        },
+        recentDisputes: recentDisputes.map((d: any) => ({
+          id: d.id,
+          disputeNumber: d.disputeNumber,
+          type: d.type,
+          status: d.status,
+          reason: d.reason,
+          disputedAmountCents: d.disputedAmountCents,
+          companyName: d.company.legalName,
+          createdAt: d.createdAt.toISOString(),
+        })),
+        recentComplianceCases: recentComplianceCases.map((c: any) => ({
+          id: c.id,
+          caseType: c.caseType,
+          status: c.status,
+          companyName: c.company.legalName,
+          createdAt: c.createdAt.toISOString(),
+        })),
+        recentJobs: recentJobs.map((j: any) => ({
+          id: j.id,
+          title: j.title,
+          status: j.status,
+          pickupSuburb: j.stops.find((s: any) => s.stopType === 'PICKUP')?.suburb || null,
+          dropoffSuburb: j.stops.find((s: any) => s.stopType === 'DROPOFF')?.suburb || null,
+          createdAt: j.createdAt.toISOString(),
+        })),
+      };
+    }
+
+    if (actor.role === AdminRole.LOCAL_BDE) {
+      const territoryCode = actor.territoryCodes[0];
+      const territory = territoryCode
+        ? await this.prisma.localTerritory.findFirst({
+            where: { code: territoryCode },
+            include: { region: true },
+          })
+        : null;
+
+      const territoryId = territory?.id;
+
+      const [
+        prospectsInPipeline,
+        onboardingStuck,
+        activeJobs,
+        firstLineDisputes,
+        revenueSum,
+        recentDisputes,
+        stuckCompanies,
+      ] = await Promise.all([
+        this.prisma.prospect.count({
+          where: {
+            ownerAdminUserId: actor.id,
+            stage: { in: ['LEAD', 'CONTACTED', 'INVITED', 'ONBOARDING'] as any },
+          },
+        }),
+        this.prisma.company.count({
+          where: {
+            referredByAdminUserId: actor.id,
+            status: { in: [CompanyStatus.DRAFT, 'PENDING_VERIFICATION' as any, 'PENDING_DOCS' as any, 'INFO_REQUESTED' as any] },
+          },
+        }),
+        this.prisma.job.count({
+          where: {
+            ...(territoryId ? { originTerritoryId: territoryId } : {}),
+            status: { in: ['PUBLISHED', 'ASSIGNED', 'IN_TRANSIT'] as any },
+          },
+        }),
+        this.prisma.dispute.count({
+          where: {
+            ...(territoryId ? { territoryId } : {}),
+            status: 'OPEN_TRIAGE' as any,
+          },
+        }),
+        this.prisma.settlementLine.aggregate({
+          where: {
+            OR: [
+              { adminUserId: actor.id },
+              territoryId ? { territoryId, recipientType: 'LOCAL_BDE' } : null,
+            ].filter(Boolean) as any,
+          },
+          _sum: { amountCents: true },
+        }),
+        this.prisma.dispute.findMany({
+          where: {
+            ...(territoryId ? { territoryId } : {}),
+            status: 'OPEN_TRIAGE' as any,
+          },
+          take: 5,
+          orderBy: { createdAt: 'desc' },
+          include: { company: { select: { legalName: true } } },
+        }),
+        this.prisma.company.findMany({
+          where: {
+            referredByAdminUserId: actor.id,
+            status: { in: [CompanyStatus.DRAFT, 'PENDING_VERIFICATION' as any, 'PENDING_DOCS' as any, 'INFO_REQUESTED' as any] },
+          },
+          take: 5,
+          orderBy: { updatedAt: 'desc' },
+        }),
+      ]);
+
+      const tasks: any[] = [];
+      recentDisputes.forEach((d: any) => {
+        tasks.push({
+          id: `task-disp-${d.id}`,
+          kind: 'DISPUTE_TRIAGE',
+          title: `Triage Dispute ${d.disputeNumber} (${d.reason})`,
+          description: `Disputed by ${d.company.legalName}. Verify site geofence and call both parties.`,
+          href: `/ops/disputes/${d.id}`,
+          dueText: 'Immediate',
+        });
+      });
+      stuckCompanies.forEach((c: any) => {
+        tasks.push({
+          id: `task-comp-${c.id}`,
+          kind: 'ONBOARDING_STUCK',
+          title: `Assist ${c.legalName} (${c.type})`,
+          description: `Stuck at ${c.status}. Assist with Australian compliance document upload.`,
+          href: `/companies/${c.id}`,
+          dueText: 'Follow Up',
+        });
+      });
+
+      return {
+        role: actor.role as any,
+        scope: {
+          type: 'TERRITORY',
+          territoryCode: territory?.code,
+          territoryName: territory?.name,
+          regionCode: territory?.region?.code,
+        },
+        kpis: {
+          activeCarriers: 0,
+          activeJobs,
+          openDisputes: firstLineDisputes,
+          firstLineDisputes,
+          prospectsInPipeline,
+          onboardingStuck,
+          accruedRevenueCents: revenueSum._sum.amountCents || 0,
+        },
+        recentDisputes: recentDisputes.map((d: any) => ({
+          id: d.id,
+          disputeNumber: d.disputeNumber,
+          type: d.type,
+          status: d.status,
+          reason: d.reason,
+          disputedAmountCents: d.disputedAmountCents,
+          companyName: d.company.legalName,
+          createdAt: d.createdAt.toISOString(),
+        })),
+        tasks,
+      };
+    }
+
+    // Default National for Super Admin
+    const [activeCarriers, activeJobs, openDisputes, revenueSum, recentDisputes] =
+      await Promise.all([
+        this.prisma.company.count({
+          where: {
+            type: CompanyType.CARRIER,
+            status: { in: [CompanyStatus.ACTIVE, 'BID_ELIGIBLE' as any] },
+          },
+        }),
+        this.prisma.job.count({
+          where: { status: { in: ['PUBLISHED', 'ASSIGNED', 'IN_TRANSIT'] as any } },
+        }),
+        this.prisma.dispute.count({
+          where: { status: { in: ['OPEN_TRIAGE', 'TRIAGED', 'ESCALATED_STATE', 'ESCALATED_SUPER'] as any } },
+        }),
+        this.prisma.settlementLine.aggregate({
+          where: { recipientType: 'SUPER_ADMIN' },
+          _sum: { amountCents: true },
+        }),
+        this.prisma.dispute.findMany({
+          take: 5,
+          orderBy: { createdAt: 'desc' },
+          include: { company: { select: { legalName: true } } },
+        }),
+      ]);
+
+    return {
+      role: actor.role as any,
+      scope: { type: 'NATIONAL' },
+      kpis: {
+        activeCarriers,
+        activeJobs,
+        openDisputes,
+        accruedRevenueCents: revenueSum._sum.amountCents || 0,
+      },
+      recentDisputes: recentDisputes.map((d: any) => ({
+        id: d.id,
+        disputeNumber: d.disputeNumber,
+        type: d.type,
+        status: d.status,
+        reason: d.reason,
+        disputedAmountCents: d.disputedAmountCents,
+        companyName: d.company.legalName,
+        createdAt: d.createdAt.toISOString(),
+      })),
+    };
+  }
+
+  /**
+   * OPS-STA-TEAM-01: List Local BDE field team for State Master or Super Admin
+   */
+  async listBdeTeam(actor: AuthenticatedPrincipal): Promise<BdeTeamListResponse> {
+    this.ensureDatabase();
+    if (actor.kind !== 'admin') {
+      throw new ForbiddenException('Admin required');
+    }
+    if (actor.role !== AdminRole.SUPER_ADMIN && actor.role !== AdminRole.STATE_MASTER) {
+      throw new ForbiddenException('Super Admin or State Master required');
+    }
+
+    let regionCode = actor.regionCodes?.[0];
+    if (actor.role === AdminRole.SUPER_ADMIN && !regionCode) {
+      const firstRegion = await this.prisma.region.findFirst({ orderBy: { code: 'asc' } });
+      regionCode = firstRegion?.code ?? 'VIC';
+    }
+    if (!regionCode) {
+      throw new BadRequestException('State Master has no assigned region');
+    }
+
+    const region = await this.prisma.region.findUnique({
+      where: { code: regionCode },
+    });
+    const regionName = region?.name ?? regionCode;
+
+    const bdeAdmins = await this.prisma.adminUser.findMany({
+      where: {
+        role: AdminRole.LOCAL_BDE,
+        scopes: {
+          some: {
+            OR: [
+              { region: { code: regionCode } },
+              { localTerritory: { region: { code: regionCode } } },
+            ],
+          },
+        },
+      },
+      include: {
+        scopes: {
+          include: {
+            localTerritory: { include: { region: true } },
+            region: true,
+          },
+        },
+        prospects: {
+          select: { id: true, stage: true },
+        },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
+
+    const members: BdeTeamMemberSummary[] = await Promise.all(
+      bdeAdmins.map(async (bde) => {
+        const territoryScope = bde.scopes.find((s) => s.localTerritoryId != null);
+        const localTerritory = territoryScope?.localTerritory;
+        const territoryId = localTerritory?.id ?? null;
+        const territoryCode = localTerritory?.code ?? null;
+        const territoryName = localTerritory?.name ?? territoryCode ?? null;
+
+        const [openDisputesCount, overdueDisputesCount] = territoryId
+          ? await Promise.all([
+              this.prisma.dispute.count({
+                where: {
+                  territoryId,
+                  status: 'OPEN_TRIAGE' as any,
+                },
+              }),
+              this.prisma.dispute.count({
+                where: {
+                  territoryId,
+                  status: 'OPEN_TRIAGE' as any,
+                  createdAt: { lt: oneDayAgo },
+                },
+              }),
+            ])
+          : [0, 0];
+
+        const pipelineCount = bde.prospects.length;
+        const openTasksCount = openDisputesCount + bde.prospects.filter((p) => p.stage === 'LEAD').length;
+        const overdueTasksCount = overdueDisputesCount;
+
+        let slaStatus: 'GOOD' | 'WARNING' | 'BREACHED' = 'GOOD';
+        if (overdueTasksCount > 0) {
+          slaStatus = 'BREACHED';
+        } else if (openTasksCount > 3) {
+          slaStatus = 'WARNING';
+        }
+
+        const revenue = await this.prisma.settlementLine.aggregate({
+          where: {
+            adminUserId: bde.id,
+          },
+          _sum: { amountCents: true },
+        });
+
+        return {
+          id: bde.id,
+          name: bde.name,
+          email: bde.email,
+          phone: bde.phone,
+          status: bde.status,
+          active: bde.active,
+          regionCode: regionCode!,
+          territoryCode,
+          territoryName,
+          openTasksCount,
+          overdueTasksCount,
+          pipelineCount,
+          slaStatus,
+          accruedRevenueCents: revenue._sum?.amountCents || 0,
+        };
+      }),
+    );
+
+    return {
+      regionCode,
+      regionName,
+      members,
+    };
+  }
+
+  /**
+   * OPS-STA-TEAM-02: Get Local BDE detail view with triage disputes, pipeline & coaching notes
+   */
+  async getBdeTeamMember(actor: AuthenticatedPrincipal, bdeId: string): Promise<BdeTeamMemberDetail> {
+    this.ensureDatabase();
+    if (actor.kind !== 'admin') {
+      throw new ForbiddenException('Admin required');
+    }
+    if (actor.role !== AdminRole.SUPER_ADMIN && actor.role !== AdminRole.STATE_MASTER) {
+      throw new ForbiddenException('Super Admin or State Master required');
+    }
+
+    const bde = await this.prisma.adminUser.findUnique({
+      where: { id: bdeId },
+      include: {
+        scopes: {
+          include: {
+            localTerritory: { include: { region: true } },
+            region: true,
+          },
+        },
+        company: {
+          select: { legalName: true },
+        },
+        prospects: {
+          orderBy: { createdAt: 'desc' },
+          take: 20,
+        },
+      },
+    });
+
+    if (!bde || bde.role !== AdminRole.LOCAL_BDE) {
+      throw new NotFoundException('Local BDE not found');
+    }
+
+    const territoryScope = bde.scopes.find((s) => s.localTerritoryId != null);
+    const localTerritory = territoryScope?.localTerritory;
+    const territoryId = localTerritory?.id ?? null;
+    const territoryCode = localTerritory?.code ?? null;
+    const territoryName = localTerritory?.name ?? territoryCode ?? null;
+    const regionCode = territoryScope?.region?.code ?? localTerritory?.region?.code ?? 'VIC';
+
+    if (actor.role === AdminRole.STATE_MASTER && actor.regionCodes?.[0] !== regionCode) {
+      throw new ForbiddenException('Cross-region access prohibited');
+    }
+
+    const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
+
+    const recentDisputesRaw = territoryId
+      ? await this.prisma.dispute.findMany({
+          where: { territoryId },
+          orderBy: { createdAt: 'desc' },
+          take: 20,
+        })
+      : [];
+
+    const openDisputesCount = recentDisputesRaw.filter((d) => d.status === ('OPEN_TRIAGE' as any)).length;
+    const overdueDisputesCount = recentDisputesRaw.filter(
+      (d) => d.status === ('OPEN_TRIAGE' as any) && d.createdAt < oneDayAgo,
+    ).length;
+
+    const pipelineCount = bde.prospects.length;
+    const openTasksCount = openDisputesCount + bde.prospects.filter((p) => p.stage === 'LEAD').length;
+    const overdueTasksCount = overdueDisputesCount;
+
+    let slaStatus: 'GOOD' | 'WARNING' | 'BREACHED' = 'GOOD';
+    if (overdueDisputesCount > 0) {
+      slaStatus = 'BREACHED';
+    } else if (openTasksCount > 3) {
+      slaStatus = 'WARNING';
+    }
+
+    const revenue = await this.prisma.settlementLine.aggregate({
+      where: {
+        adminUserId: bde.id,
+      },
+      _sum: { amountCents: true },
+    });
+
+    const profile = (bde.profileJson ?? {}) as {
+      coachingNotes?: Array<{
+        id: string;
+        authorId: string;
+        authorName: string;
+        text: string;
+        createdAt: string;
+      }>;
+    };
+
+    return {
+      id: bde.id,
+      name: bde.name,
+      email: bde.email,
+      phone: bde.phone,
+      status: bde.status,
+      active: bde.active,
+      regionCode,
+      territoryCode,
+      territoryName,
+      openTasksCount,
+      overdueTasksCount,
+      pipelineCount,
+      slaStatus,
+      accruedRevenueCents: revenue._sum?.amountCents || 0,
+      createdAt: bde.createdAt.toISOString(),
+      companyName: bde.company?.legalName ?? null,
+      prospects: bde.prospects.map((p) => ({
+        id: p.id,
+        legalName: p.legalName,
+        companyType: p.companyType,
+        stage: p.stage,
+        contactName: p.contactName,
+        email: p.email,
+        phone: p.phone,
+        createdAt: p.createdAt.toISOString(),
+      })),
+      recentDisputes: recentDisputesRaw.map((d) => ({
+        id: d.id,
+        disputeNumber: d.disputeNumber,
+        type: d.type,
+        status: d.status,
+        reason: d.reason,
+        disputedAmountCents: d.disputedAmountCents,
+        createdAt: d.createdAt.toISOString(),
+        isOverdue: d.status === ('OPEN_TRIAGE' as any) && d.createdAt < oneDayAgo,
+      })),
+      coachingNotes: profile.coachingNotes ?? [],
+    };
+  }
+
+  /**
+   * Add a coaching note on a Local BDE
+   */
+  async addBdeCoachingNote(
+    actor: AuthenticatedPrincipal,
+    bdeId: string,
+    input: AddBdeCoachingNoteInput,
+  ): Promise<BdeTeamMemberDetail> {
+    this.ensureDatabase();
+    if (actor.kind !== 'admin') {
+      throw new ForbiddenException('Admin required');
+    }
+    if (actor.role !== AdminRole.SUPER_ADMIN && actor.role !== AdminRole.STATE_MASTER) {
+      throw new ForbiddenException('Super Admin or State Master required');
+    }
+
+    const bde = await this.prisma.adminUser.findUnique({
+      where: { id: bdeId },
+      include: {
+        scopes: {
+          include: {
+            localTerritory: { include: { region: true } },
+            region: true,
+          },
+        },
+      },
+    });
+
+    if (!bde || bde.role !== AdminRole.LOCAL_BDE) {
+      throw new NotFoundException('Local BDE not found');
+    }
+
+    const territoryScope = bde.scopes.find((s) => s.localTerritoryId != null);
+    const regionCode = territoryScope?.region?.code ?? territoryScope?.localTerritory?.region?.code ?? 'VIC';
+
+    if (actor.role === AdminRole.STATE_MASTER && actor.regionCodes?.[0] !== regionCode) {
+      throw new ForbiddenException('Cross-region access prohibited');
+    }
+
+    const prevProfile = (bde.profileJson ?? {}) as Record<string, any>;
+    const prevNotes = Array.isArray(prevProfile.coachingNotes) ? prevProfile.coachingNotes : [];
+
+    const newNote = {
+      id: randomUUID(),
+      authorId: actor.id,
+      authorName: actor.email,
+      text: input.text,
+      createdAt: new Date().toISOString(),
+    };
+
+    const nextProfile = {
+      ...prevProfile,
+      coachingNotes: [newNote, ...prevNotes],
+    };
+
+    await this.prisma.adminUser.update({
+      where: { id: bdeId },
+      data: {
+        profileJson: nextProfile,
+      },
+    });
+
+    await this.audit.recordPlatform({
+      action: AuditAction.ADMIN_COACHING_NOTE_ADDED,
+      actorAdminId: actor.id,
+      entityType: 'AdminUser',
+      entityId: bde.id,
+      metadata: { noteId: newNote.id },
+    });
+
+    return this.getBdeTeamMember(actor, bdeId);
   }
 }

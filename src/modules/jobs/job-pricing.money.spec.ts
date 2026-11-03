@@ -8,6 +8,16 @@ describe('job-pricing money helpers', () => {
     expect(s.amountIncGstCents).toBe(11000);
   });
 
+  it('gstSplitFromIncCents supports custom GST rates', () => {
+    const s15 = gstSplitFromIncCents(11500, 15);
+    expect(s15.amountGstCents).toBe(1500);
+    expect(s15.amountExGstCents).toBe(10000);
+
+    const s0 = gstSplitFromIncCents(10000, 0);
+    expect(s0.amountGstCents).toBe(0);
+    expect(s0.amountExGstCents).toBe(10000);
+  });
+
   it('carrierNetPayoutCents is 70%', () => {
     expect(carrierNetPayoutCents(10000)).toBe(7000);
   });

@@ -99,6 +99,7 @@ export const AuditAction = {
   ADMIN_PARTNER_SUBMITTED: 'admin.partner_submitted',
   ADMIN_PARTNER_ACTIVATED: 'admin.partner_activated',
   ADMIN_SCOPE_CHANGED: 'admin.scope_changed',
+  ADMIN_COACHING_NOTE_ADDED: 'admin.coaching_note_added',
   DOC_UPLOAD_INTENT: 'document.upload_intent',
   DOC_UPLOADED: 'document.uploaded',
   DOC_CONFIRMED: 'document.confirmed',
@@ -151,6 +152,7 @@ export const AuditAction = {
   JOB_DELETED: 'job.deleted',
   JOB_CANCELLED: 'job.cancelled',
   PROPOSAL_SUBMITTED: 'proposal.submitted',
+  PROPOSAL_WITHDRAWN: 'proposal.withdrawn',
   PROPOSAL_ACCEPTED: 'proposal.accepted',
   PROPOSAL_EXPIRED_CONFLICT: 'proposal.expired_conflict',
   PAYMENT_INTENT_CREATED: 'payment.intent_created',
@@ -205,6 +207,12 @@ export const AuditAction = {
   SURCHARGE_PAID: 'surcharge.paid',
   SURCHARGE_WAIVED: 'surcharge.waived',
   PUSH_STUB: 'notify.push_stub',
+  DISPUTE_OPENED: 'dispute.opened',
+  DISPUTE_TRIAGED: 'dispute.triaged',
+  DISPUTE_ESCALATED: 'dispute.escalated',
+  DISPUTE_ASSIGNED: 'dispute.assigned',
+  DISPUTE_RESOLVED: 'dispute.resolved',
+  DISPUTE_CLOSED_LOCAL: 'dispute.closed_local',
 } as const;
 
 export type AuditAction = (typeof AuditAction)[keyof typeof AuditAction];
@@ -799,6 +807,8 @@ export type ComplianceCaseListQuery = z.infer<typeof complianceCaseListQuerySche
 
 export const complianceDecisionSchema = z.object({
   note: z.string().trim().max(2000).optional(),
+  driverId: z.string().uuid().optional(),
+  vehicleId: z.string().uuid().optional(),
 });
 
 export type ComplianceDecisionInput = z.infer<typeof complianceDecisionSchema>;
@@ -1632,6 +1642,7 @@ export const platformSettingsPatchSchema = z.object({
   driverUnavailableScoreDelta: z.number().int().min(0).max(50).optional(),
   carrierMarketplaceReleaseScoreDelta: z.number().int().min(0).max(50).optional(),
   carrierClearingDays: z.number().int().min(0).max(90).optional(),
+  gstPercent: z.number().min(0).max(100).optional(),
 });
 
 export type PlatformSettingsPatchInput = z.infer<typeof platformSettingsPatchSchema>;
@@ -1854,5 +1865,240 @@ export const updateRegionEnabledSchema = z.object({
   enabled: z.boolean(),
 });
 export type UpdateRegionEnabledInput = z.infer<typeof updateRegionEnabledSchema>;
+
+// ─── M11 Disputes (WF-OPS-002) ───────────────────────────────────────────────
+
+export const DisputeType = {
+  WAITING_SURCHARGE: 'WAITING_SURCHARGE',
+  MASS_SURCHARGE: 'MASS_SURCHARGE',
+  DAMAGE: 'DAMAGE',
+  CANCELLATION: 'CANCELLATION',
+  GENERAL: 'GENERAL',
+} as const;
+export type DisputeType = (typeof DisputeType)[keyof typeof DisputeType];
+
+export const DisputeStatus = {
+  OPEN_TRIAGE: 'OPEN_TRIAGE',
+  TRIAGED: 'TRIAGED',
+  ESCALATED_STATE: 'ESCALATED_STATE',
+  ESCALATED_SUPER: 'ESCALATED_SUPER',
+  RESOLVED: 'RESOLVED',
+  REJECTED: 'REJECTED',
+  CLOSED: 'CLOSED',
+} as const;
+export type DisputeStatus = (typeof DisputeStatus)[keyof typeof DisputeStatus];
+
+export const DisputeRuling = {
+  FAVOR_SENDER: 'FAVOR_SENDER',
+  FAVOR_CARRIER: 'FAVOR_CARRIER',
+  SPLIT: 'SPLIT',
+} as const;
+export type DisputeRuling = (typeof DisputeRuling)[keyof typeof DisputeRuling];
+
+export const DisputeFinancialAdjustment = {
+  NONE: 'NONE',
+  REFUND_SENDER: 'REFUND_SENDER',
+  WAIVE_SURCHARGE: 'WAIVE_SURCHARGE',
+  ADJUST_PAYOUT: 'ADJUST_PAYOUT',
+} as const;
+export type DisputeFinancialAdjustment =
+  (typeof DisputeFinancialAdjustment)[keyof typeof DisputeFinancialAdjustment];
+
+export const createDisputeSchema = z.object({
+  jobId: z.string().uuid(),
+  tripId: z.string().uuid().optional(),
+  surchargeId: z.string().uuid().optional(),
+  type: z.enum([
+    'WAITING_SURCHARGE',
+    'MASS_SURCHARGE',
+    'DAMAGE',
+    'CANCELLATION',
+    'GENERAL',
+  ]),
+  reason: z.string().trim().min(3).max(120),
+  description: z.string().trim().min(5).max(3000),
+  disputedAmountCents: z.number().int().nonnegative().optional(),
+  evidenceUrls: z.array(z.string().trim().min(1)).default([]),
+});
+export type CreateDisputeInput = z.infer<typeof createDisputeSchema>;
+
+export const triageDisputeSchema = z.object({
+  contactedSender: z.boolean().optional(),
+  contactedCarrier: z.boolean().optional(),
+  evidenceComplete: z.boolean().optional(),
+  triageNotes: z.string().trim().max(3000).optional(),
+});
+export type TriageDisputeInput = z.infer<typeof triageDisputeSchema>;
+
+export const escalateDisputeSchema = z.object({
+  target: z.enum(['STATE', 'SUPER']),
+  notes: z.string().trim().max(3000).optional(),
+});
+export type EscalateDisputeInput = z.infer<typeof escalateDisputeSchema>;
+
+export const assignDisputeSchema = z.object({
+  adminUserId: z.string().uuid(),
+});
+export type AssignDisputeInput = z.infer<typeof assignDisputeSchema>;
+
+export const resolveDisputeSchema = z.object({
+  ruling: z.enum(['FAVOR_SENDER', 'FAVOR_CARRIER', 'SPLIT']),
+  rulingNotes: z.string().trim().min(3).max(3000),
+  financialAdjustment: z
+    .enum(['NONE', 'REFUND_SENDER', 'WAIVE_SURCHARGE', 'ADJUST_PAYOUT'])
+    .default('NONE'),
+  adjustmentAmountCents: z.number().int().nonnegative().optional(),
+});
+export type ResolveDisputeInput = z.infer<typeof resolveDisputeSchema>;
+
+export const closeLocalDisputeSchema = z.object({
+  notes: z.string().trim().max(3000).optional(),
+});
+export type CloseLocalDisputeInput = z.infer<typeof closeLocalDisputeSchema>;
+
+export const listDisputesQuerySchema = z.object({
+  status: z
+    .enum([
+      'OPEN_TRIAGE',
+      'TRIAGED',
+      'ESCALATED_STATE',
+      'ESCALATED_SUPER',
+      'RESOLVED',
+      'REJECTED',
+      'CLOSED',
+    ])
+    .optional(),
+  type: z
+    .enum([
+      'WAITING_SURCHARGE',
+      'MASS_SURCHARGE',
+      'DAMAGE',
+      'CANCELLATION',
+      'GENERAL',
+    ])
+    .optional(),
+  regionId: z.string().uuid().optional(),
+  territoryId: z.string().uuid().optional(),
+  q: z.string().trim().max(120).optional(),
+  page: z.coerce.number().int().min(1).default(1),
+  pageSize: z.coerce.number().int().min(1).max(50).default(20),
+});
+export type ListDisputesQuery = z.infer<typeof listDisputesQuerySchema>;
+
+export type OpsDashboardStatsResponse = {
+  role: AdminRole;
+  scope: {
+    type: 'NATIONAL' | 'STATE' | 'TERRITORY';
+    regionCode?: string;
+    regionName?: string;
+    territoryCode?: string;
+    territoryName?: string;
+  };
+  kpis: {
+    activeCarriers: number;
+    activeJobs: number;
+    openDisputes: number;
+    accruedRevenueCents: number;
+    pendingCompliance?: number;
+    prospectsInPipeline?: number;
+    onboardingStuck?: number;
+    firstLineDisputes?: number;
+  };
+  recentDisputes: Array<{
+    id: string;
+    disputeNumber: string;
+    type: string;
+    status: string;
+    reason: string;
+    disputedAmountCents: number | null;
+    companyName: string;
+    createdAt: string;
+  }>;
+  recentComplianceCases?: Array<{
+    id: string;
+    caseType: string;
+    status: string;
+    companyName: string;
+    createdAt: string;
+  }>;
+  recentJobs?: Array<{
+    id: string;
+    title: string | null;
+    status: string;
+    pickupSuburb: string | null;
+    dropoffSuburb: string | null;
+    createdAt: string;
+  }>;
+  tasks?: Array<{
+    id: string;
+    kind: 'DISPUTE_TRIAGE' | 'PROSPECT_FOLLOWUP' | 'ONBOARDING_STUCK';
+    title: string;
+    description: string;
+    href: string;
+    dueText: string;
+  }>;
+};
+
+export const addBdeCoachingNoteSchema = z.object({
+  text: z.string().trim().min(3).max(2000),
+});
+export type AddBdeCoachingNoteInput = z.infer<typeof addBdeCoachingNoteSchema>;
+
+export type BdeTeamMemberSummary = {
+  id: string;
+  name: string | null;
+  email: string;
+  phone: string | null;
+  status: string;
+  active: boolean;
+  regionCode: string;
+  territoryCode: string | null;
+  territoryName: string | null;
+  openTasksCount: number;
+  overdueTasksCount: number;
+  pipelineCount: number;
+  slaStatus: 'GOOD' | 'WARNING' | 'BREACHED';
+  accruedRevenueCents: number;
+};
+
+export type BdeTeamListResponse = {
+  regionCode: string;
+  regionName: string;
+  members: BdeTeamMemberSummary[];
+};
+
+export type BdeTeamMemberDetail = BdeTeamMemberSummary & {
+  createdAt: string;
+  companyName: string | null;
+  prospects: Array<{
+    id: string;
+    legalName: string;
+    companyType: string;
+    stage: string;
+    contactName: string | null;
+    email: string | null;
+    phone: string | null;
+    createdAt: string;
+  }>;
+  recentDisputes: Array<{
+    id: string;
+    disputeNumber: string;
+    type: string;
+    status: string;
+    reason: string;
+    disputedAmountCents: number | null;
+    createdAt: string;
+    isOverdue: boolean;
+  }>;
+  coachingNotes: Array<{
+    id: string;
+    authorId: string;
+    authorName: string;
+    text: string;
+    createdAt: string;
+  }>;
+};
+
+
 
 

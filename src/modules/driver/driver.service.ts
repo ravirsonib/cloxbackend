@@ -384,7 +384,8 @@ export class DriverService {
     });
     const needsSuperReview =
       company?.type === CompanyType.CARRIER &&
-      company.status === CompanyStatus.BID_ELIGIBLE;
+      (company.status === CompanyStatus.BID_ELIGIBLE ||
+        company.status === CompanyStatus.ACTIVE);
     const nextStatus = needsSuperReview
       ? DriverStatus.PENDING_REVIEW
       : DriverStatus.ACTIVE;
@@ -516,6 +517,7 @@ export class DriverService {
       data: {
         caseId: reviewCase.id,
         status: ComplianceDocStatus.UNDER_REVIEW,
+        driverId,
       },
     });
 

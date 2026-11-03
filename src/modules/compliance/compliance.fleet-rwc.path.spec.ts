@@ -198,6 +198,79 @@ describe('ComplianceService CARRIER_FLEET_RWC + CARRIER_DRIVER_LICENCE', () => {
     });
   });
 
+  it('approve single driver in CARRIER_DRIVER_LICENCE activates only that driver and keeps case OPEN if others unreviewed', async () => {
+    const txDriver = { updateMany: jest.fn() };
+    const txComplianceDoc = {
+      updateMany: jest.fn(),
+      count: jest.fn().mockResolvedValue(1), // 1 unreviewed document still remains!
+    };
+    const txComplianceCase = { update: jest.fn() };
+    const prisma = {
+      isConnected: () => true,
+      complianceCase: {
+        findUnique: jest.fn().mockResolvedValue({
+          id: 'case-multi-drv',
+          status: ComplianceCaseStatus.OPEN,
+          caseType: ComplianceCaseType.CARRIER_DRIVER_LICENCE,
+          companyId: 'co-c',
+          region: { code: 'VIC' },
+          company: {
+            id: 'co-c',
+            type: CompanyType.CARRIER,
+            status: CompanyStatus.ACTIVE,
+            email: 'c@yopmail.com',
+            legalName: 'Carrier',
+            homeRegion: { code: 'VIC' },
+            referredByAdminUserId: null,
+          },
+          documents: [
+            { id: 'lic-1', driverId: 'drv-1' },
+            { id: 'lic-2', driverId: 'drv-2' },
+          ],
+        }),
+        update: jest.fn(),
+      },
+      complianceDocument: { updateMany: jest.fn() },
+      company: { update: jest.fn() },
+      $transaction: jest.fn().mockImplementation(async (fn: (tx: unknown) => unknown) => {
+        const tx = {
+          complianceCase: txComplianceCase,
+          complianceDocument: txComplianceDoc,
+          vehicle: { updateMany: jest.fn() },
+          driver: txDriver,
+        };
+        return fn(tx);
+      }),
+    };
+
+    const result = await makeService(prisma).approve(superAdmin, 'case-multi-drv', {
+      note: 'driver 1 approved',
+      driverId: 'drv-1',
+    });
+
+    expect(result).toEqual({
+      id: 'case-multi-drv',
+      status: ComplianceCaseStatus.OPEN, // Case remains OPEN because drv-2 is not yet reviewed!
+      companyStatus: CompanyStatus.ACTIVE,
+    });
+    // Only drv-1's document was updated
+    expect(txComplianceDoc.updateMany).toHaveBeenCalledWith({
+      where: { caseId: 'case-multi-drv', driverId: 'drv-1' },
+      data: expect.objectContaining({ status: ComplianceDocStatus.APPROVED }),
+    });
+    // Only drv-1 was activated
+    expect(txDriver.updateMany).toHaveBeenCalledWith({
+      where: {
+        id: { in: ['drv-1'] },
+        companyId: 'co-c',
+        status: DriverStatus.PENDING_REVIEW,
+      },
+      data: { status: DriverStatus.ACTIVE },
+    });
+    // Case itself was not updated to APPROVED
+    expect(txComplianceCase.update).not.toHaveBeenCalled();
+  });
+
   it('State Master cannot approve CARRIER_DRIVER_LICENCE', async () => {
     const prisma = {
       isConnected: () => true,

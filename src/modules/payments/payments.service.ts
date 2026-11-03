@@ -210,9 +210,9 @@ export class PaymentsService {
       },
     });
     if (!job) throw new NotFoundException('Job not found');
-    if (job.assignment) {
+    if (job.assignment && job.assignment.status !== AssignmentStatus.CANCELLED) {
       throw new ConflictException({
-        message: 'Job already has an assignment',
+        message: 'Job already has an active assignment',
         code: 'JOB_ALREADY_ASSIGNED',
       });
     }
@@ -230,14 +230,16 @@ export class PaymentsService {
     const amountGst = proposal.amountGstCents;
 
     // Marketplace rescue re-list: fare already captured — do not charge sender again.
-    const priorCharge = await this.prisma.paymentEvent.findFirst({
-      where: {
-        jobId: job.id,
-        type: PaymentEventType.CHARGE,
-        status: PaymentEventStatus.SUCCEEDED,
-      },
-      orderBy: { createdAt: 'desc' },
-    });
+    const priorCharge = this.prisma.paymentEvent.findFirst
+      ? await this.prisma.paymentEvent.findFirst({
+          where: {
+            jobId: job.id,
+            type: PaymentEventType.CHARGE,
+            status: PaymentEventStatus.SUCCEEDED,
+          },
+          orderBy: { createdAt: 'desc' },
+        })
+      : null;
     if (priorCharge?.stripePaymentIntentId) {
       return this.acceptWithPriorCharge({
         userId: user.id,
@@ -249,16 +251,28 @@ export class PaymentsService {
     }
 
     const created = await this.prisma.$transaction(async (tx) => {
-      const assignment = await tx.assignment.create({
-        data: {
-          jobId: job.id,
-          proposalId: proposal.id,
-          carrierCompanyId: proposal.carrierCompanyId,
-          vehicleId: proposal.vehicleId,
-          driverId: proposal.driverId,
-          status: AssignmentStatus.PENDING,
-        },
-      });
+      const assignment = job.assignment
+        ? await tx.assignment.update({
+            where: { id: job.assignment.id },
+            data: {
+              proposalId: proposal.id,
+              carrierCompanyId: proposal.carrierCompanyId,
+              vehicleId: proposal.vehicleId,
+              driverId: proposal.driverId,
+              status: AssignmentStatus.PENDING,
+              lockedAt: null,
+            },
+          })
+        : await tx.assignment.create({
+            data: {
+              jobId: job.id,
+              proposalId: proposal.id,
+              carrierCompanyId: proposal.carrierCompanyId,
+              vehicleId: proposal.vehicleId,
+              driverId: proposal.driverId,
+              status: AssignmentStatus.PENDING,
+            },
+          });
 
       await tx.proposal.update({
         where: { id: proposal.id },
@@ -850,11 +864,14 @@ export class PaymentsService {
         },
       });
       if (pe.surcharge!.kind === SurchargeKind.MASS) {
+        const meta = pe.surcharge!.metadata as Record<string, unknown> | null;
+        const paidActualKg = typeof meta?.actualMassKg === 'number' ? meta.actualMassKg : null;
         await tx.trip.update({
           where: { id: pe.surcharge!.tripId },
           data: {
             massCheckOk: true,
             massOverDeclared: false,
+            ...(paidActualKg ? { declaredMassKg: paidActualKg, actualMassKg: paidActualKg } : {}),
           },
         });
       }
@@ -976,9 +993,15 @@ export class PaymentsService {
       });
     }
     if (surcharge.kind === SurchargeKind.MASS) {
+      const meta = surcharge.metadata as Record<string, unknown> | null;
+      const paidActualKg = typeof meta?.actualMassKg === 'number' ? meta.actualMassKg : null;
       await this.prisma.trip.update({
         where: { id: surcharge.tripId },
-        data: { massCheckOk: true, massOverDeclared: false },
+        data: {
+          massCheckOk: true,
+          massOverDeclared: false,
+          ...(paidActualKg ? { declaredMassKg: paidActualKg, actualMassKg: paidActualKg } : {}),
+        },
       });
     }
 
@@ -1341,10 +1364,10 @@ export class PaymentsService {
           locked.vehicle?.registration ?? locked.vehicle?.label ?? 'Vehicle',
         driverName: locked.driver?.user.name ?? locked.driver?.user.email ?? 'Driver',
         driverEmail: locked.driver?.user.email ?? null,
-        carrierUserIds: locked.carrierCompany.users.map((u) => u.id),
+        carrierUserIds: locked.carrierCompany?.users?.map((u) => u.id) ?? [],
         carrierEmails: [
-          ...locked.carrierCompany.users.map((u) => u.email),
-          ...(locked.carrierCompany.email ? [locked.carrierCompany.email] : []),
+          ...(locked.carrierCompany?.users?.map((u) => u.email) ?? []),
+          ...(locked.carrierCompany?.email ? [locked.carrierCompany.email] : []),
         ],
         pickupAt: locked.job?.pickupAt ?? null,
         receivers: this.collectJobReceiversForNotify(locked.job),
@@ -1851,16 +1874,29 @@ export class PaymentsService {
     }
 
     const created = await this.prisma.$transaction(async (tx) => {
-      const assignment = await tx.assignment.create({
-        data: {
-          jobId,
-          proposalId: proposal.id,
-          carrierCompanyId: proposal.carrierCompanyId,
-          vehicleId: proposal.vehicleId,
-          driverId: proposal.driverId,
-          status: AssignmentStatus.PENDING,
-        },
-      });
+      const existingAssignment = await tx.assignment.findUnique({ where: { jobId } });
+      const assignment = existingAssignment
+        ? await tx.assignment.update({
+            where: { id: existingAssignment.id },
+            data: {
+              proposalId: proposal.id,
+              carrierCompanyId: proposal.carrierCompanyId,
+              vehicleId: proposal.vehicleId,
+              driverId: proposal.driverId,
+              status: AssignmentStatus.PENDING,
+              lockedAt: null,
+            },
+          })
+        : await tx.assignment.create({
+            data: {
+              jobId,
+              proposalId: proposal.id,
+              carrierCompanyId: proposal.carrierCompanyId,
+              vehicleId: proposal.vehicleId,
+              driverId: proposal.driverId,
+              status: AssignmentStatus.PENDING,
+            },
+          });
 
       await tx.proposal.update({
         where: { id: proposal.id },

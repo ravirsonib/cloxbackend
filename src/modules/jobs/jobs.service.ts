@@ -121,6 +121,18 @@ export class JobsService {
     return payload.perKmMinCents ?? DEFAULT_MIN_BASE_CENTS.PER_KM;
   }
 
+  async getPlatformGstPercent(): Promise<number> {
+    try {
+      const settings = await this.prisma.platformSettings.findUnique({
+        where: { id: 'default' },
+        select: { gstPercent: true },
+      });
+      return settings?.gstPercent ?? 10.0;
+    } catch {
+      return 10.0;
+    }
+  }
+
   async getActiveVehicleClasses(): Promise<VehicleClassSpec[]> {
     try {
       const list = await this.prisma.vehicleClassConfig.findMany({
@@ -724,7 +736,8 @@ export class JobsService {
     } else {
       estimateInc = Math.max(minBase, Math.round((route.billableHours ?? 4) * 8_000));
     }
-    const estimate = gstSplitFromIncCents(estimateInc);
+    const gstRatePercent = await this.getPlatformGstPercent();
+    const estimate = gstSplitFromIncCents(estimateInc, gstRatePercent);
 
     const origin = await this.resolveJobOrigin(persistedStops, user.company.homeRegionId);
 
@@ -927,7 +940,8 @@ export class JobsService {
     } else {
       estimateInc = Math.max(minBase, Math.round((route.billableHours ?? 4) * 8_000));
     }
-    const estimate = gstSplitFromIncCents(estimateInc);
+    const gstRatePercent = await this.getPlatformGstPercent();
+    const estimate = gstSplitFromIncCents(estimateInc, gstRatePercent);
     const origin = await this.resolveJobOrigin(persistedStops, user.company.homeRegionId);
 
     const job = await this.prisma.job.update({
@@ -1239,6 +1253,102 @@ export class JobsService {
 
   async acceptProposal(principal: AuthenticatedPrincipal, jobId: string, proposalId: string) {
     return this.payments.acceptProposal(principal, jobId, proposalId);
+  }
+
+  async cancelJob(principal: AuthenticatedPrincipal, jobId: string) {
+    this.ensureDatabase();
+    const user = await this.prisma.user.findUnique({ where: { id: principal.id } });
+    if (!user?.companyId) throw new NotFoundException('Sender company not found');
+
+    const job = await this.prisma.job.findFirst({
+      where: { id: jobId, senderCompanyId: user.companyId },
+      include: {
+        assignment: true,
+        proposals: {
+          where: { status: ProposalStatus.SUBMITTED },
+          include: {
+            carrierCompany: {
+              include: {
+                users: {
+                  where: { role: PlatformRole.TRANSPORT_COMPANY },
+                  select: { id: true, email: true },
+                },
+              },
+            },
+          },
+        },
+      },
+    });
+    if (!job) throw new NotFoundException('Job not found');
+
+    if (job.status === JobStatus.CANCELLED) {
+      throw new BadRequestException('Job is already cancelled');
+    }
+    if (job.status === JobStatus.COMPLETED) {
+      throw new BadRequestException('Cannot cancel a completed job');
+    }
+    if (job.assignment && job.assignment.status === AssignmentStatus.LOCKED) {
+      throw new BadRequestException(
+        'Cannot cancel job after assignment is confirmed and locked. Please contact support.',
+      );
+    }
+
+    await this.prisma.$transaction(async (tx) => {
+      await tx.job.update({
+        where: { id: job.id },
+        data: { status: JobStatus.CANCELLED },
+      });
+
+      if (job.assignment) {
+        await tx.assignment.update({
+          where: { id: job.assignment.id },
+          data: { status: AssignmentStatus.CANCELLED },
+        });
+      }
+
+      if (job.proposals.length > 0) {
+        await tx.proposal.updateMany({
+          where: {
+            jobId: job.id,
+            status: ProposalStatus.SUBMITTED,
+          },
+          data: { status: ProposalStatus.EXPIRED },
+        });
+      }
+    });
+
+    await this.audit.recordPlatform({
+      action: AuditAction.JOB_CANCELLED,
+      actorUserId: user.id,
+      entityType: 'Job',
+      entityId: job.id,
+      metadata: {
+        previousStatus: job.status,
+        expiredProposalsCount: job.proposals.length,
+      },
+    });
+
+    try {
+      if (this.inbox && job.proposals.length > 0) {
+        const title = job.title ?? 'Job';
+        const carrierUserIds = job.proposals.flatMap((p) => p.carrierCompany.users.map((u) => u.id));
+        if (carrierUserIds.length > 0) {
+          void this.inbox.notifyUsers({
+            userIds: carrierUserIds,
+            type: NotificationType.JOB_PUBLISHED,
+            title: `Job cancelled: ${title}`,
+            body: 'The sender has cancelled this job. Your submitted bid has been closed and your vehicle/driver released.',
+            href: '/carrier/market',
+            entityType: 'Job',
+            entityId: job.id,
+          });
+        }
+      }
+    } catch (err) {
+      this.logger.warn(`Failed to notify carriers of cancelled job ${job.id}: ${err}`);
+    }
+
+    return { id: job.id, status: JobStatus.CANCELLED };
   }
 
   /** Used by matching board eligibility */

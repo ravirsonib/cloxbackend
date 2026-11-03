@@ -244,4 +244,128 @@ describe('OpsService.provisionAdmin paths', () => {
       );
     });
   });
+
+  describe('OpsService.listBdeTeam & team coaching (OPS-STA-TEAM-01 & 02)', () => {
+    const stateMasterP = {
+      id: 'state-admin-1',
+      email: 'vic.master@clox.com.au',
+      role: AdminRole.STATE_MASTER,
+      kind: 'admin' as const,
+      regionCodes: ['VIC'],
+      territoryCodes: [] as string[],
+    };
+
+    it('returns BDE team members scoped to State Master region with SLA telemetry', async () => {
+      const prisma = {
+        isConnected: () => true,
+        region: {
+          findUnique: jest.fn().mockResolvedValue({ id: 'reg-vic', code: 'VIC', name: 'Victoria' }),
+        },
+        adminUser: {
+          findMany: jest.fn().mockResolvedValue([
+            {
+              id: 'bde-1',
+              email: 'geelong.bde@clox.com.au',
+              name: 'Geelong Operator',
+              phone: '0411000111',
+              status: 'ACTIVE',
+              active: true,
+              scopes: [
+                {
+                  localTerritoryId: 'terr-geelong',
+                  localTerritory: { id: 'terr-geelong', code: 'GEELONG', name: 'Greater Geelong' },
+                },
+              ],
+              prospects: [{ id: 'p1', stage: 'LEAD' }, { id: 'p2', stage: 'ONBOARDING' }],
+            },
+          ]),
+        },
+        dispute: {
+          count: jest.fn().mockResolvedValueOnce(2).mockResolvedValueOnce(1), // 2 open, 1 overdue
+        },
+        settlementLine: {
+          aggregate: jest.fn().mockResolvedValue({ _sum: { amountCents: 45000 } }),
+        },
+      };
+
+      const service = new OpsService(
+        prisma as never,
+        { recordPlatform: jest.fn() } as never,
+        { sendAdminProvisionedEmail: jest.fn() } as never,
+        config as never,
+      );
+
+      const res = await service.listBdeTeam(stateMasterP);
+      expect(res.regionCode).toBe('VIC');
+      expect(res.regionName).toBe('Victoria');
+      expect(res.members).toHaveLength(1);
+      expect(res.members[0].territoryCode).toBe('GEELONG');
+      expect(res.members[0].slaStatus).toBe('BREACHED'); // Since 1 overdue
+      expect(res.members[0].accruedRevenueCents).toBe(45000);
+    });
+
+    it('adds coaching note to BDE profile and creates audit record', async () => {
+      const bdeRecord = {
+        id: 'bde-1',
+        email: 'bde@clox.com.au',
+        role: AdminRole.LOCAL_BDE,
+        status: 'ACTIVE',
+        active: true,
+        scopes: [
+          {
+            localTerritoryId: 'terr-1',
+            localTerritory: { id: 'terr-1', code: 'MELB_CBD', region: { code: 'VIC' } },
+          },
+        ],
+        profileJson: {},
+        prospects: [],
+        createdAt: new Date(),
+      };
+
+      const audit = { recordPlatform: jest.fn() };
+      const prisma = {
+        isConnected: () => true,
+        adminUser: {
+          findUnique: jest.fn().mockResolvedValue(bdeRecord),
+          update: jest.fn().mockResolvedValue(bdeRecord),
+        },
+        dispute: { findMany: jest.fn().mockResolvedValue([]) },
+        settlementLine: { aggregate: jest.fn().mockResolvedValue({ _sum: { amountCents: 0 } }) },
+      };
+
+      const service = new OpsService(
+        prisma as never,
+        audit as never,
+        { sendAdminProvisionedEmail: jest.fn() } as never,
+        config as never,
+      );
+
+      await service.addBdeCoachingNote(stateMasterP, 'bde-1', {
+        text: 'Follow up on the 2 overdue triage cases today.',
+      });
+
+      expect(prisma.adminUser.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: 'bde-1' },
+          data: expect.objectContaining({
+            profileJson: expect.objectContaining({
+              coachingNotes: expect.arrayContaining([
+                expect.objectContaining({
+                  text: 'Follow up on the 2 overdue triage cases today.',
+                  authorId: 'state-admin-1',
+                }),
+              ]),
+            }),
+          }),
+        }),
+      );
+      expect(audit.recordPlatform).toHaveBeenCalledWith(
+        expect.objectContaining({
+          action: 'admin.coaching_note_added',
+          actorAdminId: 'state-admin-1',
+          entityId: 'bde-1',
+        }),
+      );
+    });
+  });
 });

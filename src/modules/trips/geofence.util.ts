@@ -108,14 +108,15 @@ export function waitOverageMinutes(freeWaitEndsAt: Date, now = new Date()): numb
   return Math.floor(ms / 60_000);
 }
 
-/** Split inc-GST cents into ex/gst/inc (10% GST inclusive). */
-export function splitIncGst(incGstCents: number): {
+/** Split inc-GST cents into ex/gst/inc (defaults to 10% GST). */
+export function splitIncGst(incGstCents: number, gstRatePercent: number = 10): {
   amountExGstCents: number;
   amountGstCents: number;
   amountIncGstCents: number;
 } {
   const amountIncGstCents = Math.max(0, Math.round(incGstCents));
-  const amountExGstCents = Math.round(amountIncGstCents / 1.1);
+  const rateFactor = 1 + (gstRatePercent > 0 ? gstRatePercent / 100 : 0);
+  const amountExGstCents = Math.round(amountIncGstCents / rateFactor);
   const amountGstCents = amountIncGstCents - amountExGstCents;
   return { amountExGstCents, amountGstCents, amountIncGstCents };
 }

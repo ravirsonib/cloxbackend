@@ -9,6 +9,7 @@ describe('AdminService platform settings', () => {
       driverUnavailableScoreDelta: 5,
       carrierMarketplaceReleaseScoreDelta: 10,
       carrierClearingDays: 1,
+      gstPercent: 10.0,
       updatedAt: new Date('2026-10-26T00:00:00.000Z'),
     };
     const prisma = {
@@ -45,6 +46,7 @@ describe('AdminService platform settings', () => {
       driverUnavailableScoreDelta: 7,
       carrierMarketplaceReleaseScoreDelta: 12,
       carrierClearingDays: 2,
+      gstPercent: 12.5,
       updatedAt: new Date('2026-10-26T01:00:00.000Z'),
     };
     const audit = { recordPlatform: jest.fn() };
@@ -64,12 +66,14 @@ describe('AdminService platform settings', () => {
         driverUnavailableScoreDelta: 7,
         carrierMarketplaceReleaseScoreDelta: 12,
         carrierClearingDays: 2,
+        gstPercent: 12.5,
       },
       'admin-1',
     );
 
     expect(result.rescueDiscountPercent).toBe(15);
     expect(result.carrierClearingDays).toBe(2);
+    expect(result.gstPercent).toBe(12.5);
     expect(prisma.platformSettings.update).toHaveBeenCalledWith({
       where: { id: 'default' },
       data: {
@@ -78,6 +82,7 @@ describe('AdminService platform settings', () => {
         driverUnavailableScoreDelta: 7,
         carrierMarketplaceReleaseScoreDelta: 12,
         carrierClearingDays: 2,
+        gstPercent: 12.5,
       },
     });
     expect(audit.recordPlatform).toHaveBeenCalledWith(

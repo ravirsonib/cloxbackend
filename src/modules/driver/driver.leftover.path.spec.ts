@@ -8,6 +8,7 @@ import {
   CompanyType,
   ComplianceCaseStatus,
   ComplianceCaseType,
+  ComplianceDocStatus,
   DriverStatus,
   UserStatus,
 } from '@prisma/client';
@@ -328,6 +329,92 @@ describe('DriverService acceptInvite + submitProfile leftovers', () => {
         regionId: 'reg-vic',
       }),
     );
+  });
+
+  it('submitProfile ACTIVE company stays PENDING_REVIEW and opens driver licence case', async () => {
+    const future = new Date(Date.now() + 86_400_000 * 30)
+      .toISOString()
+      .slice(0, 10);
+    const driverUpdate = jest
+      .fn()
+      .mockResolvedValue({ id: 'drv-1', status: DriverStatus.PENDING_REVIEW });
+    const userUpdate = jest.fn().mockResolvedValue({});
+    const prisma = {
+      isConnected: () => true,
+      user: {
+        findUnique: jest
+          .fn()
+          .mockResolvedValueOnce(driverUser())
+          .mockResolvedValueOnce(
+            driverUser({
+              licenceNo: 'L1',
+              licenceClass: 'C',
+              licenceExpiry: new Date(`${future}T23:59:59.000Z`),
+              nhvrAcknowledgedAt: new Date(),
+              status: DriverStatus.PENDING_REVIEW,
+              emergencyContactName: personalProfile.emergencyContactName,
+              emergencyContactPhone: personalProfile.emergencyContactPhone,
+              addressLine1: personalProfile.addressLine1,
+              suburb: personalProfile.suburb,
+              state: personalProfile.state,
+              postcode: personalProfile.postcode,
+            }),
+          ),
+        update: userUpdate,
+      },
+      company: {
+        findUnique: jest.fn().mockResolvedValue({
+          id: 'co-c',
+          status: CompanyStatus.ACTIVE,
+          homeRegionId: 'reg-vic',
+          type: CompanyType.CARRIER,
+          legalName: 'Active Carrier Co',
+        }),
+      },
+      complianceCase: {
+        findFirst: jest.fn().mockResolvedValue(null),
+        create: jest.fn().mockResolvedValue({
+          id: 'case-drv-active',
+          status: ComplianceCaseStatus.OPEN,
+          caseType: ComplianceCaseType.CARRIER_DRIVER_LICENCE,
+          regionId: 'reg-vic',
+        }),
+      },
+      complianceDocument: {
+        findFirst: jest.fn().mockResolvedValue({ id: 'doc-lic' }),
+        findMany: jest.fn().mockResolvedValue([{ id: 'doc-lic' }]),
+        updateMany: jest.fn(),
+      },
+      driver: { update: driverUpdate },
+      $transaction: jest.fn(async (ops: unknown[]) => ops),
+    };
+    const inbox = {
+      notifyComplianceCaseToOps: jest.fn().mockResolvedValue(2),
+    };
+    const service = makeService(prisma, inbox);
+    const result = await service.submitProfile(driverPrincipal, {
+      ...personalProfile,
+      licenceNo: 'L1',
+      licenceClass: 'C',
+      licenceExpiry: future,
+      nhvrAcknowledged: true,
+      licenceDocumentId: 'doc-lic',
+    });
+    expect(result.driver.status).toBe(DriverStatus.PENDING_REVIEW);
+    expect(driverUpdate).toHaveBeenCalledWith({
+      where: { id: 'drv-1' },
+      data: expect.objectContaining({
+        status: DriverStatus.PENDING_REVIEW,
+      }),
+    });
+    expect(prisma.complianceDocument.updateMany).toHaveBeenCalledWith({
+      where: { id: { in: ['doc-lic'] } },
+      data: expect.objectContaining({
+        caseId: 'case-drv-active',
+        status: ComplianceDocStatus.UNDER_REVIEW,
+        driverId: 'drv-1',
+      }),
+    });
   });
 
   it('submitProfile rejects unlinked / not accepted / past expiry / bad doc', async () => {

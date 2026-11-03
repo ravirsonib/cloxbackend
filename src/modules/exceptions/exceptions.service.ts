@@ -2,6 +2,7 @@ import {
   BadRequestException,
   ForbiddenException,
   Injectable,
+  Logger,
   NotFoundException,
   Optional,
   ServiceUnavailableException,
@@ -84,6 +85,8 @@ const PRE_TRIP_STATUSES: TripStatus[] = [TripStatus.PENDING_GATES];
 
 @Injectable()
 export class ExceptionsService {
+  private readonly logger = new Logger(ExceptionsService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
@@ -423,18 +426,53 @@ export class ExceptionsService {
       trip.job.senderCompany.email ??
       null;
 
-    const notifyResult = await this.notifications.notifyTripExceptionOpened({
-      driverEmail: user.email,
-      carrierEmails,
-      senderEmail,
-      jobTitle: trip.job.title ?? '',
-      jobId: trip.job.id,
-      kind: created.kind,
-      phase: created.phase,
-      reasonCode: created.reasonCode,
-      note: created.note ?? input.note,
-      exceptionId: created.id,
-    });
+    // Non-blocking async notification & PDF generation so driver HTTP request responds immediately (<200ms)
+    void (async () => {
+      try {
+        const notifyResult = await this.notifications.notifyTripExceptionOpened({
+          driverEmail: user.email,
+          carrierEmails,
+          senderEmail,
+          jobTitle: trip.job.title ?? '',
+          jobId: trip.job.id,
+          kind: created.kind,
+          phase: created.phase,
+          reasonCode: created.reasonCode,
+          note: created.note ?? input.note,
+          exceptionId: created.id,
+        });
+
+        await this.audit.recordPlatform({
+          action: AuditAction.EXCEPTION_NOTIFIED,
+          actorUserId: user.id,
+          entityType: 'TripException',
+          entityId: created.id,
+          metadata: {
+            carrierCount: carrierEmails.length,
+            senderNotified: Boolean(senderEmail),
+            notify: notifyResult,
+          },
+        });
+      } catch (err) {
+        this.logger.warn(`Trip exception email notify failed for ${created.id}: ${err}`);
+      }
+
+      try {
+        await this.generateBreakdownPdf({
+          exception: created,
+          actorUserId: user.id,
+          driverEmail: user.email,
+          driverName: user.name ?? user.email,
+          carrierLegalName: trip.assignment.carrierCompany.legalName,
+          vehicleRegistration: trip.assignment.vehicle?.registration ?? null,
+          jobTitle: trip.job.title,
+          carrierEmails,
+          senderEmail,
+        });
+      } catch (err) {
+        this.logger.warn(`Trip exception PDF generation failed for ${created.id}: ${err}`);
+      }
+    })();
 
     if (this.inbox) {
       void this.inbox
@@ -461,37 +499,8 @@ export class ExceptionsService {
         .catch(() => undefined);
     }
 
-    await this.audit.recordPlatform({
-      action: AuditAction.EXCEPTION_NOTIFIED,
-      actorUserId: user.id,
-      entityType: 'TripException',
-      entityId: created.id,
-      metadata: {
-        carrierCount: carrierEmails.length,
-        senderNotified: Boolean(senderEmail),
-        notify: notifyResult,
-      },
-    });
-
-    let exceptionForMap: Parameters<ExceptionsService['mapException']>[0] = created;
-    try {
-      exceptionForMap = await this.generateBreakdownPdf({
-        exception: created,
-        actorUserId: user.id,
-        driverEmail: user.email,
-        driverName: user.name ?? user.email,
-        carrierLegalName: trip.assignment.carrierCompany.legalName,
-        vehicleRegistration: trip.assignment.vehicle?.registration ?? null,
-        jobTitle: trip.job.title,
-        carrierEmails,
-        senderEmail,
-      });
-    } catch {
-      // Opening the exception must not fail if PDF generation fails.
-    }
-
     let autoReassigned = false;
-    let exceptionRow = this.mapException(exceptionForMap);
+    let exceptionRow = this.mapException(created);
     if (phase === TripExceptionPhase.PRE_TRIP) {
       try {
         const rescue = await this.buildRescueCandidates({

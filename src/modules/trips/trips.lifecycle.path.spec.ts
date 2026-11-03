@@ -248,6 +248,45 @@ prisma as never,
         }),
       );
     });
+
+    it('passes when discrepancy was already paid by surcharge', async () => {
+      const trip = baseTrip({
+        declaredMassKg: 1000,
+        actualMassKg: 1200,
+        massCheckOk: true,
+        massOverDeclared: false,
+        surcharges: [
+          {
+            id: 'sur-1',
+            kind: SurchargeKind.MASS,
+            status: SurchargeStatus.PAID,
+            metadata: { actualMassKg: 1200 },
+          },
+        ],
+      });
+      const updated = baseTrip({ massCheckOk: true, actualMassKg: 1200 });
+      const prisma = {
+        isConnected: () => true,
+        user: {
+          findUnique: jest.fn().mockResolvedValue({
+            id: 'user-driver',
+            driver: { id: 'drv-1' },
+          }),
+        },
+        trip: {
+          findFirst: jest.fn().mockResolvedValue(trip),
+          update: jest.fn().mockResolvedValue(updated),
+        },
+        policyVersion: { findFirst: jest.fn().mockResolvedValue(null) },
+      };
+      const service = makeService(prisma);
+      const result = await service.massCheck(driverPrincipal, 'trip-1', {
+        online: true,
+        actualMassKg: 1200,
+      });
+      expect(result.gates.massOk).toBe(true);
+      expect(payments.createSurcharge).not.toHaveBeenCalled();
+    });
   });
 
   describe('startTrip happy path', () => {

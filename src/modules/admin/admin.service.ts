@@ -1807,6 +1807,7 @@ export class AdminService {
       driverUnavailableScoreDelta: row.driverUnavailableScoreDelta,
       carrierMarketplaceReleaseScoreDelta: row.carrierMarketplaceReleaseScoreDelta,
       carrierClearingDays: row.carrierClearingDays ?? 7,
+      gstPercent: row.gstPercent ?? 10.0,
       updatedAt: row.updatedAt,
     };
   }
@@ -1830,6 +1831,9 @@ export class AdminService {
     if (input.carrierClearingDays !== undefined) {
       data.carrierClearingDays = input.carrierClearingDays;
     }
+    if (input.gstPercent !== undefined) {
+      data.gstPercent = input.gstPercent;
+    }
     const updated = await this.prisma.platformSettings.update({
       where: { id: 'default' },
       data,
@@ -1848,6 +1852,7 @@ export class AdminService {
       driverUnavailableScoreDelta: updated.driverUnavailableScoreDelta,
       carrierMarketplaceReleaseScoreDelta: updated.carrierMarketplaceReleaseScoreDelta,
       carrierClearingDays: updated.carrierClearingDays ?? 7,
+      gstPercent: updated.gstPercent ?? 10.0,
       updatedAt: updated.updatedAt,
     };
   }

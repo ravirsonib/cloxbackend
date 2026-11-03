@@ -20,6 +20,7 @@ import { NotificationsModule } from './modules/notifications/notifications.modul
 import { OpsModule } from './modules/ops/ops.module';
 import { GrowthModule } from './modules/growth/growth.module';
 import { PaymentsModule } from './modules/payments/payments.module';
+import { DisputesModule } from './modules/disputes/disputes.module';
 import { SenderModule } from './modules/sender/sender.module';
 import { CarrierModule } from './modules/carrier/carrier.module';
 import { DriverModule } from './modules/driver/driver.module';
@@ -76,6 +77,7 @@ import { AttributionModule } from './common/services/attribution.module';
     OpsModule,
     GrowthModule,
     AuditModule,
+    DisputesModule,
   ],
 })
 export class AppModule implements NestModule {

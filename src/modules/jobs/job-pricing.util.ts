@@ -300,8 +300,9 @@ export function isVehicleAdequateForJob(
   return isVehicleClassAdequate(offeredClass, weightMin, rankMap);
 }
 
-export function gstSplitFromIncCents(incGstCents: number) {
-  const ex = Math.round(incGstCents / 1.1);
+export function gstSplitFromIncCents(incGstCents: number, gstRatePercent: number = 10) {
+  const rateFactor = 1 + (gstRatePercent > 0 ? gstRatePercent / 100 : 0);
+  const ex = Math.round(incGstCents / rateFactor);
   const gst = incGstCents - ex;
   return { amountExGstCents: ex, amountGstCents: gst, amountIncGstCents: incGstCents };
 }

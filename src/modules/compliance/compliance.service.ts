@@ -498,34 +498,47 @@ export class ComplianceService {
 
     // Fleet RWC / driver licence: approve docs + activate linked PENDING_REVIEW assets.
     if (this.isAssetReviewCase(complianceCase.caseType)) {
-      const vehicleIds = [
-        ...new Set(
-          complianceCase.documents
-            .map((d) => d.vehicleId)
-            .filter((id): id is string => Boolean(id)),
-        ),
-      ];
-      const driverIds = [
-        ...new Set(
-          complianceCase.documents
-            .map((d) => d.driverId)
-            .filter((id): id is string => Boolean(id)),
-        ),
-      ];
+      const isSpecificDriver = Boolean(
+        input.driverId &&
+          complianceCase.caseType === ComplianceCaseType.CARRIER_DRIVER_LICENCE,
+      );
+      const isSpecificVehicle = Boolean(
+        input.vehicleId &&
+          complianceCase.caseType === ComplianceCaseType.CARRIER_FLEET_RWC,
+      );
+
+      const vehicleIds = isSpecificVehicle
+        ? [input.vehicleId!]
+        : [
+            ...new Set(
+              complianceCase.documents
+                .map((d) => d.vehicleId)
+                .filter((id): id is string => Boolean(id)),
+            ),
+          ];
+      const driverIds = isSpecificDriver
+        ? [input.driverId!]
+        : [
+            ...new Set(
+              complianceCase.documents
+                .map((d) => d.driverId)
+                .filter((id): id is string => Boolean(id)),
+            ),
+          ];
+
+      let caseResolved = false;
       await this.prisma.$transaction(async (tx) => {
-        await tx.complianceCase.update({
-          where: { id: caseId },
-          data: {
-            status: ComplianceCaseStatus.APPROVED,
-            decisionNote: input.note,
-            decidedAt: new Date(),
-            decidedByAdminId: principal.id,
-          },
-        });
+        const docWhere: any = { caseId };
+        if (isSpecificDriver) {
+          docWhere.driverId = input.driverId;
+        } else if (isSpecificVehicle) {
+          docWhere.vehicleId = input.vehicleId;
+        }
         await tx.complianceDocument.updateMany({
-          where: { caseId },
+          where: docWhere,
           data: { status: ComplianceDocStatus.APPROVED, reviewedAt: new Date() },
         });
+
         if (
           complianceCase.caseType === ComplianceCaseType.CARRIER_FLEET_RWC &&
           vehicleIds.length
@@ -552,6 +565,28 @@ export class ComplianceService {
             data: { status: DriverStatus.ACTIVE },
           });
         }
+
+        const unreviewedCount = tx.complianceDocument.count
+          ? await tx.complianceDocument.count({
+              where: {
+                caseId,
+                status: { in: [ComplianceDocStatus.UPLOADED, ComplianceDocStatus.UNDER_REVIEW] },
+              },
+            })
+          : 0;
+
+        if (unreviewedCount === 0) {
+          caseResolved = true;
+          await tx.complianceCase.update({
+            where: { id: caseId },
+            data: {
+              status: ComplianceCaseStatus.APPROVED,
+              decisionNote: input.note,
+              decidedAt: new Date(),
+              decidedByAdminId: principal.id,
+            },
+          });
+        }
       });
       await this.audit.recordPlatform({
         action: AuditAction.COMPLIANCE_APPROVED,
@@ -564,6 +599,7 @@ export class ComplianceService {
           caseType: complianceCase.caseType,
           activatedVehicleIds: vehicleIds,
           activatedDriverIds: driverIds,
+          caseResolved,
         },
       });
       if (
@@ -599,7 +635,7 @@ export class ComplianceService {
       });
       return {
         id: caseId,
-        status: ComplianceCaseStatus.APPROVED,
+        status: caseResolved ? ComplianceCaseStatus.APPROVED : complianceCase.status,
         companyStatus: complianceCase.company.status,
       };
     }
@@ -922,26 +958,56 @@ export class ComplianceService {
       this.isPostOpsOperationalStatus(complianceCase.company.status);
 
     if (preserveCompanyOnReject) {
+      const isSpecificDriver = Boolean(
+        input.driverId &&
+          complianceCase.caseType === ComplianceCaseType.CARRIER_DRIVER_LICENCE,
+      );
+      const isSpecificVehicle = Boolean(
+        input.vehicleId &&
+          complianceCase.caseType === ComplianceCaseType.CARRIER_FLEET_RWC,
+      );
+
+      let caseResolved = false;
       await this.prisma.$transaction(async (tx) => {
-        await tx.complianceCase.update({
-          where: { id: caseId },
-          data: {
-            status: ComplianceCaseStatus.REJECTED,
-            decisionNote: input.note,
-            decidedAt: new Date(),
-            decidedByAdminId: principal.id,
-          },
-        });
+        const docWhere: any = { caseId };
+        if (isSpecificDriver) {
+          docWhere.driverId = input.driverId;
+        } else if (isSpecificVehicle) {
+          docWhere.vehicleId = input.vehicleId;
+        }
+
         if (
           this.isAssetReviewCase(complianceCase.caseType) ||
           this.isPostOpsOperationalStatus(complianceCase.company.status)
         ) {
           await tx.complianceDocument.updateMany({
-            where: { caseId },
+            where: docWhere,
             data: {
               status: ComplianceDocStatus.REJECTED,
               reviewedAt: new Date(),
               reviewNote: input.note,
+            },
+          });
+        }
+
+        const unreviewedCount = tx.complianceDocument.count
+          ? await tx.complianceDocument.count({
+              where: {
+                caseId,
+                status: { in: [ComplianceDocStatus.UPLOADED, ComplianceDocStatus.UNDER_REVIEW] },
+              },
+            })
+          : 0;
+
+        if (unreviewedCount === 0) {
+          caseResolved = true;
+          await tx.complianceCase.update({
+            where: { id: caseId },
+            data: {
+              status: ComplianceCaseStatus.REJECTED,
+              decisionNote: input.note,
+              decidedAt: new Date(),
+              decidedByAdminId: principal.id,
             },
           });
         }
@@ -955,11 +1021,14 @@ export class ComplianceService {
           note: input.note ?? null,
           caseType: complianceCase.caseType,
           companyStatusUnchanged: complianceCase.company.status,
+          rejectedDriverId: input.driverId ?? null,
+          rejectedVehicleId: input.vehicleId ?? null,
+          caseResolved,
         },
       });
       return {
         id: caseId,
-        status: ComplianceCaseStatus.REJECTED,
+        status: caseResolved ? ComplianceCaseStatus.REJECTED : complianceCase.status,
         companyStatus: complianceCase.company.status,
       };
     }
@@ -1044,21 +1113,49 @@ export class ComplianceService {
       this.isAssetReviewCase(complianceCase.caseType) ||
       this.isPostOpsOperationalStatus(complianceCase.company.status)
     ) {
+      const isSpecificDriver = Boolean(
+        input.driverId &&
+          complianceCase.caseType === ComplianceCaseType.CARRIER_DRIVER_LICENCE,
+      );
+      const isSpecificVehicle = Boolean(
+        input.vehicleId &&
+          complianceCase.caseType === ComplianceCaseType.CARRIER_FLEET_RWC,
+      );
+
       const infoRequestedAt = new Date();
-      await this.prisma.complianceCase.update({
-        where: { id: caseId },
-        data: {
-          status: ComplianceCaseStatus.INFO_REQUESTED,
-          decisionNote: input.note,
-          infoRequestedAt,
-        },
+      await this.prisma.$transaction(async (tx) => {
+        if (isSpecificDriver || isSpecificVehicle) {
+          const docWhere: any = { caseId };
+          if (isSpecificDriver) docWhere.driverId = input.driverId;
+          if (isSpecificVehicle) docWhere.vehicleId = input.vehicleId;
+          await tx.complianceDocument.updateMany({
+            where: docWhere,
+            data: {
+              status: ComplianceDocStatus.UPLOADED,
+              reviewNote: input.note,
+            },
+          });
+        }
+        await tx.complianceCase.update({
+          where: { id: caseId },
+          data: {
+            status: ComplianceCaseStatus.INFO_REQUESTED,
+            decisionNote: input.note,
+            infoRequestedAt,
+          },
+        });
       });
       await this.audit.recordPlatform({
         action: AuditAction.COMPLIANCE_INFO_REQUESTED,
         actorAdminId: principal.id,
         entityType: 'ComplianceCase',
         entityId: caseId,
-        metadata: { note: input.note ?? null, caseType: complianceCase.caseType },
+        metadata: {
+          note: input.note ?? null,
+          caseType: complianceCase.caseType,
+          driverId: input.driverId ?? null,
+          vehicleId: input.vehicleId ?? null,
+        },
       });
       void this.notifyCompanyDecision({
         kind: 'info_requested',

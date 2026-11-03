@@ -434,7 +434,24 @@ export class TripsService {
     if (!assignment || assignment.status !== AssignmentStatus.LOCKED) {
       return null;
     }
-    if (assignment.trip) return assignment.trip;
+    if (assignment.trip) {
+      if (assignment.trip.status === TripStatus.CANCELLED) {
+        return this.prisma.trip.update({
+          where: { id: assignment.trip.id },
+          data: {
+            status: TripStatus.PENDING_GATES,
+            safetyPassedAt: null,
+            safetyFailedAt: null,
+            safetyNotes: null,
+            startedAt: null,
+            completedAt: null,
+            onBreak: false,
+            breakStartedAt: null,
+          },
+        });
+      }
+      return assignment.trip;
+    }
 
     const declared =
       assignment.job.deadWeightKg ?? assignment.job.chargeableWeightKg ?? null;
@@ -1020,8 +1037,22 @@ export class TripsService {
     }
 
     const policy = await this.loadGeofencePolicy();
-    const declared =
-      trip.declaredMassKg ?? trip.job.chargeableWeightKg ?? trip.job.deadWeightKg ?? 0;
+    const paidMasses = (trip.surcharges ?? [])
+      .filter(
+        (s) =>
+          s.kind === SurchargeKind.MASS &&
+          (s.status === SurchargeStatus.PAID || s.status === SurchargeStatus.WAIVED),
+      )
+      .map((s) => {
+        const meta = s.metadata as Record<string, unknown> | null;
+        return typeof meta?.actualMassKg === 'number' ? meta.actualMassKg : 0;
+      });
+
+    const declared = Math.max(
+      trip.declaredMassKg ?? trip.job.chargeableWeightKg ?? trip.job.deadWeightKg ?? 0,
+      ...paidMasses,
+      trip.massCheckOk && !this.hasPendingMass(trip.surcharges) ? (trip.actualMassKg ?? 0) : 0,
+    );
     const tolerance = 1 + policy.massTolerancePct / 100;
     const over = input.actualMassKg > declared * tolerance;
 
