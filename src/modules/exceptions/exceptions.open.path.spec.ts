@@ -49,6 +49,8 @@ describe('ExceptionsService.open', () => {
       {
         userIdsForCompanies: jest.fn().mockResolvedValue([]),
         notifyUsers: jest.fn().mockResolvedValue(0),
+        adminIdsSuperAndStateForRegion: jest.fn().mockResolvedValue([]),
+        notifyAdmins: jest.fn().mockResolvedValue(0),
       } as never,
       carrier as never,
       { adjustForMarketplaceRelease: jest.fn() } as never,
@@ -371,5 +373,117 @@ describe('ExceptionsService.open', () => {
     expect(driverUpdate).not.toHaveBeenCalled();
     expect(notifications.notifyBreakdownReport).toHaveBeenCalled();
     expect(DriverStatus.SUSPENDED).toBeDefined();
+  });
+
+  it('notifies carrier in-app with direct link to exception when breakdown opens', async () => {
+    const notifyUsersMock = jest.fn().mockResolvedValue(1);
+    const service = new ExceptionsService(
+      {
+        isConnected: () => true,
+        user: {
+          findUnique: jest.fn().mockResolvedValue({
+            id: 'user-drv',
+            email: 'driver@yopmail.com',
+            driver: { id: 'drv-1', companyId: 'co-c' },
+          }),
+        },
+        trip: {
+          findFirst: jest.fn().mockResolvedValue({
+            id: 'trip-1',
+            status: TripStatus.IN_TRANSIT,
+            assignmentId: 'asg-1',
+            assignment: {
+              status: AssignmentStatus.LOCKED,
+              carrierCompanyId: 'co-c',
+              vehicle: { registration: 'XYZ-123', label: 'Van' },
+              carrierCompany: {
+                id: 'co-c',
+                email: 'carrier@yopmail.com',
+                legalName: 'Carrier Pty',
+                users: [{ id: 'usr-carrier-1', email: 'carrier@yopmail.com' }],
+              },
+            },
+            job: {
+              id: 'job-1',
+              title: 'Heavy machinery delivery',
+              senderCompanyId: 'co-s',
+              originRegionId: 'reg-vic',
+              receiverEmail: 'rec@yopmail.com',
+              senderCompany: {
+                email: 'sender@yopmail.com',
+                users: [{ id: 'usr-sender-1', email: 'sender@yopmail.com' }],
+              },
+            },
+          }),
+        },
+        tripException: { findFirst: jest.fn().mockResolvedValue(null) },
+        complianceDocument: {
+          findFirst: jest.fn().mockResolvedValue({
+            id: '22222222-2222-2222-2222-222222222222',
+            status: 'UPLOADED',
+          }),
+        },
+        $transaction: jest.fn(async (fn: (tx: unknown) => Promise<unknown>) =>
+          fn({
+            trip: { update: jest.fn().mockResolvedValue({}) },
+            driver: { update: jest.fn().mockResolvedValue({}) },
+            tripException: {
+              create: jest.fn().mockResolvedValue({
+                id: 'ex-breakdown-1',
+                jobId: 'job-1',
+                assignmentId: 'asg-1',
+                tripId: 'trip-1',
+                companyId: 'co-c',
+                reportedByUserId: 'user-drv',
+                kind: TripExceptionKind.VEHICLE_BREAKDOWN,
+                phase: TripExceptionPhase.MID_TRIP,
+                status: TripExceptionStatus.AWAITING_CARRIER,
+                reasonCode: 'FlatTire',
+                note: 'Flat tire on highway',
+                gpsLat: -37.8,
+                gpsLng: 144.9,
+                photoDocumentId: '22222222-2222-2222-2222-222222222222',
+                openedAt: new Date(),
+                job: { id: 'job-1', title: 'Heavy machinery delivery' },
+                assignment: { vehicle: null, driver: null },
+              }),
+            },
+          }),
+        ),
+      } as never,
+      audit as never,
+      notifications as never,
+      {
+        userIdsForCompanies: jest.fn().mockResolvedValue(['usr-carrier-1']),
+        notifyUsers: notifyUsersMock,
+        adminIdsSuperAndStateForRegion: jest.fn().mockResolvedValue([]),
+        notifyAdmins: jest.fn().mockResolvedValue(0),
+      } as never,
+      carrier as never,
+      { adjustForMarketplaceRelease: jest.fn() } as never,
+      config as never,
+    );
+
+    await service.open(driverPrincipal, {
+      tripId: '11111111-1111-1111-1111-111111111111',
+      kind: 'VEHICLE_BREAKDOWN',
+      note: 'Flat tire on highway',
+      gpsLat: -37.8,
+      gpsLng: 144.9,
+      photoDocumentId: '22222222-2222-2222-2222-222222222222',
+    });
+
+    // Wait for in-app notify async microtask
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(notifyUsersMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        userIds: expect.arrayContaining(['usr-carrier-1']),
+        type: 'TRIP_EXCEPTION',
+        href: '/carrier/exceptions/ex-breakdown-1',
+        entityType: 'TripException',
+        entityId: 'ex-breakdown-1',
+      }),
+    );
   });
 });

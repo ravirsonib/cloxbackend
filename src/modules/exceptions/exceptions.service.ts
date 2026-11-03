@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   ForbiddenException,
+  Inject,
   Injectable,
   Logger,
   NotFoundException,
@@ -91,7 +92,7 @@ export class ExceptionsService {
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
     private readonly notifications: NotificationsService,
-    @Optional() private readonly inbox: InAppNotificationsService | undefined,
+    @Optional() @Inject(InAppNotificationsService) private readonly inbox: InAppNotificationsService | null,
     private readonly carrier: CarrierService,
     private readonly payments: PaymentsService,
     private readonly config: ConfigService<AppEnv, true>,
@@ -277,7 +278,7 @@ export class ExceptionsService {
                     role: 'TRANSPORT_COMPANY',
                     status: { in: [UserStatus.ACTIVE, UserStatus.PENDING] },
                   },
-                  select: { email: true },
+                  select: { id: true, email: true },
                   take: 10,
                 },
               },
@@ -289,13 +290,14 @@ export class ExceptionsService {
             id: true,
             title: true,
             senderCompanyId: true,
+            originRegionId: true,
             receiverEmail: true,
             senderCompany: {
               select: {
                 email: true,
                 users: {
                   where: { role: 'SENDER', status: UserStatus.ACTIVE },
-                  select: { email: true },
+                  select: { id: true, email: true },
                   take: 5,
                 },
               },
@@ -426,7 +428,23 @@ export class ExceptionsService {
       trip.job.senderCompany.email ??
       null;
 
-    // Non-blocking async notification & PDF generation so driver HTTP request responds immediately (<200ms)
+    // Async email notification & PDF breakdown generation
+    try {
+      await this.generateBreakdownPdf({
+        exception: created,
+        actorUserId: user.id,
+        driverEmail: user.email,
+        driverName: user.name ?? user.email,
+        carrierLegalName: trip.assignment.carrierCompany.legalName,
+        vehicleRegistration: trip.assignment.vehicle?.registration ?? null,
+        jobTitle: trip.job.title,
+        carrierEmails,
+        senderEmail,
+      });
+    } catch (err) {
+      this.logger.warn(`Trip exception PDF generation failed for ${created.id}: ${err}`);
+    }
+
     void (async () => {
       try {
         const notifyResult = await this.notifications.notifyTripExceptionOpened({
@@ -456,47 +474,99 @@ export class ExceptionsService {
       } catch (err) {
         this.logger.warn(`Trip exception email notify failed for ${created.id}: ${err}`);
       }
-
-      try {
-        await this.generateBreakdownPdf({
-          exception: created,
-          actorUserId: user.id,
-          driverEmail: user.email,
-          driverName: user.name ?? user.email,
-          carrierLegalName: trip.assignment.carrierCompany.legalName,
-          vehicleRegistration: trip.assignment.vehicle?.registration ?? null,
-          jobTitle: trip.job.title,
-          carrierEmails,
-          senderEmail,
-        });
-      } catch (err) {
-        this.logger.warn(`Trip exception PDF generation failed for ${created.id}: ${err}`);
-      }
     })();
 
+    // In-app notifications for carrier, sender, and Ops admin
     if (this.inbox) {
-      void this.inbox
-        .userIdsForCompanies({
-          companyIds: [
-            trip.job.senderCompanyId,
-            trip.assignment.carrierCompanyId,
-          ],
-          roles: [PlatformRole.SENDER, PlatformRole.TRANSPORT_COMPANY],
-        })
-        .then((userIds) =>
-          this.inbox!.notifyUsers({
-            userIds,
-            type: NotificationType.TRIP_EXCEPTION,
-            title: 'Trip exception opened',
-            body: `${created.kind} · ${created.phase}${
-              created.note ? ` — ${created.note}` : ''
-            }`,
-            href: `/jobs/${trip.job.id}`,
-            entityType: 'TripException',
-            entityId: created.id,
-          }),
-        )
-        .catch(() => undefined);
+      void (async () => {
+        try {
+          const carrierCompanyId =
+            created.companyId || trip.assignment.carrierCompany.id;
+          const directCarrierUserIds =
+            trip.assignment.carrierCompany.users?.map((u) => u.id) ?? [];
+          const queryCarrierUserIds = await this.inbox!.userIdsForCompanies({
+            companyIds: [carrierCompanyId],
+            roles: [PlatformRole.TRANSPORT_COMPANY],
+          });
+          const carrierUserIds = [
+            ...new Set(
+              [...directCarrierUserIds, ...queryCarrierUserIds].filter(
+                (id): id is string => Boolean(id),
+              ),
+            ),
+          ];
+
+          if (carrierUserIds.length > 0) {
+            await this.inbox!.notifyUsers({
+              userIds: carrierUserIds,
+              type: NotificationType.TRIP_EXCEPTION,
+              title:
+                created.kind === TripExceptionKind.VEHICLE_BREAKDOWN
+                  ? 'Vehicle breakdown reported (Action required)'
+                  : `Trip exception: ${created.kind} (Action required)`,
+              body: `Vehicle ${trip.assignment.vehicle?.registration ?? 'Truck'} reported ${created.kind.toLowerCase().replace(/_/g, ' ')} on "${trip.job.title ?? 'job'}". Assign replacement driver/vehicle to continue.`,
+              href: `/carrier/exceptions/${created.id}`,
+              entityType: 'TripException',
+              entityId: created.id,
+            });
+            this.logger.log(
+              `Trip exception ${created.id}: in-app notified ${carrierUserIds.length} carrier user(s)`,
+            );
+          }
+
+          const senderCompanyId = trip.job.senderCompanyId;
+          if (senderCompanyId) {
+            const directSenderUserIds =
+              trip.job.senderCompany?.users?.map((u) => u.id) ?? [];
+            const querySenderUserIds = await this.inbox!.userIdsForCompanies({
+              companyIds: [senderCompanyId],
+              roles: [PlatformRole.SENDER],
+            });
+            const senderUserIds = [
+              ...new Set(
+                [...directSenderUserIds, ...querySenderUserIds].filter(
+                  (id): id is string => Boolean(id),
+                ),
+              ),
+            ];
+
+            if (senderUserIds.length > 0) {
+              await this.inbox!.notifyUsers({
+                userIds: senderUserIds,
+                type: NotificationType.TRIP_EXCEPTION,
+                title: 'Trip delay / issue reported',
+                body: `A delay or exception was reported for "${trip.job.title ?? 'your shipment'}". Carrier is arranging resolution.`,
+                href: `/jobs/${trip.job.id}`,
+                entityType: 'TripException',
+                entityId: created.id,
+              });
+            }
+          }
+
+          if (trip.job.originRegionId) {
+            const adminUserIds =
+              await this.inbox!.adminIdsSuperAndStateForRegion(
+                trip.job.originRegionId,
+              );
+            if (adminUserIds.length > 0) {
+              await this.inbox!.notifyAdmins({
+                adminUserIds,
+                type: NotificationType.TRIP_EXCEPTION,
+                title: `Trip exception: ${created.kind}`,
+                body: `${created.kind} on "${trip.job.title ?? trip.job.id}". Carrier: ${trip.assignment.carrierCompany.legalName}. Status: AWAITING_CARRIER.`,
+                href: '/ops/exceptions',
+                entityType: 'TripException',
+                entityId: created.id,
+                regionId: trip.job.originRegionId,
+              });
+            }
+          }
+        } catch (err) {
+          this.logger.warn(
+            `Trip exception in-app notify failed for ${created.id}: ${err}`,
+          );
+        }
+      })();
     }
 
     let autoReassigned = false;

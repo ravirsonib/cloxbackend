@@ -1822,10 +1822,9 @@ export class NotificationsService {
     if (params.driverEmail?.includes('@')) {
       targets.add(params.driverEmail.trim().toLowerCase());
     }
-    const results = [];
-    for (const to of targets) {
-      results.push(
-        await this.sendBranded({
+    const results = await Promise.all(
+      [...targets].map((to) =>
+        this.sendBranded({
           to,
           subject: 'CLOX — trip exception report (PDF attached)',
           text: `Exception report generated for job ${params.jobTitle || params.jobId} (${params.kind}). PDF attached.`,
@@ -1837,8 +1836,8 @@ export class NotificationsService {
           cta: this.loginCta(),
           attachments: params.attachments,
         }),
-      );
-    }
+      ),
+    );
     return { sentTo: [...targets], results };
   }
 }
