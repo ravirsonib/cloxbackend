@@ -182,6 +182,33 @@ describe('ReconciliationService', () => {
         createdAt: pastClearingDate,
         job: { id: 'job-1', estimateIncGstCents: 100000 },
       },
+      {
+        id: 'sl-2',
+        jobId: 'job-1',
+        recipientType: SettlementRecipientType.SUPER_ADMIN,
+        amountCents: 15000,
+        status: SettlementLineStatus.PAID,
+        createdAt: pastClearingDate,
+        job: { id: 'job-1', estimateIncGstCents: 100000 },
+      },
+      {
+        id: 'sl-3',
+        jobId: 'job-1',
+        recipientType: SettlementRecipientType.STATE_MASTER,
+        amountCents: 10000,
+        status: SettlementLineStatus.PAID,
+        createdAt: pastClearingDate,
+        job: { id: 'job-1', estimateIncGstCents: 100000 },
+      },
+      {
+        id: 'sl-4',
+        jobId: 'job-1',
+        recipientType: SettlementRecipientType.LOCAL_BDE,
+        amountCents: 5000,
+        status: SettlementLineStatus.PAID,
+        createdAt: pastClearingDate,
+        job: { id: 'job-1', estimateIncGstCents: 100000 },
+      },
     ];
 
     const prisma = {
@@ -196,5 +223,56 @@ describe('ReconciliationService', () => {
 
     expect(report.status).toBe('WARNING');
     expect(report.discrepancies.some((d) => d.kind === 'UNTRANSFERRED_CLEARING')).toBe(true);
+  });
+
+  it('detects SURCHARGE_SPIKE when surcharges exceed 20% of GMV', async () => {
+    const paymentEvents = [
+      {
+        id: 'pe-charge',
+        jobId: 'job-1',
+        type: PaymentEventType.CHARGE,
+        status: PaymentEventStatus.SUCCEEDED,
+        amountIncGstCents: 100000,
+        stripePaymentIntentId: 'pi_1',
+        createdAt: new Date(),
+      },
+      {
+        id: 'pe-surcharge',
+        jobId: 'job-1',
+        type: PaymentEventType.SURCHARGE,
+        status: PaymentEventStatus.SUCCEEDED,
+        amountIncGstCents: 30000, // 30% of GMV -> triggers anomaly alert
+        stripePaymentIntentId: 'pi_2',
+        createdAt: new Date(),
+      },
+    ];
+
+    const prisma = {
+      isConnected: () => true,
+      paymentEvent: { findMany: jest.fn().mockResolvedValue(paymentEvents) },
+      settlementLine: { findMany: jest.fn().mockResolvedValue([]) },
+      trip: { findMany: jest.fn().mockResolvedValue([]) },
+    };
+
+    const service = makeService(prisma);
+    const report = await service.getReconciliationReport(superAdmin);
+
+    expect(report.discrepancies.some((d) => d.kind === 'SURCHARGE_SPIKE')).toBe(true);
+  });
+
+  it('handles empty database gracefully with HEALTHY status and zero metrics', async () => {
+    const prisma = {
+      isConnected: () => true,
+      paymentEvent: { findMany: jest.fn().mockResolvedValue([]) },
+      settlementLine: { findMany: jest.fn().mockResolvedValue([]) },
+      trip: { findMany: jest.fn().mockResolvedValue([]) },
+    };
+
+    const service = makeService(prisma);
+    const report = await service.getReconciliationReport(superAdmin);
+
+    expect(report.status).toBe('HEALTHY');
+    expect(report.metrics.totalGmvCents).toBe(0);
+    expect(report.metrics.discrepancyCount).toBe(0);
   });
 });

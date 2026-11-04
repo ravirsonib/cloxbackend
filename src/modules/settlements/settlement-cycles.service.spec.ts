@@ -112,6 +112,9 @@ describe('SettlementCyclesService', () => {
 
       const prisma = {
         isConnected: () => true,
+        platformSettings: {
+          findUnique: jest.fn().mockResolvedValue(null),
+        },
         settlementCycle: {
           findFirst: jest.fn().mockResolvedValue(null),
           upsert: jest.fn().mockResolvedValue(createdCycle),
@@ -125,6 +128,49 @@ describe('SettlementCyclesService', () => {
       expect(result.status).toBe(SettlementCycleStatus.OPEN);
       expect(prisma.settlementCycle.upsert).toHaveBeenCalled();
     });
+
+    it('uses configured cadence and cutoff hour from PlatformSettings if present', async () => {
+      const createdCycle = {
+        id: 'cyc-custom',
+        cycleNumber: 'CYC-CUSTOM',
+        status: SettlementCycleStatus.OPEN,
+        periodStart: new Date(),
+        periodEnd: new Date(),
+        scheduledDisburseAt: new Date(),
+        disbursedAt: null,
+        totalAccruedCents: 0,
+        totalDisbursedCents: 0,
+        carrierPayoutCents: 0,
+        adminPayoutCents: 0,
+        hqHoldingCents: 0,
+        lineCount: 0,
+        notes: null,
+        createdAt: new Date(),
+      };
+
+      const prisma = {
+        isConnected: () => true,
+        platformSettings: {
+          findUnique: jest.fn().mockResolvedValue({
+            settlementCycleCadenceDays: 7,
+            settlementCutoffHour: 6,
+          }),
+        },
+        settlementCycle: {
+          findFirst: jest.fn().mockResolvedValue(null),
+          upsert: jest.fn().mockResolvedValue(createdCycle),
+        },
+      };
+
+      const service = makeService(prisma);
+      const result = await service.getOrCreateActiveCycle();
+
+      expect(result.id).toBe('cyc-custom');
+      expect(prisma.platformSettings.findUnique).toHaveBeenCalledWith({
+        where: { id: 'default' },
+        select: { settlementCycleCadenceDays: true, settlementCutoffHour: true },
+      });
+    });
   });
 
   describe('runDisbursement', () => {
@@ -135,6 +181,56 @@ describe('SettlementCyclesService', () => {
       await expect(service.runDisbursement(stateAdmin)).rejects.toThrow(
         ForbiddenException,
       );
+    });
+
+    it('throws NotFoundException if target cycle does not exist', async () => {
+      const prisma = {
+        isConnected: () => true,
+        settlementCycle: {
+          findUnique: jest.fn().mockResolvedValue(null),
+        },
+      };
+
+      const service = makeService(prisma);
+      await expect(
+        service.runDisbursement(superAdmin, { cycleId: 'cyc-non-existent' }),
+      ).rejects.toThrow();
+    });
+
+    it('handles zero eligible lines gracefully without errors', async () => {
+      const cycle = {
+        id: 'cyc-empty',
+        cycleNumber: 'CYC-EMPTY',
+        status: SettlementCycleStatus.OPEN,
+        periodStart: new Date(),
+        periodEnd: new Date(),
+        scheduledDisburseAt: new Date(),
+      };
+
+      const prisma = {
+        isConnected: () => true,
+        settlementCycle: {
+          findUnique: jest.fn().mockResolvedValue(cycle),
+          update: jest.fn().mockResolvedValue({}),
+        },
+        settlementLine: {
+          findMany: jest.fn().mockResolvedValue([]),
+          updateMany: jest.fn(),
+        },
+        $transaction: jest.fn(async (cb: (tx: unknown) => Promise<unknown>) => {
+          return cb({
+            settlementLine: { updateMany: jest.fn() },
+            settlementCycle: { update: jest.fn() },
+          });
+        }),
+      };
+
+      const service = makeService(prisma);
+      const result = await service.runDisbursement(superAdmin, { cycleId: 'cyc-empty' });
+
+      expect(result.success).toBe(true);
+      expect(result.lineCount).toBe(0);
+      expect(result.totalDisbursedCents).toBe(0);
     });
 
     it('rejects already completed cycles', async () => {

@@ -83,12 +83,12 @@ export class SettlementCyclesService {
     }
 
     // Configurable rolling window from PlatformSettings (default 14 days, 4:00 AM cutoff)
-    const settings = await this.prisma.platformSettings
-      .findUnique({
+    const settings = await (this.prisma as any).platformSettings
+      ?.findUnique({
         where: { id: 'default' },
         select: { settlementCycleCadenceDays: true, settlementCutoffHour: true },
       })
-      .catch(() => null);
+      .catch?.(() => null);
 
     const cadenceDays = (settings as any)?.settlementCycleCadenceDays ?? 14;
     const cutoffHour = (settings as any)?.settlementCutoffHour ?? 4;
@@ -499,7 +499,7 @@ export class SettlementCyclesService {
       hqHoldingCents: c.hqHoldingCents,
       lineCount: c.lineCount,
       notes: c.notes,
-      createdAt: c.createdAt.toISOString(),
+      createdAt: c.createdAt ? c.createdAt.toISOString() : new Date().toISOString(),
     };
   }
 }

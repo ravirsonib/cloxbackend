@@ -34,18 +34,18 @@ describe('JobsService previewRoute', () => {
     );
   }
 
-  it('suggests positive distance from pickup + drop', () => {
+  it('suggests positive distance from pickup + drop', async () => {
     const service = makeService();
-    const route = service.previewRoute({ pricingModel: 'PER_KM', stops });
+    const route = await service.previewRoute({ pricingModel: 'PER_KM', stops });
     expect(route.distanceKm).toBeGreaterThan(0);
     expect(route.durationMinutes).toBeGreaterThan(0);
     expect(route.billableHours).toBeNull();
     expect(route.mock).toBe(true);
   });
 
-  it('suggests hourly billable floor for short hops', () => {
+  it('suggests hourly billable floor for short hops', async () => {
     const service = makeService();
-    const route = service.previewRoute({
+    const route = await service.previewRoute({
       pricingModel: 'HOURLY',
       stops: [
         stops[0],
