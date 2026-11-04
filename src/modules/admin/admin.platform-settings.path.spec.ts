@@ -10,6 +10,13 @@ describe('AdminService platform settings', () => {
       carrierMarketplaceReleaseScoreDelta: 10,
       carrierClearingDays: 1,
       gstPercent: 10.0,
+      perKmRateCents: 250,
+      perKmMinBaseCents: 5000,
+      hourlyRateCents: 8000,
+      hourlyMinFloorHours: 4.0,
+      hourlyMinBaseCents: 20000,
+      settlementCycleCadenceDays: 14,
+      settlementCutoffHour: 4,
       updatedAt: new Date('2026-10-26T00:00:00.000Z'),
     };
     const prisma = {
@@ -47,6 +54,13 @@ describe('AdminService platform settings', () => {
       carrierMarketplaceReleaseScoreDelta: 12,
       carrierClearingDays: 2,
       gstPercent: 12.5,
+      perKmRateCents: 300,
+      perKmMinBaseCents: 6000,
+      hourlyRateCents: 9000,
+      hourlyMinFloorHours: 3.5,
+      hourlyMinBaseCents: 25000,
+      settlementCycleCadenceDays: 7,
+      settlementCutoffHour: 3,
       updatedAt: new Date('2026-10-26T01:00:00.000Z'),
     };
     const audit = { recordPlatform: jest.fn() };
@@ -67,6 +81,13 @@ describe('AdminService platform settings', () => {
         carrierMarketplaceReleaseScoreDelta: 12,
         carrierClearingDays: 2,
         gstPercent: 12.5,
+        perKmRateCents: 300,
+        perKmMinBaseCents: 6000,
+        hourlyRateCents: 9000,
+        hourlyMinFloorHours: 3.5,
+        hourlyMinBaseCents: 25000,
+        settlementCycleCadenceDays: 7,
+        settlementCutoffHour: 3,
       },
       'admin-1',
     );
@@ -74,6 +95,11 @@ describe('AdminService platform settings', () => {
     expect(result.rescueDiscountPercent).toBe(15);
     expect(result.carrierClearingDays).toBe(2);
     expect(result.gstPercent).toBe(12.5);
+    expect(result.perKmRateCents).toBe(300);
+    expect(result.hourlyRateCents).toBe(9000);
+    expect(result.hourlyMinFloorHours).toBe(3.5);
+    expect(result.settlementCycleCadenceDays).toBe(7);
+    expect(result.settlementCutoffHour).toBe(3);
     expect(prisma.platformSettings.update).toHaveBeenCalledWith({
       where: { id: 'default' },
       data: {
@@ -83,6 +109,13 @@ describe('AdminService platform settings', () => {
         carrierMarketplaceReleaseScoreDelta: 12,
         carrierClearingDays: 2,
         gstPercent: 12.5,
+        perKmRateCents: 300,
+        perKmMinBaseCents: 6000,
+        hourlyRateCents: 9000,
+        hourlyMinFloorHours: 3.5,
+        hourlyMinBaseCents: 25000,
+        settlementCycleCadenceDays: 7,
+        settlementCutoffHour: 3,
       },
     });
     expect(audit.recordPlatform).toHaveBeenCalledWith(

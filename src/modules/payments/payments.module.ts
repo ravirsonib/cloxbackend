@@ -15,7 +15,7 @@ import { StripeService } from './stripe.service';
     JwtModule.register({}),
     AuditModule,
     NotificationsModule,
-    SettlementsModule,
+    forwardRef(() => SettlementsModule),
     forwardRef(() => TripsModule),
   ],
   controllers: [PaymentsController],

@@ -2954,8 +2954,8 @@ export class TripsService {
     void this.emitTripInbox({
       tripId: trip.id,
       type: NotificationType.POD_FINALIZED,
-      title: 'POD finalized',
-      body: `Proof of delivery captured for ${parties.dropSuburb || 'drop-off'}.`,
+      title: 'POD finalized & emails sent',
+      body: `Proof of delivery captured; confirmation and PDF documents sent successfully for ${parties.dropSuburb || 'drop-off'}.`,
       includeDriver: true,
     });
 

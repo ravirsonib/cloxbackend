@@ -109,16 +109,42 @@ export class JobsService {
     return { originRegionId, originTerritoryId: preferred.id };
   }
 
-  async getMinBaseCents(pricingModel: 'PER_KM' | 'HOURLY'): Promise<number> {
-    const policy = await this.prisma.policyVersion.findFirst({
-      where: { key: 'MIN_BASE_FARE', publishedAt: { not: null } },
-      orderBy: { version: 'desc' },
-    });
-    const payload = (policy?.payload ?? {}) as Record<string, number>;
-    if (pricingModel === 'HOURLY') {
-      return payload.hourlyMinCents ?? DEFAULT_MIN_BASE_CENTS.HOURLY;
+  async getPricingConfig() {
+    try {
+      const s = await this.prisma.platformSettings.findUnique({
+        where: { id: 'default' },
+        select: {
+          perKmRateCents: true,
+          perKmMinBaseCents: true,
+          hourlyRateCents: true,
+          hourlyMinFloorHours: true,
+          hourlyMinBaseCents: true,
+          gstPercent: true,
+        },
+      });
+      return {
+        perKmRateCents: s?.perKmRateCents ?? 250,
+        perKmMinBaseCents: s?.perKmMinBaseCents ?? DEFAULT_MIN_BASE_CENTS.PER_KM,
+        hourlyRateCents: s?.hourlyRateCents ?? 8_000,
+        hourlyMinFloorHours: s?.hourlyMinFloorHours ?? 4.0,
+        hourlyMinBaseCents: s?.hourlyMinBaseCents ?? DEFAULT_MIN_BASE_CENTS.HOURLY,
+        gstPercent: s?.gstPercent ?? 10.0,
+      };
+    } catch {
+      return {
+        perKmRateCents: 250,
+        perKmMinBaseCents: DEFAULT_MIN_BASE_CENTS.PER_KM,
+        hourlyRateCents: 8_000,
+        hourlyMinFloorHours: 4.0,
+        hourlyMinBaseCents: DEFAULT_MIN_BASE_CENTS.HOURLY,
+        gstPercent: 10.0,
+      };
     }
-    return payload.perKmMinCents ?? DEFAULT_MIN_BASE_CENTS.PER_KM;
+  }
+
+  async getMinBaseCents(pricingModel: 'PER_KM' | 'HOURLY'): Promise<number> {
+    const config = await this.getPricingConfig();
+    return pricingModel === 'HOURLY' ? config.hourlyMinBaseCents : config.perKmMinBaseCents;
   }
 
   async getPlatformGstPercent(): Promise<number> {
@@ -602,7 +628,8 @@ export class JobsService {
    * Suggest distance/duration from pickup + drop (mock Valhalla until real client is wired).
    * Does not persist; sender may edit the suggested km on create/update.
    */
-  previewRoute(input: JobRouteEstimateInput) {
+  async previewRoute(input: JobRouteEstimateInput) {
+    const config = await this.getPricingConfig();
     const sortedStops = input.stops.slice().sort((a, b) => a.sequence - b.sequence);
     const orderedStops =
       input.pricingModel === 'HOURLY' && sortedStops.length > 2
@@ -611,18 +638,27 @@ export class JobsService {
     const route = estimateRoute({
       stops: orderedStops.map((s) => ({ lat: s.lat, lng: s.lng })),
       pricingModel: input.pricingModel,
+      hourlyFloorHours: config.hourlyMinFloorHours,
     });
-    const minBaseCents = DEFAULT_MIN_BASE_CENTS[input.pricingModel];
-    const minBillableHours = input.pricingModel === 'HOURLY' ? 4 : null;
-    const hourlyRateCents = input.pricingModel === 'HOURLY' ? 8_000 : null;
+    const minBaseCents =
+      input.pricingModel === 'HOURLY' ? config.hourlyMinBaseCents : config.perKmMinBaseCents;
+    const minBillableHours =
+      input.pricingModel === 'HOURLY' ? config.hourlyMinFloorHours : null;
+    const hourlyRateCents =
+      input.pricingModel === 'HOURLY' ? config.hourlyRateCents : null;
+    const perKmRateCents =
+      input.pricingModel === 'PER_KM' ? config.perKmRateCents : null;
     const minChargeIncGstCents =
       input.pricingModel === 'HOURLY'
-        ? Math.max(minBaseCents, 4 * 8_000)
+        ? Math.max(minBaseCents, Math.round(config.hourlyMinFloorHours * config.hourlyRateCents))
         : minBaseCents;
     const estimateIncGstCents =
       input.pricingModel === 'PER_KM'
-        ? Math.max(minBaseCents, Math.round(route.distanceKm * 250))
-        : Math.max(minBaseCents, Math.round((route.billableHours ?? 4) * 8_000));
+        ? Math.max(minBaseCents, Math.round(route.distanceKm * config.perKmRateCents))
+        : Math.max(
+            minBaseCents,
+            Math.round((route.billableHours ?? config.hourlyMinFloorHours) * config.hourlyRateCents),
+          );
     return {
       distanceKm: route.distanceKm,
       durationMinutes: route.totalDurationMinutes,
@@ -631,6 +667,7 @@ export class JobsService {
       billableHours: route.billableHours,
       minBillableHours,
       hourlyRateCents,
+      perKmRateCents,
       minBaseCents,
       minChargeIncGstCents,
       estimateIncGstCents,
@@ -720,23 +757,29 @@ export class JobsService {
       input.pricingModel === 'HOURLY' && sortedStops.length > 2
         ? orderStopsTspObjects(sortedStops)
         : sortedStops;
+    const config = await this.getPricingConfig();
     // Sender-entered km is source of truth when provided; for HOURLY without manual km, derive from stops.
     const route =
       input.distanceKm != null && Number.isFinite(input.distanceKm) && input.distanceKm > 0
-        ? routeFromDistanceKm(input.distanceKm, input.pricingModel)
+        ? routeFromDistanceKm(input.distanceKm, input.pricingModel, config.hourlyMinFloorHours)
         : estimateRoute({
             stops: persistedStops.map((s) => ({ lat: s.lat, lng: s.lng })),
             pricingModel: input.pricingModel,
+            hourlyFloorHours: config.hourlyMinFloorHours,
           });
 
-    const minBase = await this.getMinBaseCents(input.pricingModel);
+    const minBase =
+      input.pricingModel === 'HOURLY' ? config.hourlyMinBaseCents : config.perKmMinBaseCents;
     let estimateInc = minBase;
     if (input.pricingModel === 'PER_KM') {
-      estimateInc = Math.max(minBase, Math.round(route.distanceKm * 250));
+      estimateInc = Math.max(minBase, Math.round(route.distanceKm * config.perKmRateCents));
     } else {
-      estimateInc = Math.max(minBase, Math.round((route.billableHours ?? 4) * 8_000));
+      estimateInc = Math.max(
+        minBase,
+        Math.round((route.billableHours ?? config.hourlyMinFloorHours) * config.hourlyRateCents),
+      );
     }
-    const gstRatePercent = await this.getPlatformGstPercent();
+    const gstRatePercent = config.gstPercent;
     const estimate = gstSplitFromIncCents(estimateInc, gstRatePercent);
 
     const origin = await this.resolveJobOrigin(persistedStops, user.company.homeRegionId);
@@ -925,22 +968,28 @@ export class JobsService {
       input.pricingModel === 'HOURLY' && sortedStops.length > 2
         ? orderStopsTspObjects(sortedStops)
         : sortedStops;
+    const config = await this.getPricingConfig();
     const route =
       input.distanceKm != null && Number.isFinite(input.distanceKm) && input.distanceKm > 0
-        ? routeFromDistanceKm(input.distanceKm, input.pricingModel)
+        ? routeFromDistanceKm(input.distanceKm, input.pricingModel, config.hourlyMinFloorHours)
         : estimateRoute({
             stops: persistedStops.map((s) => ({ lat: s.lat, lng: s.lng })),
             pricingModel: input.pricingModel,
+            hourlyFloorHours: config.hourlyMinFloorHours,
           });
 
-    const minBase = await this.getMinBaseCents(input.pricingModel);
+    const minBase =
+      input.pricingModel === 'HOURLY' ? config.hourlyMinBaseCents : config.perKmMinBaseCents;
     let estimateInc = minBase;
     if (input.pricingModel === 'PER_KM') {
-      estimateInc = Math.max(minBase, Math.round(route.distanceKm * 250));
+      estimateInc = Math.max(minBase, Math.round(route.distanceKm * config.perKmRateCents));
     } else {
-      estimateInc = Math.max(minBase, Math.round((route.billableHours ?? 4) * 8_000));
+      estimateInc = Math.max(
+        minBase,
+        Math.round((route.billableHours ?? config.hourlyMinFloorHours) * config.hourlyRateCents),
+      );
     }
-    const gstRatePercent = await this.getPlatformGstPercent();
+    const gstRatePercent = config.gstPercent;
     const estimate = gstSplitFromIncCents(estimateInc, gstRatePercent);
     const origin = await this.resolveJobOrigin(persistedStops, user.company.homeRegionId);
 

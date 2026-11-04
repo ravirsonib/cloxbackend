@@ -1808,6 +1808,13 @@ export class AdminService {
       carrierMarketplaceReleaseScoreDelta: row.carrierMarketplaceReleaseScoreDelta,
       carrierClearingDays: row.carrierClearingDays ?? 7,
       gstPercent: row.gstPercent ?? 10.0,
+      perKmRateCents: (row as any).perKmRateCents ?? 250,
+      perKmMinBaseCents: (row as any).perKmMinBaseCents ?? 5000,
+      hourlyRateCents: (row as any).hourlyRateCents ?? 8000,
+      hourlyMinFloorHours: (row as any).hourlyMinFloorHours ?? 4.0,
+      hourlyMinBaseCents: (row as any).hourlyMinBaseCents ?? 20000,
+      settlementCycleCadenceDays: (row as any).settlementCycleCadenceDays ?? 14,
+      settlementCutoffHour: (row as any).settlementCutoffHour ?? 4,
       updatedAt: row.updatedAt,
     };
   }
@@ -1834,6 +1841,27 @@ export class AdminService {
     if (input.gstPercent !== undefined) {
       data.gstPercent = input.gstPercent;
     }
+    if (input.perKmRateCents !== undefined) {
+      (data as any).perKmRateCents = input.perKmRateCents;
+    }
+    if (input.perKmMinBaseCents !== undefined) {
+      (data as any).perKmMinBaseCents = input.perKmMinBaseCents;
+    }
+    if (input.hourlyRateCents !== undefined) {
+      (data as any).hourlyRateCents = input.hourlyRateCents;
+    }
+    if (input.hourlyMinFloorHours !== undefined) {
+      (data as any).hourlyMinFloorHours = input.hourlyMinFloorHours;
+    }
+    if (input.hourlyMinBaseCents !== undefined) {
+      (data as any).hourlyMinBaseCents = input.hourlyMinBaseCents;
+    }
+    if (input.settlementCycleCadenceDays !== undefined) {
+      (data as any).settlementCycleCadenceDays = input.settlementCycleCadenceDays;
+    }
+    if (input.settlementCutoffHour !== undefined) {
+      (data as any).settlementCutoffHour = input.settlementCutoffHour;
+    }
     const updated = await this.prisma.platformSettings.update({
       where: { id: 'default' },
       data,
@@ -1853,6 +1881,13 @@ export class AdminService {
       carrierMarketplaceReleaseScoreDelta: updated.carrierMarketplaceReleaseScoreDelta,
       carrierClearingDays: updated.carrierClearingDays ?? 7,
       gstPercent: updated.gstPercent ?? 10.0,
+      perKmRateCents: (updated as any).perKmRateCents ?? 250,
+      perKmMinBaseCents: (updated as any).perKmMinBaseCents ?? 5000,
+      hourlyRateCents: (updated as any).hourlyRateCents ?? 8000,
+      hourlyMinFloorHours: (updated as any).hourlyMinFloorHours ?? 4.0,
+      hourlyMinBaseCents: (updated as any).hourlyMinBaseCents ?? 20000,
+      settlementCycleCadenceDays: (updated as any).settlementCycleCadenceDays ?? 14,
+      settlementCutoffHour: (updated as any).settlementCutoffHour ?? 4,
       updatedAt: updated.updatedAt,
     };
   }

@@ -44,6 +44,7 @@ export type RouteEstimate = {
 export function routeFromDistanceKm(
   distanceKm: number,
   pricingModel: 'PER_KM' | 'HOURLY',
+  hourlyFloorHours: number = HOURLY_FLOOR_HOURS,
 ): RouteEstimate {
   const km = Math.round(Math.max(0, distanceKm) * 10) / 10;
   if (km <= 0) {
@@ -52,7 +53,7 @@ export function routeFromDistanceKm(
       drivingMinutes: 0,
       fatigueBreakMinutes: 0,
       totalDurationMinutes: 0,
-      billableHours: pricingModel === 'HOURLY' ? HOURLY_FLOOR_HOURS : null,
+      billableHours: pricingModel === 'HOURLY' ? hourlyFloorHours : null,
       mock: true,
     };
   }
@@ -63,7 +64,7 @@ export function routeFromDistanceKm(
   const totalDurationMinutes = drivingMinutes + fatigueBreakMinutes;
   const billableHours =
     pricingModel === 'HOURLY'
-      ? Math.max(HOURLY_FLOOR_HOURS, Math.ceil((totalDurationMinutes / 60) * 4) / 4)
+      ? Math.max(hourlyFloorHours, Math.ceil((totalDurationMinutes / 60) * 4) / 4)
       : null;
 
   return {
@@ -82,10 +83,11 @@ export function routeFromDistanceKm(
 export function estimateRoute(params: {
   stops: LatLng[];
   pricingModel: 'PER_KM' | 'HOURLY';
+  hourlyFloorHours?: number;
 }): RouteEstimate {
-  const { stops, pricingModel } = params;
+  const { stops, pricingModel, hourlyFloorHours } = params;
   if (stops.length < 2) {
-    return routeFromDistanceKm(0, pricingModel);
+    return routeFromDistanceKm(0, pricingModel, hourlyFloorHours);
   }
 
   let distanceKm = 0;
@@ -93,7 +95,7 @@ export function estimateRoute(params: {
     distanceKm += haversineKm(stops[i], stops[i + 1]) * ROAD_FACTOR;
   }
   distanceKm = Math.round(distanceKm * 10) / 10;
-  return routeFromDistanceKm(distanceKm, pricingModel);
+  return routeFromDistanceKm(distanceKm, pricingModel, hourlyFloorHours);
 }
 
 /** Naive nearest-neighbour TSP for ≤4 stops (keeps first as start).

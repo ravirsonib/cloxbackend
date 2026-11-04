@@ -51,6 +51,8 @@ export const envSchema = z.object({
   ABR_GUID: z.string().optional(),
   /** Expiry watchdog interval ms (default 1h). Set 0 to disable. */
   COMPLIANCE_WATCHDOG_MS: z.coerce.number().int().nonnegative().default(3_600_000),
+  /** Settlement cycle automated watchdog interval ms (default 1h). Set 0 to disable. */
+  SETTLEMENT_WATCHDOG_MS: z.coerce.number().int().nonnegative().default(3_600_000),
   /**
    * Pre-trip exception auto-escalate after this many ms without carrier action (default 5 min).
    * Set 0 to disable auto-escalate.

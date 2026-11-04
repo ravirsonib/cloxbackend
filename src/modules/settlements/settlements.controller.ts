@@ -1,4 +1,13 @@
-import { Controller, Get, Query, UseGuards } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  Param,
+  ParseUUIDPipe,
+  Post,
+  Query,
+  UseGuards,
+} from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import {
   AdminRole,
@@ -15,20 +24,29 @@ import {
 import { RolesGuard } from '../../common/guards/roles.guard';
 import { ZodValidationPipe } from '../../common/pipes/zod-validation.pipe';
 import { FinanceService } from './finance.service';
+import {
+  RunDisbursementInput,
+  SettlementCyclesService,
+} from './settlement-cycles.service';
+import { ReconciliationService } from './reconciliation.service';
 
 @ApiTags('settlements')
 @Controller('settlements')
 export class SettlementsController {
-  constructor(private readonly financeService?: FinanceService) {}
+  constructor(
+    private readonly financeService?: FinanceService,
+    private readonly cyclesService?: SettlementCyclesService,
+    private readonly reconcileService?: ReconciliationService,
+  ) {}
 
   @Get('_status')
   @ApiOperation({ summary: 'Settlements module status' })
   status() {
     return {
       module: 'settlements',
-      status: 'scaffold',
-      milestone: 'M10',
-      implemented: false,
+      status: 'production',
+      milestone: 'M12',
+      implemented: true,
     };
   }
 
@@ -92,5 +110,78 @@ export class SettlementsController {
   ) {
     if (!this.financeService) throw new Error('FinanceService unavailable');
     return this.financeService.getSenderFinance(principal, query);
+  }
+
+  // ─── M12: Settlement Cycles & Disbursement ───────────────────────────────────
+
+  @Get('cycles')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(AdminRole.SUPER_ADMIN, AdminRole.STATE_MASTER)
+  @ApiOperation({ summary: 'List fortnightly settlement cycles' })
+  listCycles(
+    @Query('page') pageRaw?: string,
+    @Query('limit') limitRaw?: string,
+  ) {
+    if (!this.cyclesService) throw new Error('SettlementCyclesService unavailable');
+    return this.cyclesService.listCycles({
+      page: pageRaw ? Number(pageRaw) : undefined,
+      limit: limitRaw ? Number(limitRaw) : undefined,
+    });
+  }
+
+  @Get('cycles/active')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(AdminRole.SUPER_ADMIN)
+  @ApiOperation({ summary: 'Get or create current open settlement cycle' })
+  getActiveCycle() {
+    if (!this.cyclesService) throw new Error('SettlementCyclesService unavailable');
+    return this.cyclesService.getOrCreateActiveCycle();
+  }
+
+  @Get('cycles/:id')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(AdminRole.SUPER_ADMIN, AdminRole.STATE_MASTER)
+  @ApiOperation({ summary: 'Get settlement cycle breakdown and line items' })
+  getCycleDetail(@Param('id', ParseUUIDPipe) id: string) {
+    if (!this.cyclesService) throw new Error('SettlementCyclesService unavailable');
+    return this.cyclesService.getCycleDetail(id);
+  }
+
+  @Post('cycles/run')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(AdminRole.SUPER_ADMIN)
+  @ApiOperation({
+    summary:
+      'Execute fortnightly settlement disbursement run (Super Admin only, supports dryRun)',
+  })
+  runDisbursement(
+    @CurrentPrincipal() principal: AuthenticatedPrincipal,
+    @Body() input?: RunDisbursementInput,
+  ) {
+    if (!this.cyclesService) throw new Error('SettlementCyclesService unavailable');
+    return this.cyclesService.runDisbursement(principal, input);
+  }
+
+  // ─── M12: Daily Reconciliation & Anomaly Detection ──────────────────────────
+
+  @Get('reconcile')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(AdminRole.SUPER_ADMIN)
+  @ApiOperation({
+    summary:
+      'Daily Stripe vs internal ledger reconciliation report with discrepancy detection',
+  })
+  getReconciliation(
+    @CurrentPrincipal() principal: AuthenticatedPrincipal,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+  ) {
+    if (!this.reconcileService) throw new Error('ReconciliationService unavailable');
+    return this.reconcileService.getReconciliationReport(principal, { from, to });
   }
 }

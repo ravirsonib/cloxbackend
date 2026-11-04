@@ -1020,6 +1020,23 @@ model PlatformSettings {
   carrierClearingDays                 Int      @default(7)
   /// Platform GST rate percentage (e.g. 10.0 for 10% GST)
   gstPercent                          Float    @default(10.0)
+
+  /// Distance-based pricing: base rate in cents per km (e.g. 250 = $2.50/km)
+  perKmRateCents                      Int      @default(250)
+  /// Distance-based pricing: minimum trip base fare in cents (e.g. 5000 = $50.00)
+  perKmMinBaseCents                   Int      @default(5000)
+  /// Hourly-based pricing: hourly rate in cents per hour (e.g. 8000 = $80.00/hour)
+  hourlyRateCents                     Int      @default(8000)
+  /// Hourly-based pricing: minimum billable hours floor (e.g. 4.0)
+  hourlyMinFloorHours                 Float    @default(4.0)
+  /// Hourly-based pricing: minimum trip base fare in cents (e.g. 20000 = $200.00)
+  hourlyMinBaseCents                  Int      @default(20000)
+
+  /// Settlement cycle period in days (e.g. 7 = Weekly, 14 = Fortnightly, 30 = Monthly)
+  settlementCycleCadenceDays          Int      @default(14)
+  /// Hour of day (0-23, AEST) when scheduled automated settlement disbursement runs (default 4 = 4:00 AM)
+  settlementCutoffHour                Int      @default(4)
+
   updatedAt                           DateTime @updatedAt
   createdAt                           DateTime @default(now())
 }
@@ -1296,6 +1313,13 @@ enum SettlementLineStatus {
   VOID
 }
 
+enum SettlementCycleStatus {
+  OPEN
+  PROCESSING
+  COMPLETED
+  FAILED
+}
+
 model PaymentEvent {
   id                  String             @id @default(uuid())
   jobId               String?
@@ -1393,6 +1417,8 @@ model SettlementLine {
   /// Payee identity at accrual (referrer Local, or origin State seat, etc.)
   adminUserId     String?
   adminUser       AdminUser?              @relation("SettlementLineAdmin", fields: [adminUserId], references: [id], onDelete: SetNull)
+  cycleId         String?
+  cycle           SettlementCycle?        @relation(fields: [cycleId], references: [id], onDelete: SetNull)
   paidAt          DateTime?
   createdAt       DateTime                @default(now())
   updatedAt       DateTime                @updatedAt
@@ -1403,6 +1429,32 @@ model SettlementLine {
   @@index([overrideId])
   @@index([adminPackageId])
   @@index([adminUserId])
+  @@index([cycleId])
+}
+
+model SettlementCycle {
+  id                   String                @id @default(uuid())
+  cycleNumber          String                @unique
+  periodStart          DateTime
+  periodEnd            DateTime
+  scheduledDisburseAt  DateTime
+  status               SettlementCycleStatus @default(OPEN)
+  disbursedAt          DateTime?
+  totalAccruedCents    Int                   @default(0)
+  totalDisbursedCents  Int                   @default(0)
+  carrierPayoutCents   Int                   @default(0)
+  adminPayoutCents     Int                   @default(0)
+  hqHoldingCents       Int                   @default(0)
+  lineCount            Int                   @default(0)
+  notes                String?
+  metadata             Json?
+  createdAt            DateTime              @default(now())
+  updatedAt            DateTime              @updatedAt
+
+  settlementLines      SettlementLine[]
+
+  @@index([status])
+  @@index([periodStart, periodEnd])
 }
 
 // ─── Ops / policy / audit ───────────────────────────────────────────────────

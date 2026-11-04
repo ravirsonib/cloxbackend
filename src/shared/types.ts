@@ -213,6 +213,8 @@ export const AuditAction = {
   DISPUTE_ASSIGNED: 'dispute.assigned',
   DISPUTE_RESOLVED: 'dispute.resolved',
   DISPUTE_CLOSED_LOCAL: 'dispute.closed_local',
+  SETTLEMENT_CYCLE_RUN: 'settlement.cycle_run',
+  RECONCILIATION_RUN: 'settlement.reconciliation_run',
 } as const;
 
 export type AuditAction = (typeof AuditAction)[keyof typeof AuditAction];
@@ -1643,6 +1645,13 @@ export const platformSettingsPatchSchema = z.object({
   carrierMarketplaceReleaseScoreDelta: z.number().int().min(0).max(50).optional(),
   carrierClearingDays: z.number().int().min(0).max(90).optional(),
   gstPercent: z.number().min(0).max(100).optional(),
+  perKmRateCents: z.number().int().min(1).max(100_000).optional(),
+  perKmMinBaseCents: z.number().int().min(0).max(1_000_000).optional(),
+  hourlyRateCents: z.number().int().min(1).max(1_000_000).optional(),
+  hourlyMinFloorHours: z.number().min(0.5).max(24).optional(),
+  hourlyMinBaseCents: z.number().int().min(0).max(5_000_000).optional(),
+  settlementCycleCadenceDays: z.number().int().min(1).max(90).optional(),
+  settlementCutoffHour: z.number().int().min(0).max(23).optional(),
 });
 
 export type PlatformSettingsPatchInput = z.infer<typeof platformSettingsPatchSchema>;
