@@ -1802,6 +1802,7 @@ export class AdminService {
     const row = await this.ensurePlatformSettings();
     return {
       id: row.id,
+      enableStateMasterTier: (row as any).enableStateMasterTier ?? false,
       rescueDiscountPercent: row.rescueDiscountPercent,
       marketplaceRelistSlaMs: row.marketplaceRelistSlaMs,
       driverUnavailableScoreDelta: row.driverUnavailableScoreDelta,
@@ -1823,6 +1824,9 @@ export class AdminService {
     this.ensureDatabase();
     await this.ensurePlatformSettings();
     const data: Prisma.PlatformSettingsUpdateInput = {};
+    if (input.enableStateMasterTier !== undefined) {
+      (data as any).enableStateMasterTier = input.enableStateMasterTier;
+    }
     if (input.rescueDiscountPercent !== undefined) {
       data.rescueDiscountPercent = input.rescueDiscountPercent;
     }

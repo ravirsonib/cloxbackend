@@ -125,7 +125,7 @@ describe('Controller delegation leftovers', () => {
       postLocation: jest.fn().mockResolvedValue({ ok: true }),
     };
     const c = new TripsController(trips as never);
-    expect(c.status()).toMatchObject({ module: 'trips', milestone: 'M9' });
+    expect(c.status()).toMatchObject({ module: 'trips', milestone: 'M10' });
     await expect(c.mine(principal)).resolves.toEqual([]);
     await expect(c.track(principal, 'j1')).resolves.toEqual({ jobId: 'j1' });
     await expect(c.startByJob(principal, 'j1', {} as never)).resolves.toEqual({
@@ -199,6 +199,7 @@ describe('Controller delegation leftovers', () => {
       carrier as never,
       matching as never,
       { getProfile: jest.fn(), updateSelf: jest.fn(), requestChange: jest.fn() } as never,
+      { getCarrierFleetSchedule: jest.fn(), createDriverScheduleByCarrier: jest.fn(), reviewDriverSchedule: jest.fn() } as never,
     );
     await expect(c.register({} as never)).resolves.toEqual({ id: 'co' });
     await expect(c.onboarding(principal)).resolves.toEqual({ step: 1 });

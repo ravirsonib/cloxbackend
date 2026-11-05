@@ -93,13 +93,20 @@ export class RevenueSplitService {
           })
         : null;
 
-    const stateSeat = params.originRegionId
-      ? await this.findActiveSeatAdmin({
-          role: AdminRole.STATE_MASTER,
-          scopeType: AdminScopeType.STATE,
-          regionId: params.originRegionId,
-        })
-      : null;
+    const settings = await this.prisma.platformSettings?.findUnique?.({
+      where: { id: 'default' },
+      select: { enableStateMasterTier: true },
+    });
+    const isStateTierEnabled = Boolean(settings?.enableStateMasterTier);
+
+    const stateSeat =
+      isStateTierEnabled && params.originRegionId
+        ? await this.findActiveSeatAdmin({
+            role: AdminRole.STATE_MASTER,
+            scopeType: AdminScopeType.STATE,
+            regionId: params.originRegionId,
+          })
+        : null;
 
     const stateRecipient = stateSeat
       ? SettlementRecipientType.STATE_MASTER

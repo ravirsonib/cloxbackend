@@ -322,6 +322,8 @@ model User {
   sessions        AuthSession[]
   notifications   Notification[]
   disputesOpened  Dispute[]      @relation("DisputeOpenedBy")
+  driverSchedulesCreated  DriverScheduleEntry[] @relation("ScheduleCreatedBy")
+  driverSchedulesReviewed DriverScheduleEntry[] @relation("ScheduleReviewedBy")
 
   @@index([companyId])
   @@index([role, status])
@@ -449,6 +451,7 @@ model Company {
   companyInvites      CompanyInvite[]
   prospects           Prospect[]
   disputes            Dispute[]            @relation("DisputeCompany")
+  driverSchedules     DriverScheduleEntry[]
 
   @@index([type, status])
   @@index([abn])
@@ -665,9 +668,56 @@ model Driver {
   proposals   Proposal[]
   complianceDocuments ComplianceDocument[]
   proposedOnExceptions TripException[] @relation("ExceptionProposedDriver")
+  scheduleEntries      DriverScheduleEntry[]
 
   @@index([companyId, status])
   @@index([inviteTokenHash])
+}
+
+enum DriverAvailabilityType {
+  ANNUAL_LEAVE
+  MEDICAL_LEAVE
+  ROSTERED_OFF
+  PERSONAL
+  OVERTIME_AVAILABLE
+}
+
+enum DriverScheduleStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  CANCELLED
+}
+
+model DriverScheduleEntry {
+  id               String                 @id @default(uuid())
+  driverId         String
+  driver           Driver                 @relation(fields: [driverId], references: [id], onDelete: Cascade)
+  companyId        String
+  company          Company                @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  type             DriverAvailabilityType @default(ROSTERED_OFF)
+  status           DriverScheduleStatus   @default(APPROVED)
+
+  startAt          DateTime
+  endAt            DateTime
+  isAllDay         Boolean                @default(false)
+
+  reason           String?
+  notes            String?
+
+  createdById      String
+  createdBy        User                   @relation("ScheduleCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+  reviewedById     String?
+  reviewedBy       User?                  @relation("ScheduleReviewedBy", fields: [reviewedById], references: [id], onDelete: SetNull)
+  reviewedAt       DateTime?
+  rejectionReason  String?
+
+  createdAt        DateTime               @default(now())
+  updatedAt        DateTime               @updatedAt
+
+  @@index([driverId, status, startAt, endAt])
+  @@index([companyId, startAt, endAt])
 }
 
 model ComplianceDocument {
@@ -1010,6 +1060,8 @@ enum TripExceptionStatus {
 /// Singleton platform knobs (id = "default")
 model PlatformSettings {
   id                                  String   @id @default("default")
+  /// Whether State Master Admin regional seats are active. When false, state commissions route to HQ_HOLDING.
+  enableStateMasterTier               Boolean  @default(false)
   /// Carrier-facing discount % on marketplace rescue re-list (0–50)
   rescueDiscountPercent               Int      @default(10)
   /// Auto re-list after this many ms in AWAITING_CARRIER (pre-trip)

@@ -368,4 +368,68 @@ describe('OpsService.provisionAdmin paths', () => {
       );
     });
   });
+
+  describe('OpsService.getOpsDashboard (Local BDE)', () => {
+    const localBdeP = {
+      id: 'bde-1',
+      email: 'bde@clox.com.au',
+      role: AdminRole.LOCAL_BDE,
+      kind: 'admin' as const,
+      regionCodes: ['VIC'],
+      territoryCodes: ['MELB_CBD'],
+    };
+
+    it('loads dashboard and queries stuck companies using valid CompanyStatus enums without throwing', async () => {
+      const prisma = {
+        isConnected: () => true,
+        localTerritory: {
+          findFirst: jest.fn().mockResolvedValue({ id: 'terr-1', code: 'MELB_CBD', name: 'Melbourne CBD' }),
+        },
+        prospect: { count: jest.fn().mockResolvedValue(2) },
+        company: {
+          count: jest.fn().mockResolvedValue(1),
+          findMany: jest.fn().mockResolvedValue([
+            {
+              id: 'comp-1',
+              legalName: 'Apex Transport',
+              type: 'CARRIER',
+              status: 'PENDING_COMPLIANCE_DOCS',
+            },
+          ]),
+        },
+        job: { count: jest.fn().mockResolvedValue(5) },
+        dispute: {
+          count: jest.fn().mockResolvedValue(0),
+          findMany: jest.fn().mockResolvedValue([]),
+        },
+        settlementLine: {
+          aggregate: jest.fn().mockResolvedValue({ _sum: { amountCents: 15000 } }),
+        },
+      };
+
+      const service = new OpsService(
+        prisma as never,
+        { recordPlatform: jest.fn() } as never,
+        { sendAdminProvisionedEmail: jest.fn() } as never,
+        config as never,
+      );
+
+      const res = await service.getDashboardStats(localBdeP as any);
+      expect(res.role).toBe(AdminRole.LOCAL_BDE);
+      expect(res.scope.type).toBe('TERRITORY');
+      expect(res.kpis.onboardingStuck).toBe(1);
+      expect(res.tasks).toBeDefined();
+      expect(res.tasks?.[0]?.kind).toBe('ONBOARDING_STUCK');
+      expect(prisma.company.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            referredByAdminUserId: 'bde-1',
+            status: expect.objectContaining({
+              in: expect.arrayContaining(['DRAFT', 'PENDING_COMPLIANCE_DOCS', 'PENDING_VERIFICATION']),
+            }),
+          }),
+        }),
+      );
+    });
+  });
 });

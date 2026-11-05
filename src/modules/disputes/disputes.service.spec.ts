@@ -134,11 +134,14 @@ describe('DisputesService', () => {
           ...data,
         })),
       },
+      platformSettings: {
+        findUnique: jest.fn().mockResolvedValue({ enableStateMasterTier: true }),
+      },
     };
     const audit = { recordPlatform: jest.fn() };
     const service = new DisputesService(prisma as never, audit as never);
 
-    // Local escalates to STATE
+    // Local escalates to STATE (when State tier enabled)
     const stateEscalated = await service.escalate(localPrincipal, 'disp-1', {
       target: 'STATE',
       notes: 'Requires State Master review',
@@ -151,6 +154,46 @@ describe('DisputesService', () => {
       notes: 'Cross-border policy conflict',
     });
     expect(superEscalated.status).toBe(DisputeStatus.ESCALATED_SUPER);
+  });
+
+  it('routes escalation directly to Super Admin when enableStateMasterTier is false', async () => {
+    const mockDispute = {
+      id: 'disp-2',
+      disputeNumber: 'D-8802',
+      status: DisputeStatus.TRIAGED,
+      region: { code: 'VIC' },
+      territory: { code: 'MELB_CBD' },
+      triageNotes: 'Local triage complete',
+    };
+
+    const prisma = {
+      dispute: {
+        findUnique: jest.fn().mockResolvedValue(mockDispute),
+        update: jest.fn().mockImplementation(({ data }) => ({
+          ...mockDispute,
+          ...data,
+        })),
+      },
+      platformSettings: {
+        findUnique: jest.fn().mockResolvedValue({ enableStateMasterTier: false }),
+      },
+    };
+    const audit = { recordPlatform: jest.fn() };
+    const service = new DisputesService(prisma as never, audit as never);
+
+    // Target 'STATE' automatically routes to ESCALATED_SUPER when State Master tier is disabled
+    const escalatedToSuper = await service.escalate(localPrincipal, 'disp-2', {
+      target: 'STATE',
+      notes: 'Bypassing State directly to Super Admin',
+    });
+    expect(escalatedToSuper.status).toBe(DisputeStatus.ESCALATED_SUPER);
+
+    // Local BDE can also directly specify 'SUPER'
+    const directlySuper = await service.escalate(localPrincipal, 'disp-2', {
+      target: 'SUPER',
+      notes: 'Direct Super escalation',
+    });
+    expect(directlySuper.status).toBe(DisputeStatus.ESCALATED_SUPER);
   });
 
   it('prevents State Master from resolving a dispute escalated to Super Admin', async () => {

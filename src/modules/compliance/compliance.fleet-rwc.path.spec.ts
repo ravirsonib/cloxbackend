@@ -271,6 +271,73 @@ describe('ComplianceService CARRIER_FLEET_RWC + CARRIER_DRIVER_LICENCE', () => {
     expect(txComplianceCase.update).not.toHaveBeenCalled();
   });
 
+  it('rejecting older documentId for a driver keeps newer renewed document under review and keeps case OPEN', async () => {
+    const txComplianceDoc = {
+      updateMany: jest.fn(),
+      count: jest.fn().mockResolvedValue(1), // 1 document (the renewed one) is still UNDER_REVIEW!
+    };
+    const txComplianceCase = { update: jest.fn() };
+    const prisma = {
+      isConnected: () => true,
+      complianceCase: {
+        findUnique: jest.fn().mockResolvedValue({
+          id: 'case-renew-drv',
+          status: ComplianceCaseStatus.OPEN,
+          caseType: ComplianceCaseType.CARRIER_DRIVER_LICENCE,
+          companyId: 'co-c',
+          region: { code: 'VIC' },
+          company: {
+            id: 'co-c',
+            type: CompanyType.CARRIER,
+            status: CompanyStatus.ACTIVE,
+            email: 'c@yopmail.com',
+            legalName: 'Carrier',
+            homeRegion: { code: 'VIC' },
+            referredByAdminUserId: null,
+          },
+          documents: [
+            { id: 'lic-old', driverId: 'drv-1', status: ComplianceDocStatus.UNDER_REVIEW },
+            { id: 'lic-renewed', driverId: 'drv-1', status: ComplianceDocStatus.UNDER_REVIEW },
+          ],
+        }),
+        update: jest.fn(),
+      },
+      complianceDocument: { updateMany: jest.fn() },
+      company: { update: jest.fn() },
+      $transaction: jest.fn().mockImplementation(async (fn: (tx: unknown) => unknown) => {
+        const tx = {
+          complianceCase: txComplianceCase,
+          complianceDocument: txComplianceDoc,
+          vehicle: { updateMany: jest.fn() },
+          driver: { updateMany: jest.fn() },
+        };
+        return fn(tx);
+      }),
+    };
+
+    const result = await makeService(prisma).reject(superAdmin, 'case-renew-drv', {
+      note: 'older licence expired/expiring soon',
+      driverId: 'drv-1',
+      documentId: 'lic-old',
+    });
+
+    expect(result).toEqual({
+      id: 'case-renew-drv',
+      status: ComplianceCaseStatus.OPEN, // Case remains OPEN because renewed document lic-renewed is still unreviewed!
+      companyStatus: CompanyStatus.ACTIVE,
+    });
+    // Only the older document lic-old was rejected
+    expect(txComplianceDoc.updateMany).toHaveBeenCalledWith({
+      where: { caseId: 'case-renew-drv', id: 'lic-old' },
+      data: expect.objectContaining({
+        status: ComplianceDocStatus.REJECTED,
+        reviewNote: 'older licence expired/expiring soon',
+      }),
+    });
+    // Case itself was not updated to REJECTED because renewed document is still pending
+    expect(txComplianceCase.update).not.toHaveBeenCalled();
+  });
+
   it('State Master cannot approve CARRIER_DRIVER_LICENCE', async () => {
     const prisma = {
       isConnected: () => true,

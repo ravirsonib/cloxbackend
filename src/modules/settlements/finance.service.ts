@@ -463,7 +463,10 @@ export class FinanceService {
       };
     });
 
+    const clearingDays = await this.getCarrierClearingDays();
+
     return {
+      clearingDays,
       summary: {
         gmvCents,
         platformRevenueCents,

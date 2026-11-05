@@ -174,6 +174,9 @@ export const AuditAction = {
   EXCEPTION_RESOLVED: 'exception.resolved',
   EXCEPTION_PERFORMANCE_STUB: 'exception.performance_stub',
   EXCEPTION_RELISTED: 'exception.relisted',
+  DRIVER_SCHEDULE_CREATED: 'driver_schedule.created',
+  DRIVER_SCHEDULE_REVIEWED: 'driver_schedule.reviewed',
+  DRIVER_SCHEDULE_CANCELLED: 'driver_schedule.cancelled',
   PLATFORM_SETTINGS_UPDATED: 'platform.settings_updated',
   GEOGRAPHY_REGION_UPDATED: 'geography.region_updated',
   VEHICLE_CLASS_CREATED: 'vehicle_class.created',
@@ -811,6 +814,7 @@ export const complianceDecisionSchema = z.object({
   note: z.string().trim().max(2000).optional(),
   driverId: z.string().uuid().optional(),
   vehicleId: z.string().uuid().optional(),
+  documentId: z.string().uuid().optional(),
 });
 
 export type ComplianceDecisionInput = z.infer<typeof complianceDecisionSchema>;
@@ -1229,6 +1233,27 @@ export const carrierCapabilitiesSchema = z.object({
 
 export type CarrierCapabilitiesInput = z.infer<typeof carrierCapabilitiesSchema>;
 
+export const driverScheduleRequestSchema = z.object({
+  startAt: z.string().datetime(),
+  endAt: z.string().datetime(),
+  type: z.enum(['ANNUAL_LEAVE', 'MEDICAL_LEAVE', 'ROSTERED_OFF', 'PERSONAL', 'OVERTIME_AVAILABLE']).default('ANNUAL_LEAVE'),
+  isAllDay: z.boolean().default(false),
+  reason: z.string().trim().max(500).optional(),
+  notes: z.string().trim().max(1000).optional(),
+});
+export type DriverScheduleRequestInput = z.infer<typeof driverScheduleRequestSchema>;
+
+export const carrierScheduleCreateSchema = driverScheduleRequestSchema.extend({
+  driverId: z.string().uuid(),
+});
+export type CarrierScheduleCreateInput = z.infer<typeof carrierScheduleCreateSchema>;
+
+export const driverScheduleReviewSchema = z.object({
+  status: z.enum(['APPROVED', 'REJECTED']),
+  rejectionReason: z.string().trim().max(500).optional(),
+});
+export type DriverScheduleReviewInput = z.infer<typeof driverScheduleReviewSchema>;
+
 export const carrierBidStubSchema = z.object({
   jobId: z.string().uuid().optional(),
   amountAud: z.number().positive().max(1_000_000).optional(),
@@ -1639,6 +1664,7 @@ export const tripPodFinalizeSchema = z.object({
 export type TripPodFinalizeInput = z.infer<typeof tripPodFinalizeSchema>;
 
 export const platformSettingsPatchSchema = z.object({
+  enableStateMasterTier: z.boolean().optional(),
   rescueDiscountPercent: z.number().int().min(0).max(50).optional(),
   marketplaceRelistSlaMs: z.number().int().min(60_000).max(3_600_000).optional(),
   driverUnavailableScoreDelta: z.number().int().min(0).max(50).optional(),

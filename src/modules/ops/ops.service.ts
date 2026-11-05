@@ -19,8 +19,11 @@ import {
   ComplianceCaseType,
   ComplianceDocStatus,
   ComplianceDocType,
+  DisputeStatus,
+  JobStatus,
   LeadStatus,
   NotificationType,
+  ProspectStage,
 } from '@prisma/client';
 import {
   AuditAction,
@@ -54,6 +57,17 @@ type PartnerProfileJson = {
   networkExperience?: string;
   executionStrategy?: string;
 };
+
+const ONBOARDING_STUCK_STATUSES: CompanyStatus[] = [
+  CompanyStatus.DRAFT,
+  CompanyStatus.PENDING_VERIFICATION,
+  CompanyStatus.PENDING_COMPLIANCE_DOCS,
+  CompanyStatus.PENDING_REVIEW,
+  CompanyStatus.INFO_REQUESTED,
+  CompanyStatus.PENDING_SETTLEMENT_SETUP,
+  CompanyStatus.PENDING_FLEET_READINESS,
+  CompanyStatus.PENDING_PAYMENT,
+];
 
 @Injectable()
 export class OpsService {
@@ -928,25 +942,25 @@ export class OpsService {
           where: {
             type: CompanyType.CARRIER,
             ...(regionId ? { homeRegionId: regionId } : {}),
-            status: { in: [CompanyStatus.ACTIVE, 'BID_ELIGIBLE' as any] },
+            status: { in: [CompanyStatus.ACTIVE, CompanyStatus.BID_ELIGIBLE] },
           },
         }),
         this.prisma.job.count({
           where: {
             ...(regionId ? { originRegionId: regionId } : {}),
-            status: { in: ['PUBLISHED', 'ASSIGNED', 'IN_TRANSIT'] as any },
+            status: { in: [JobStatus.PUBLISHED, JobStatus.ASSIGNED, JobStatus.IN_TRANSIT] },
           },
         }),
         this.prisma.dispute.count({
           where: {
             ...(regionId ? { regionId } : {}),
-            status: { in: ['OPEN_TRIAGE', 'TRIAGED', 'ESCALATED_STATE'] as any },
+            status: { in: [DisputeStatus.OPEN_TRIAGE, DisputeStatus.TRIAGED, DisputeStatus.ESCALATED_STATE] },
           },
         }),
         this.prisma.complianceCase.count({
           where: {
             ...(regionId ? { regionId } : {}),
-            status: { in: [ComplianceCaseStatus.OPEN, 'INFO_REQUESTED' as any] },
+            status: { in: [ComplianceCaseStatus.OPEN, ComplianceCaseStatus.INFO_REQUESTED] },
           },
         }),
         this.prisma.settlementLine.aggregate({
@@ -1043,25 +1057,32 @@ export class OpsService {
         this.prisma.prospect.count({
           where: {
             ownerAdminUserId: actor.id,
-            stage: { in: ['LEAD', 'CONTACTED', 'INVITED', 'ONBOARDING'] as any },
+            stage: {
+              in: [
+                ProspectStage.LEAD,
+                ProspectStage.CONTACTED,
+                ProspectStage.INVITED,
+                ProspectStage.ONBOARDING,
+              ],
+            },
           },
         }),
         this.prisma.company.count({
           where: {
             referredByAdminUserId: actor.id,
-            status: { in: [CompanyStatus.DRAFT, 'PENDING_VERIFICATION' as any, 'PENDING_DOCS' as any, 'INFO_REQUESTED' as any] },
+            status: { in: ONBOARDING_STUCK_STATUSES },
           },
         }),
         this.prisma.job.count({
           where: {
             ...(territoryId ? { originTerritoryId: territoryId } : {}),
-            status: { in: ['PUBLISHED', 'ASSIGNED', 'IN_TRANSIT'] as any },
+            status: { in: [JobStatus.PUBLISHED, JobStatus.ASSIGNED, JobStatus.IN_TRANSIT] },
           },
         }),
         this.prisma.dispute.count({
           where: {
             ...(territoryId ? { territoryId } : {}),
-            status: 'OPEN_TRIAGE' as any,
+            status: DisputeStatus.OPEN_TRIAGE,
           },
         }),
         this.prisma.settlementLine.aggregate({
@@ -1076,7 +1097,7 @@ export class OpsService {
         this.prisma.dispute.findMany({
           where: {
             ...(territoryId ? { territoryId } : {}),
-            status: 'OPEN_TRIAGE' as any,
+            status: DisputeStatus.OPEN_TRIAGE,
           },
           take: 5,
           orderBy: { createdAt: 'desc' },
@@ -1085,7 +1106,7 @@ export class OpsService {
         this.prisma.company.findMany({
           where: {
             referredByAdminUserId: actor.id,
-            status: { in: [CompanyStatus.DRAFT, 'PENDING_VERIFICATION' as any, 'PENDING_DOCS' as any, 'INFO_REQUESTED' as any] },
+            status: { in: ONBOARDING_STUCK_STATUSES },
           },
           take: 5,
           orderBy: { updatedAt: 'desc' },
@@ -1151,14 +1172,23 @@ export class OpsService {
         this.prisma.company.count({
           where: {
             type: CompanyType.CARRIER,
-            status: { in: [CompanyStatus.ACTIVE, 'BID_ELIGIBLE' as any] },
+            status: { in: [CompanyStatus.ACTIVE, CompanyStatus.BID_ELIGIBLE] },
           },
         }),
         this.prisma.job.count({
-          where: { status: { in: ['PUBLISHED', 'ASSIGNED', 'IN_TRANSIT'] as any } },
+          where: { status: { in: [JobStatus.PUBLISHED, JobStatus.ASSIGNED, JobStatus.IN_TRANSIT] } },
         }),
         this.prisma.dispute.count({
-          where: { status: { in: ['OPEN_TRIAGE', 'TRIAGED', 'ESCALATED_STATE', 'ESCALATED_SUPER'] as any } },
+          where: {
+            status: {
+              in: [
+                DisputeStatus.OPEN_TRIAGE,
+                DisputeStatus.TRIAGED,
+                DisputeStatus.ESCALATED_STATE,
+                DisputeStatus.ESCALATED_SUPER,
+              ],
+            },
+          },
         }),
         this.prisma.settlementLine.aggregate({
           where: { recipientType: 'SUPER_ADMIN' },
@@ -1260,13 +1290,13 @@ export class OpsService {
               this.prisma.dispute.count({
                 where: {
                   territoryId,
-                  status: 'OPEN_TRIAGE' as any,
+                  status: DisputeStatus.OPEN_TRIAGE,
                 },
               }),
               this.prisma.dispute.count({
                 where: {
                   territoryId,
-                  status: 'OPEN_TRIAGE' as any,
+                  status: DisputeStatus.OPEN_TRIAGE,
                   createdAt: { lt: oneDayAgo },
                 },
               }),
@@ -1373,9 +1403,9 @@ export class OpsService {
         })
       : [];
 
-    const openDisputesCount = recentDisputesRaw.filter((d) => d.status === ('OPEN_TRIAGE' as any)).length;
+    const openDisputesCount = recentDisputesRaw.filter((d) => d.status === DisputeStatus.OPEN_TRIAGE).length;
     const overdueDisputesCount = recentDisputesRaw.filter(
-      (d) => d.status === ('OPEN_TRIAGE' as any) && d.createdAt < oneDayAgo,
+      (d) => d.status === DisputeStatus.OPEN_TRIAGE && d.createdAt < oneDayAgo,
     ).length;
 
     const pipelineCount = bde.prospects.length;
@@ -1441,7 +1471,7 @@ export class OpsService {
         reason: d.reason,
         disputedAmountCents: d.disputedAmountCents,
         createdAt: d.createdAt.toISOString(),
-        isOverdue: d.status === ('OPEN_TRIAGE' as any) && d.createdAt < oneDayAgo,
+        isOverdue: d.status === DisputeStatus.OPEN_TRIAGE && d.createdAt < oneDayAgo,
       })),
       coachingNotes: profile.coachingNotes ?? [],
     };

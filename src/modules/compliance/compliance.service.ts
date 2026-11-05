@@ -498,6 +498,7 @@ export class ComplianceService {
 
     // Fleet RWC / driver licence: approve docs + activate linked PENDING_REVIEW assets.
     if (this.isAssetReviewCase(complianceCase.caseType)) {
+      const isSpecificDocument = Boolean(input.documentId);
       const isSpecificDriver = Boolean(
         input.driverId &&
           complianceCase.caseType === ComplianceCaseType.CARRIER_DRIVER_LICENCE,
@@ -507,8 +508,14 @@ export class ComplianceService {
           complianceCase.caseType === ComplianceCaseType.CARRIER_FLEET_RWC,
       );
 
+      const targetDoc = isSpecificDocument
+        ? complianceCase.documents.find((d) => d.id === input.documentId)
+        : null;
+
       const vehicleIds = isSpecificVehicle
         ? [input.vehicleId!]
+        : targetDoc?.vehicleId
+        ? [targetDoc.vehicleId]
         : [
             ...new Set(
               complianceCase.documents
@@ -518,6 +525,8 @@ export class ComplianceService {
           ];
       const driverIds = isSpecificDriver
         ? [input.driverId!]
+        : targetDoc?.driverId
+        ? [targetDoc.driverId]
         : [
             ...new Set(
               complianceCase.documents
@@ -529,7 +538,9 @@ export class ComplianceService {
       let caseResolved = false;
       await this.prisma.$transaction(async (tx) => {
         const docWhere: any = { caseId };
-        if (isSpecificDriver) {
+        if (isSpecificDocument) {
+          docWhere.id = input.documentId;
+        } else if (isSpecificDriver) {
           docWhere.driverId = input.driverId;
         } else if (isSpecificVehicle) {
           docWhere.vehicleId = input.vehicleId;
@@ -958,6 +969,7 @@ export class ComplianceService {
       this.isPostOpsOperationalStatus(complianceCase.company.status);
 
     if (preserveCompanyOnReject) {
+      const isSpecificDocument = Boolean(input.documentId);
       const isSpecificDriver = Boolean(
         input.driverId &&
           complianceCase.caseType === ComplianceCaseType.CARRIER_DRIVER_LICENCE,
@@ -970,7 +982,9 @@ export class ComplianceService {
       let caseResolved = false;
       await this.prisma.$transaction(async (tx) => {
         const docWhere: any = { caseId };
-        if (isSpecificDriver) {
+        if (isSpecificDocument) {
+          docWhere.id = input.documentId;
+        } else if (isSpecificDriver) {
           docWhere.driverId = input.driverId;
         } else if (isSpecificVehicle) {
           docWhere.vehicleId = input.vehicleId;
@@ -1113,6 +1127,7 @@ export class ComplianceService {
       this.isAssetReviewCase(complianceCase.caseType) ||
       this.isPostOpsOperationalStatus(complianceCase.company.status)
     ) {
+      const isSpecificDocument = Boolean(input.documentId);
       const isSpecificDriver = Boolean(
         input.driverId &&
           complianceCase.caseType === ComplianceCaseType.CARRIER_DRIVER_LICENCE,
@@ -1124,10 +1139,15 @@ export class ComplianceService {
 
       const infoRequestedAt = new Date();
       await this.prisma.$transaction(async (tx) => {
-        if (isSpecificDriver || isSpecificVehicle) {
+        if (isSpecificDocument || isSpecificDriver || isSpecificVehicle) {
           const docWhere: any = { caseId };
-          if (isSpecificDriver) docWhere.driverId = input.driverId;
-          if (isSpecificVehicle) docWhere.vehicleId = input.vehicleId;
+          if (isSpecificDocument) {
+            docWhere.id = input.documentId;
+          } else if (isSpecificDriver) {
+            docWhere.driverId = input.driverId;
+          } else if (isSpecificVehicle) {
+            docWhere.vehicleId = input.vehicleId;
+          }
           await tx.complianceDocument.updateMany({
             where: docWhere,
             data: {

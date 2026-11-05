@@ -332,21 +332,32 @@ export class DisputesService {
   async escalate(principal: AuthenticatedPrincipal, id: string, input: EscalateDisputeInput) {
     const dispute = await this.getById(principal, id);
 
+    const settings = await this.prisma.platformSettings?.findUnique?.({
+      where: { id: 'default' },
+      select: { enableStateMasterTier: true },
+    });
+    const isStateTierEnabled = Boolean(settings?.enableStateMasterTier);
+
     let nextStatus: DisputeStatus;
     if (input.target === 'STATE') {
       if (
         principal.role !== AdminRole.LOCAL_BDE &&
         principal.role !== AdminRole.SUPER_ADMIN
       ) {
-        throw new ForbiddenException('Only Local BDE can escalate to State Master');
+        throw new ForbiddenException('Only Local BDE can escalate');
       }
-      nextStatus = DisputeStatus.ESCALATED_STATE;
+      // If State Master tier is disabled, escalate directly to Super Admin
+      nextStatus = isStateTierEnabled ? DisputeStatus.ESCALATED_STATE : DisputeStatus.ESCALATED_SUPER;
     } else {
-      if (
-        principal.role !== AdminRole.STATE_MASTER &&
-        principal.role !== AdminRole.SUPER_ADMIN
-      ) {
-        throw new ForbiddenException('Only State Master can escalate to Super Admin');
+      const allowedRoles: readonly AppRole[] = isStateTierEnabled
+        ? [AdminRole.STATE_MASTER, AdminRole.SUPER_ADMIN]
+        : [AdminRole.LOCAL_BDE, AdminRole.SUPER_ADMIN];
+      if (!allowedRoles.includes(principal.role)) {
+        throw new ForbiddenException(
+          isStateTierEnabled
+            ? 'Only State Master can escalate to Super Admin'
+            : 'Only Local BDE or Super Admin can escalate to Super Admin',
+        );
       }
       nextStatus = DisputeStatus.ESCALATED_SUPER;
     }

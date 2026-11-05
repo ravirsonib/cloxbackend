@@ -8,12 +8,15 @@ import {
   Patch,
   Post,
   Put,
+  Query,
   UseGuards,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { Throttle, ThrottlerGuard } from '@nestjs/throttler';
 import {
   AppRole,
+  carrierScheduleCreateSchema,
+  driverScheduleReviewSchema,
   proposalSubmitSchema,
   carrierCapabilitiesSchema,
   carrierDriverInviteSchema,
@@ -27,6 +30,8 @@ import {
   companyProfileSelfSchema,
   fleetDisableReasonSchema,
   type AssignmentReassignInput,
+  type CarrierScheduleCreateInput,
+  type DriverScheduleReviewInput,
   type ProposalSubmitInput,
   type CarrierCapabilitiesInput,
   type CarrierDriverInviteInput,
@@ -45,6 +50,7 @@ import { JwtAuthGuard, type AuthenticatedPrincipal } from '../../common/guards/j
 import { RolesGuard } from '../../common/guards/roles.guard';
 import { ZodValidationPipe } from '../../common/pipes/zod-validation.pipe';
 import { CompanyProfileService } from '../../common/services/company-profile.service';
+import { DriverScheduleService } from '../driver/driver-schedule.service';
 import { MatchingService } from '../matching/matching.service';
 import { CarrierService } from './carrier.service';
 
@@ -55,6 +61,7 @@ export class CarrierController {
     private readonly carrierService: CarrierService,
     private readonly matchingService: MatchingService,
     private readonly companyProfileService: CompanyProfileService,
+    private readonly scheduleService: DriverScheduleService,
   ) {}
 
   @Post('register')
@@ -315,6 +322,57 @@ export class CarrierController {
   @ApiOperation({ summary: 'Go/no-go: can bid?' })
   bidEligibility(@CurrentPrincipal() principal: AuthenticatedPrincipal) {
     return this.carrierService.getBidEligibility(principal);
+  }
+
+  @Get('fleet/drivers/bid-check/:jobId')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(AppRole.TRANSPORT_COMPANY)
+  @ApiOperation({ summary: 'Check fleet drivers availability for a scheduled job window' })
+  checkFleetDriversBid(
+    @CurrentPrincipal() principal: AuthenticatedPrincipal,
+    @Param('jobId', ParseUUIDPipe) jobId: string,
+  ) {
+    return this.matchingService.checkFleetDriversAvailabilityForJob(principal, jobId);
+  }
+
+  @Get('fleet/schedule')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(AppRole.TRANSPORT_COMPANY)
+  @ApiOperation({ summary: 'Get unified fleet schedule and driver time-off feed' })
+  getFleetSchedule(
+    @CurrentPrincipal() principal: AuthenticatedPrincipal,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+    @Query('driverId') driverId?: string,
+  ) {
+    return this.scheduleService.getCarrierFleetSchedule(principal, { from, to, driverId });
+  }
+
+  @Post('fleet/schedule')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(AppRole.TRANSPORT_COMPANY)
+  @ApiOperation({ summary: 'Directly schedule driver time-off / roster block by carrier' })
+  createDriverSchedule(
+    @CurrentPrincipal() principal: AuthenticatedPrincipal,
+    @Body(new ZodValidationPipe(carrierScheduleCreateSchema)) body: CarrierScheduleCreateInput,
+  ) {
+    return this.scheduleService.createDriverScheduleByCarrier(principal, body);
+  }
+
+  @Patch('fleet/schedule/:id/review')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(AppRole.TRANSPORT_COMPANY)
+  @ApiOperation({ summary: 'Approve or reject a driver time-off request' })
+  reviewDriverSchedule(
+    @CurrentPrincipal() principal: AuthenticatedPrincipal,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body(new ZodValidationPipe(driverScheduleReviewSchema)) body: DriverScheduleReviewInput,
+  ) {
+    return this.scheduleService.reviewDriverSchedule(principal, id, body);
   }
 
   @Post('bids')

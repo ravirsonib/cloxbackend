@@ -18,9 +18,15 @@ describe('RevenueSplitService.resolveForJob (per-admin packages)', () => {
       localPercent: number;
     } | null;
     referrer?: { id: string; role: AdminRole; status: AdminUserStatus; active: boolean } | null;
+    enableStateMasterTier?: boolean;
   }) {
     const prisma = {
       isConnected: () => true,
+      platformSettings: {
+        findUnique: jest.fn().mockResolvedValue({
+          enableStateMasterTier: opts.enableStateMasterTier ?? false,
+        }),
+      },
       company: {
         findUnique: jest.fn().mockResolvedValue({
           referredByAdminUserId: opts.referredBy,
@@ -197,5 +203,49 @@ describe('RevenueSplitService.resolveForJob (per-admin packages)', () => {
       statePercent: 10,
       localPercent: 5,
     });
+  });
+
+  it('routes state commission (10%) to HQ_HOLDING when enableStateMasterTier is false', async () => {
+    const service = buildService({
+      referredBy: null,
+      packageFor: null,
+      referrer: null,
+      enableStateMasterTier: false,
+    });
+
+    const resolved = await service.resolveForJob({
+      grossIncGstCents: 10_000,
+      originRegionId: regionId,
+      originTerritoryId: territoryId,
+      senderCompanyId: 'sender-1',
+    });
+
+    const stateLine = resolved.lines.find((l) => l.bucket === 'STATE');
+    expect(stateLine).toBeDefined();
+    expect(stateLine?.recipientType).toBe('HQ_HOLDING');
+    expect(stateLine?.adminUserId).toBeNull();
+    expect(stateLine?.amountCents).toBe(1_000);
+  });
+
+  it('routes state commission (10%) to STATE_MASTER when enableStateMasterTier is true', async () => {
+    const service = buildService({
+      referredBy: null,
+      packageFor: null,
+      referrer: null,
+      enableStateMasterTier: true,
+    });
+
+    const resolved = await service.resolveForJob({
+      grossIncGstCents: 10_000,
+      originRegionId: regionId,
+      originTerritoryId: territoryId,
+      senderCompanyId: 'sender-1',
+    });
+
+    const stateLine = resolved.lines.find((l) => l.bucket === 'STATE');
+    expect(stateLine).toBeDefined();
+    expect(stateLine?.recipientType).toBe('STATE_MASTER');
+    expect(stateLine?.adminUserId).toBe(stateId);
+    expect(stateLine?.amountCents).toBe(1_000);
   });
 });

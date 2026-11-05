@@ -31,6 +31,11 @@ import { InAppNotificationsService } from '../notifications/in-app-notifications
 import { NotificationsService } from '../notifications/notifications.service';
 import { assertAssignmentCompliance } from '../jobs/assignment-gates';
 import {
+  assertDriverAvailabilityForWindow,
+  calculateJobExecutionWindow,
+  checkDriverAvailabilityForWindow,
+} from './driver-schedule.util';
+import {
   carrierNetPayoutCents,
   gstSplitFromIncCents,
   isVehicleAdequateForJob,
@@ -245,6 +250,14 @@ export class MatchingService {
       },
       'badRequest',
     );
+
+    const executionWindow = calculateJobExecutionWindow(job);
+    await assertDriverAvailabilityForWindow(this.prisma, {
+      driverId: driver.id,
+      windowStart: executionWindow.windowStart,
+      windowEnd: executionWindow.windowEnd,
+      excludeJobId: job.id,
+    });
 
     const vehicleBusyAssignment = await this.prisma.assignment.findFirst({
       where: {
@@ -572,5 +585,71 @@ export class MatchingService {
     }
 
     return this.withdrawProposal(principal, proposal.id);
+  }
+
+  async checkFleetDriversAvailabilityForJob(
+    principal: AuthenticatedPrincipal,
+    jobId: string,
+  ) {
+    this.ensureDatabase();
+    const user = await this.requireCarrierCompany(principal);
+    const company = user.company!;
+    const job = await this.prisma.job.findUnique({
+      where: { id: jobId },
+      select: {
+        id: true,
+        pickupAt: true,
+        routeDurationMinutes: true,
+        routeFatigueBreakMinutes: true,
+      },
+    });
+    if (!job) throw new NotFoundException('Job not found');
+
+    const executionWindow = calculateJobExecutionWindow(job);
+
+    const drivers = await this.prisma.driver.findMany({
+      where: {
+        companyId: company.id,
+        status: DriverStatus.ACTIVE,
+      },
+      include: {
+        user: { select: { name: true, email: true } },
+      },
+      orderBy: { createdAt: 'asc' },
+    });
+
+    const driverChecks = await Promise.all(
+      drivers.map(async (drv) => {
+        const check = await checkDriverAvailabilityForWindow(this.prisma, {
+          driverId: drv.id,
+          windowStart: executionWindow.windowStart,
+          windowEnd: executionWindow.windowEnd,
+          excludeJobId: job.id,
+        });
+
+        return {
+          id: drv.id,
+          name: drv.user?.name ?? drv.user?.email ?? 'Unknown Driver',
+          email: drv.user?.email ?? null,
+          licenceClass: drv.licenceClass,
+          isEligible: check.isAvailable,
+          code: check.code ?? null,
+          reason: check.message ?? null,
+          conflictingWindow: check.conflictingWindow ?? null,
+        };
+      }),
+    );
+
+    return {
+      jobId: job.id,
+      jobWindow: {
+        startAt: executionWindow.windowStart,
+        endAt: executionWindow.windowEnd,
+        durationMinutes: executionWindow.durationMinutes,
+        fatigueBreakMinutes: executionWindow.fatigueBreakMinutes,
+        bufferMinutes: executionWindow.bufferMinutes,
+      },
+      drivers: driverChecks,
+    };
   }
 }
