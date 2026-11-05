@@ -108,14 +108,13 @@ export class SenderService {
       company.status === CompanyStatus.PENDING_PAYMENT ||
       company.status === CompanyStatus.ACTIVE;
     const invoiceOk = this.invoiceComplete(company);
-    const paymentOk = company.paymentReady;
     const active = company.status === CompanyStatus.ACTIVE;
     return {
       opsApproved,
       invoiceComplete: invoiceOk,
-      paymentReady: paymentOk,
+      paymentReady: company.paymentReady,
       accountActive: active,
-      canBook: active && invoiceOk && paymentOk,
+      canBook: (active || company.status === CompanyStatus.PENDING_PAYMENT) && invoiceOk,
     };
   }
 
@@ -128,12 +127,11 @@ export class SenderService {
   ): string {
     if (company.status === CompanyStatus.REJECTED) return 'rejected';
     if (company.status === CompanyStatus.SUSPENDED) return 'suspended';
-    // ACTIVE / PENDING_PAYMENT without a live payment method → reopen Payment only.
     if (
       company.status === CompanyStatus.ACTIVE ||
       company.status === CompanyStatus.PENDING_PAYMENT
     ) {
-      return company.paymentReady ? 'complete' : 'payment';
+      return 'complete';
     }
     if (
       company.status === CompanyStatus.PENDING_REVIEW ||
@@ -288,17 +286,9 @@ export class SenderService {
     const latestCase = company.complianceCases[0] ?? null;
     const goNoGo = this.goNoGo(company);
     const step = this.wizardStep(company);
-    if (
-      (company.status === CompanyStatus.ACTIVE ||
-        company.status === CompanyStatus.PENDING_PAYMENT) &&
-      !company.paymentReady
-    ) {
-      void this.maybeNotifyPaymentSetupRequired(user.id, company.id);
-    }
-
     return {
       step,
-      paymentRepairRequired: step === 'payment' && company.status === CompanyStatus.ACTIVE,
+      paymentRepairRequired: false,
       user: {
         id: user.id,
         email: user.email,

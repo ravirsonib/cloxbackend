@@ -145,7 +145,7 @@ export class ComplianceService {
       return company.status;
     }
     return company.type === CompanyType.SENDER
-      ? CompanyStatus.PENDING_PAYMENT
+      ? CompanyStatus.ACTIVE
       : CompanyStatus.BID_ELIGIBLE;
   }
 
@@ -853,7 +853,7 @@ export class ComplianceService {
 
   /** Notify sender/carrier contacts after Ops decision (in-app + email). */
   private async notifyCompanyDecision(params: {
-    kind: 'approved' | 'info_requested';
+    kind: 'approved' | 'info_requested' | 'rejected';
     caseId: string;
     companyId: string;
     companyEmail: string | null;
@@ -896,12 +896,16 @@ export class ComplianceService {
           : NotificationType.COMPLIANCE_INFO_REQUESTED,
         title: approved
           ? `Verification approved: ${params.companyName}`
-          : `More info needed: ${params.companyName}`,
+          : params.kind === 'rejected'
+            ? `Verification not approved: ${params.companyName}`
+            : `More info needed: ${params.companyName}`,
         body:
           params.decisionNote?.trim() ||
           (approved
             ? 'Ops approved your compliance case.'
-            : 'Ops requested more information on your compliance case.'),
+            : params.kind === 'rejected'
+              ? 'Ops could not approve your compliance case.'
+              : 'Ops requested more information on your compliance case.'),
         href: onboardingHref,
         entityType: 'ComplianceCase',
         entityId: params.caseId,
@@ -931,24 +935,34 @@ export class ComplianceService {
 
     const companyType = params.companyType === CompanyType.CARRIER ? 'CARRIER' : 'SENDER';
     await Promise.all(
-      [...recipients].map((to) =>
-        params.kind === 'approved'
-          ? this.notifications.sendComplianceApprovedEmail({
-              to,
-              companyName: params.companyName,
-              companyType,
-              companyStatus: params.companyStatus,
-              caseType: params.caseType,
-              decisionNote: params.decisionNote,
-            })
-          : this.notifications.sendComplianceInfoRequestedEmail({
-              to,
-              companyName: params.companyName,
-              companyType,
-              caseType: params.caseType,
-              decisionNote: params.decisionNote,
-            }),
-      ),
+      [...recipients].map((to) => {
+        if (params.kind === 'approved') {
+          return this.notifications.sendComplianceApprovedEmail({
+            to,
+            companyName: params.companyName,
+            companyType,
+            companyStatus: params.companyStatus,
+            caseType: params.caseType,
+            decisionNote: params.decisionNote,
+          });
+        }
+        if (params.kind === 'rejected') {
+          return this.notifications.sendComplianceRejectedEmail({
+            to,
+            companyName: params.companyName,
+            companyType,
+            caseType: params.caseType,
+            decisionNote: params.decisionNote,
+          });
+        }
+        return this.notifications.sendComplianceInfoRequestedEmail({
+          to,
+          companyName: params.companyName,
+          companyType,
+          caseType: params.caseType,
+          decisionNote: params.decisionNote,
+        });
+      }),
     );
   }
 
@@ -1040,6 +1054,19 @@ export class ComplianceService {
           caseResolved,
         },
       });
+      if (caseResolved) {
+        void this.notifyCompanyDecision({
+          kind: 'rejected',
+          caseId,
+          companyId: complianceCase.companyId,
+          companyEmail: complianceCase.company.email,
+          companyName: complianceCase.company.legalName,
+          companyType: complianceCase.company.type,
+          companyStatus: complianceCase.company.status,
+          caseType: complianceCase.caseType,
+          decisionNote: input.note,
+        });
+      }
       return {
         id: caseId,
         status: caseResolved ? ComplianceCaseStatus.REJECTED : complianceCase.status,
@@ -1107,6 +1134,18 @@ export class ComplianceService {
         caseType: complianceCase.caseType,
         adminUserId: partner?.id ?? null,
       },
+    });
+
+    void this.notifyCompanyDecision({
+      kind: 'rejected',
+      caseId,
+      companyId: complianceCase.companyId,
+      companyEmail: complianceCase.company.email,
+      companyName: complianceCase.company.legalName,
+      companyType: complianceCase.company.type,
+      companyStatus: CompanyStatus.REJECTED,
+      caseType: complianceCase.caseType,
+      decisionNote: input.note,
     });
 
     return { id: caseId, status: ComplianceCaseStatus.REJECTED, companyStatus: CompanyStatus.REJECTED };

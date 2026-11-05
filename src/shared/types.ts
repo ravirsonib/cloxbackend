@@ -173,6 +173,8 @@ export const AuditAction = {
   EXCEPTION_RELEASED: 'exception.released',
   EXCEPTION_RESOLVED: 'exception.resolved',
   EXCEPTION_PERFORMANCE_STUB: 'exception.performance_stub',
+  CARRIER_PERFORMANCE_UPDATED: 'carrier.performance_updated',
+  CARRIER_RELIABILITY_RECOVERED: 'carrier.reliability_recovered',
   EXCEPTION_RELISTED: 'exception.relisted',
   DRIVER_SCHEDULE_CREATED: 'driver_schedule.created',
   DRIVER_SCHEDULE_REVIEWED: 'driver_schedule.reviewed',
@@ -1221,9 +1223,24 @@ export const carrierDriverInviteSchema = z.object({
 
 export type CarrierDriverInviteInput = z.infer<typeof carrierDriverInviteSchema>;
 
+export const CARRIER_CAPABILITY_CODES = [
+  'DG',
+  'REEFER',
+  'OVERSIZE',
+  'TAIL_LIFT',
+  'CURTAINSIDER',
+  'FLATBED',
+  'STEEL',
+  'CONTAINERS',
+  'LIQUID',
+  'HEAVY_MACHINERY',
+  'OTHER',
+] as const;
+export type CarrierCapabilityCode = (typeof CARRIER_CAPABILITY_CODES)[number];
+
 export const carrierCapabilitiesSchema = z.object({
   capabilities: z
-    .array(z.enum(['DG', 'REEFER', 'OVERSIZE', 'TAIL_LIFT', 'CURTAINSIDER', 'FLATBED', 'OTHER']))
+    .array(z.enum(CARRIER_CAPABILITY_CODES))
     .default([]),
   serviceRegionCodes: z
     .array(z.string().trim().toUpperCase().regex(/^[A-Z]{2,3}$/))
@@ -1462,6 +1479,22 @@ export const jobRecommendSchema = jobCargoFieldsSchema.superRefine(refineJobCarg
 
 export type JobRecommendInput = z.infer<typeof jobRecommendSchema>;
 
+export const CLOX_LOAD_TYPE_CODES = [
+  'GENERAL',
+  'DG',
+  'LIQUID',
+  'OVERSIZE',
+  'STEEL',
+  'REEFER',
+  'HEAVY_MACHINERY',
+  'VEHICLES_PLANT',
+  'CONTAINERS',
+  'TIMBER',
+  'HIGH_VALUE',
+  'WASTE',
+] as const;
+export type CloxLoadTypeCode = (typeof CLOX_LOAD_TYPE_CODES)[number];
+
 export const jobCreateSchema = z
   .object({
     title: z.string().trim().min(2).max(160).optional(),
@@ -1470,15 +1503,12 @@ export const jobCreateSchema = z
     pickupAt: z.string().datetime({ offset: true }).or(z.string().regex(/^\d{4}-\d{2}-\d{2}T/)),
     receiverName: z.string().trim().min(2).max(120),
     receiverEmail: z.string().trim().email(),
-    receiverPhone: z.string().trim().min(8).max(32).optional(),
+    receiverPhone: optionalPhoneInput,
     receiverAltEmail: z.preprocess(
       (v) => (typeof v === 'string' && v.trim() === '' ? undefined : v),
       z.string().trim().email().optional().nullable(),
     ),
-    receiverAltPhone: z.preprocess(
-      (v) => (typeof v === 'string' && v.trim() === '' ? undefined : v),
-      z.string().trim().min(8).max(32).optional().nullable(),
-    ),
+    receiverAltPhone: optionalPhoneInput,
     deadWeightKg: z.number().positive().max(MAX_JOB_DEAD_WEIGHT_KG),
     lengthCm: z.number().positive().max(MAX_JOB_LENGTH_CM),
     widthCm: z.number().positive().max(MAX_JOB_WIDTH_CM),
@@ -1486,16 +1516,32 @@ export const jobCreateSchema = z
     /** Sender-entered route distance (required for PER_KM; optional for HOURLY, derived from stops when omitted). */
     distanceKm: z.number().positive().max(20_000).optional(),
     loadTypes: z
-      .array(z.enum(['GENERAL', 'DG', 'REEFER', 'OVERSIZE']))
+      .array(z.enum(CLOX_LOAD_TYPE_CODES))
       .min(1)
-      .max(4)
+      .max(12)
       .default(['GENERAL']),
     /** Required when loadTypes includes DG (dangerous goods manifest / SDS document). */
     dgDocumentId: z.string().uuid().optional().nullable(),
     /** Optional override; otherwise recommended from chargeable weight */
     minVehicleClass: vehicleClassField.optional(),
-    siteManeuverability: z.enum(['EASY', 'MODERATE', 'TIGHT']),
-    siteFacility: z.enum(['DOCK', 'GROUND', 'FORKLIFT', 'CRANE', 'OTHER']),
+    siteManeuverability: z.enum([
+      'TIGHT_STREET',
+      'STANDARD_INDUSTRIAL',
+      'WIDE_YARD',
+      'EASY',
+      'MODERATE',
+      'TIGHT',
+    ]),
+    siteFacility: z.enum([
+      'RAISED_DOCK',
+      'GROUND_LEVEL',
+      'FORKLIFT_REQUIRED',
+      'DOCK',
+      'GROUND',
+      'FORKLIFT',
+      'CRANE',
+      'OTHER',
+    ]),
     siteDisclaimerAccepted: z.literal(true),
     stops: z.array(jobStopSchema).min(2).max(50),
   })
@@ -1523,15 +1569,12 @@ export type JobCreateInput = z.infer<typeof jobCreateSchema>;
 export const jobReceiverUpdateSchema = z.object({
   receiverName: z.string().trim().min(2).max(120),
   receiverEmail: z.string().trim().email(),
-  receiverPhone: z.string().trim().min(8).max(32).optional().nullable(),
+  receiverPhone: optionalPhoneInput,
   receiverAltEmail: z.preprocess(
     (v) => (typeof v === 'string' && v.trim() === '' ? null : v),
     z.string().trim().email().optional().nullable(),
   ),
-  receiverAltPhone: z.preprocess(
-    (v) => (typeof v === 'string' && v.trim() === '' ? null : v),
-    z.string().trim().min(8).max(32).optional().nullable(),
-  ),
+  receiverAltPhone: optionalPhoneInput,
   stops: z
     .array(
       z.object({

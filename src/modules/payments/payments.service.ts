@@ -105,12 +105,18 @@ export class PaymentsService {
     if (!user?.companyId || !user.company) {
       throw new NotFoundException('Sender company not found');
     }
-    if (!user.company.paymentReady || !user.company.stripeCustomerId) {
-      throw new BadRequestException({
-        message:
-          'Sender payment method not ready. Open Sender onboarding → Payment to add a live card.',
-        code: 'SENDER_NOT_PAYMENT_READY',
-        href: '/sender/onboarding',
+
+    let stripeCustomerId = user.company.stripeCustomerId;
+    if (!stripeCustomerId) {
+      const customer = await this.stripe.createCustomer({
+        email: user.email,
+        name: user.company.legalName || user.name || 'Sender',
+        metadata: { companyId: user.company.id, userId: user.id },
+      });
+      stripeCustomerId = customer.id;
+      await this.prisma.company.update({
+        where: { id: user.company.id },
+        data: { stripeCustomerId },
       });
     }
 
@@ -350,7 +356,7 @@ export class PaymentsService {
     try {
       pi = await this.stripe.createPaymentIntent({
         amountCents: amountInc,
-        customerId: user.company.stripeCustomerId,
+        customerId: stripeCustomerId,
         paymentMethodId: user.company.stripeDefaultPaymentMethodId,
         // PE-scoped key so retries after unwind never hit a stale Stripe idempotency cache.
         idempotencyKey: `${key}:pe:${created.paymentEvent.id}`,

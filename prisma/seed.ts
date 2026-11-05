@@ -2,10 +2,18 @@ import {
   PrismaClient,
   AdminRole,
   AdminScopeType,
+  AssignmentStatus,
   CompanyStatus,
   CompanyType,
+  JobStatus,
+  PaymentEventStatus,
+  PaymentEventType,
   PlatformRole,
+  ProposalStatus,
   SenderAccountType,
+  SettlementLineStatus,
+  SettlementRecipientType,
+  TripStatus,
   UserStatus,
 } from '@prisma/client';
 
@@ -292,6 +300,8 @@ async function seedMarketplaceUsers(vicRegionId: string) {
       });
     }
   }
+
+  return { senderCompanyId: senderCompany.id, carrierCompanyId: carrierCompany.id };
 }
 
 async function seedPolicy() {
@@ -377,12 +387,200 @@ async function seedPolicy() {
   console.log('Seeded PolicyVersion revenue_split.v1');
 }
 
+async function seedPilotJobAndTrip(vicRegionId: string, carrierCompanyId: string, senderCompanyId: string) {
+  const driver = await prisma.driver.findFirst({
+    where: { companyId: carrierCompanyId },
+  });
+  if (!driver) return;
+
+  const jobId = '00000000-0000-4000-8000-0000000000f1';
+  const proposalId = '00000000-0000-4000-8000-0000000000f2';
+  const assignmentId = '00000000-0000-4000-8000-0000000000f3';
+  const tripId = '00000000-0000-4000-8000-0000000000f4';
+  const pickupStopId = '00000000-0000-4000-8000-0000000000s1';
+  const dropoffStopId = '00000000-0000-4000-8000-0000000000s2';
+  const paymentEventId = '00000000-0000-4000-8000-0000000000e1';
+
+  await prisma.job.upsert({
+    where: { id: jobId },
+    update: {
+      status: JobStatus.IN_TRANSIT,
+      title: 'Melbourne Metro Pilot Freight Delivery',
+      originRegionId: vicRegionId,
+    },
+    create: {
+      id: jobId,
+      senderCompanyId,
+      status: JobStatus.IN_TRANSIT,
+      title: 'Melbourne Metro Pilot Freight Delivery',
+      pricingModel: 'PER_KM',
+      minVehicleClass: 'RIGID_1_2T',
+      recommendedVehicleClass: 'RIGID_1_2T',
+      loadTypes: ['GENERAL'],
+      deadWeightKg: 1500,
+      chargeableWeightKg: 1500,
+      lengthCm: 300,
+      widthCm: 180,
+      heightCm: 180,
+      originRegionId: vicRegionId,
+      estimateExGstCents: 15000,
+      estimateGstCents: 1500,
+      estimateIncGstCents: 16500,
+      routeDistanceKm: 12.5,
+      routeDurationMinutes: 35,
+      billableHours: 1.0,
+      publishedAt: new Date(),
+    },
+  });
+
+  await prisma.jobStop.upsert({
+    where: { id: pickupStopId },
+    update: {},
+    create: {
+      id: pickupStopId,
+      jobId,
+      sequence: 0,
+      stopType: 'PICKUP',
+      label: 'Melbourne City Depot',
+      addressLine: '1 Collins St',
+      suburb: 'Melbourne',
+      state: 'VIC',
+      postcode: '3000',
+      lat: -37.8136,
+      lng: 144.9631,
+    },
+  });
+
+  await prisma.jobStop.upsert({
+    where: { id: dropoffStopId },
+    update: {},
+    create: {
+      id: dropoffStopId,
+      jobId,
+      sequence: 1,
+      stopType: 'DROPOFF',
+      label: 'Richmond Retail Hub',
+      addressLine: '100 Swan St',
+      suburb: 'Richmond',
+      state: 'VIC',
+      postcode: '3121',
+      lat: -37.8248,
+      lng: 144.9961,
+      receiverName: 'Jamie Receiver',
+      receiverEmail: 'receiver.qa@yopmail.com',
+      receiverPhone: '+61400000004',
+    },
+  });
+
+  await prisma.proposal.upsert({
+    where: { id: proposalId },
+    update: { status: ProposalStatus.ACCEPTED },
+    create: {
+      id: proposalId,
+      jobId,
+      carrierCompanyId,
+      driverId: driver.id,
+      vehicleId: '00000000-0000-4000-8000-0000000000a1',
+      status: ProposalStatus.ACCEPTED,
+      amountIncGstCents: 16500,
+      amountExGstCents: 15000,
+      amountGstCents: 1500,
+      etaMinutes: 30,
+    },
+  });
+
+  await prisma.assignment.upsert({
+    where: { id: assignmentId },
+    update: { status: AssignmentStatus.IN_TRANSIT, paidAndConfirmed: true },
+    create: {
+      id: assignmentId,
+      jobId,
+      proposalId,
+      carrierCompanyId,
+      driverId: driver.id,
+      vehicleId: '00000000-0000-4000-8000-0000000000a1',
+      status: AssignmentStatus.IN_TRANSIT,
+      paidAndConfirmed: true,
+      paidAt: new Date(),
+    },
+  });
+
+  await prisma.trip.upsert({
+    where: { id: tripId },
+    update: { status: TripStatus.IN_TRANSIT },
+    create: {
+      id: tripId,
+      jobId,
+      assignmentId,
+      status: TripStatus.IN_TRANSIT,
+      startedAt: new Date(),
+      preTripSafetyPassed: true,
+      preTripSafetyAt: new Date(),
+      massDeclarationPassed: true,
+      massDeclarationAt: new Date(),
+    },
+  });
+
+  await prisma.tripStopProgress.upsert({
+    where: { tripId_jobStopId: { tripId, jobStopId: pickupStopId } },
+    update: {},
+    create: {
+      tripId,
+      jobStopId: pickupStopId,
+      arrivalRecorded: true,
+      arrivedAt: new Date(Date.now() - 25 * 60 * 1000),
+      exitedAt: new Date(Date.now() - 15 * 60 * 1000),
+    },
+  });
+
+  await prisma.tripStopProgress.upsert({
+    where: { tripId_jobStopId: { tripId, jobStopId: dropoffStopId } },
+    update: {},
+    create: {
+      tripId,
+      jobStopId: dropoffStopId,
+      arrivalRecorded: false,
+    },
+  });
+
+  await prisma.paymentEvent.upsert({
+    where: { id: paymentEventId },
+    update: {},
+    create: {
+      id: paymentEventId,
+      jobId,
+      type: PaymentEventType.CHARGE,
+      status: PaymentEventStatus.SUCCEEDED,
+      amountIncGstCents: 16500,
+      stripePaymentIntentId: 'pi_mock_seed_pilot',
+    },
+  });
+
+  await prisma.settlementLine.upsert({
+    where: { id: '00000000-0000-4000-8000-0000000000l1' },
+    update: {},
+    create: {
+      id: '00000000-0000-4000-8000-0000000000l1',
+      jobId,
+      recipientType: SettlementRecipientType.CARRIER,
+      recipientEntityId: carrierCompanyId,
+      amountCents: 11550,
+      status: SettlementLineStatus.ACCRUED,
+      originRegionId: vicRegionId,
+    },
+  });
+
+  // eslint-disable-next-line no-console
+  console.log(`Seeded Victorian live pilot job (${jobId}) and trip (${tripId})`);
+}
+
 async function main() {
   await seedSuperAdmin();
   const vic = await seedRegions();
   await seedScopedAdmins(vic.id);
-  await seedMarketplaceUsers(vic.id);
+  const { senderCompanyId, carrierCompanyId } = await seedMarketplaceUsers(vic.id);
   await seedPolicy();
+  await seedPilotJobAndTrip(vic.id, carrierCompanyId, senderCompanyId);
 }
 
 main()

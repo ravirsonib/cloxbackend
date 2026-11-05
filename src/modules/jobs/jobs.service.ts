@@ -319,6 +319,7 @@ export class JobsService {
         email?: string | null;
         phone?: string | null;
         abn?: string | null;
+        reliabilityScore?: number | null;
       } | null;
       driver?: {
         id: string;
@@ -421,6 +422,7 @@ export class JobsService {
                 email: p.carrierCompany.email ?? null,
                 phone: p.carrierCompany.phone ?? null,
                 abn: p.carrierCompany.abn ?? null,
+                reliabilityScore: p.carrierCompany.reliabilityScore ?? 100,
               }
             : null,
           driver: p.driver
@@ -437,7 +439,26 @@ export class JobsService {
           netToCarrierCents: carrierNetPayoutCents(p.amountIncGstCents),
           createdAt: p.createdAt,
         };
-      }),
+      })
+        .sort((a, b) => {
+          // Actionable/submitted proposals first
+          if (a.status === ProposalStatus.SUBMITTED && b.status !== ProposalStatus.SUBMITTED) return -1;
+          if (a.status !== ProposalStatus.SUBMITTED && b.status === ProposalStatus.SUBMITTED) return 1;
+
+          // Performance Score weighting: prioritize carriers with higher reliability score (>= 10pt gap)
+          const aRel = a.carrierCompany?.reliabilityScore ?? 100;
+          const bRel = b.carrierCompany?.reliabilityScore ?? 100;
+          if (Math.abs(aRel - bRel) >= 10) {
+            return bRel - aRel;
+          }
+
+          // Competitive pricing next
+          if (a.amountIncGstCents !== b.amountIncGstCents) {
+            return a.amountIncGstCents - b.amountIncGstCents;
+          }
+
+          return new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
+        }),
     };
   }
 
@@ -505,6 +526,7 @@ export class JobsService {
                 email: true,
                 phone: true,
                 abn: true,
+                reliabilityScore: true,
               },
             },
             driver: {
@@ -1190,6 +1212,9 @@ export class JobsService {
     }
     if (!job.siteDisclaimerAcceptedAt) {
       throw new BadRequestException('Site disclaimer required');
+    }
+    if (!job.siteManeuverability || !job.siteFacility) {
+      throw new BadRequestException('Site access assessment required');
     }
 
     await this.prisma.job.update({

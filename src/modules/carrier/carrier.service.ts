@@ -1762,9 +1762,11 @@ export class CarrierService {
     const company = user.company!;
     if (
       company.status !== CompanyStatus.DRAFT &&
-      company.status !== CompanyStatus.INFO_REQUESTED
+      company.status !== CompanyStatus.INFO_REQUESTED &&
+      company.status !== CompanyStatus.BID_ELIGIBLE &&
+      company.status !== CompanyStatus.ACTIVE
     ) {
-      throw new BadRequestException('Capabilities editable only in draft or info-requested');
+      throw new BadRequestException('Capabilities cannot be edited in suspended or closed status');
     }
     for (const code of input.serviceRegionCodes) {
       const region = await this.prisma.region.findUnique({ where: { code } });

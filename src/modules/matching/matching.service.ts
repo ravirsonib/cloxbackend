@@ -128,14 +128,25 @@ export class MatchingService {
     });
 
     const visible = jobs.filter((j) => carrierMatchesJob(company, j));
+    const reliabilityScore = company.reliabilityScore ?? 100;
+    const reliabilityTier =
+      reliabilityScore >= 90
+        ? 'EXCELLENT'
+        : reliabilityScore >= 75
+          ? 'GOOD'
+          : reliabilityScore >= 60
+            ? 'FAIR'
+            : 'CRITICAL';
 
     return {
       netPayoutHint: '70% of gross to carrier (admin 30% pool is configurable)',
+      carrierReliabilityScore: reliabilityScore,
+      carrierReliabilityTier: reliabilityTier,
       jobs: visible.map((j) => {
         const discount = j.rescueDiscountPercent ?? 0;
         const discountedEstimate =
           j.estimateIncGstCents != null && discount > 0
-            ? Math.floor((j.estimateIncGstCents * (100 - discount)) / 100)
+            ? Math.round((j.estimateIncGstCents * (100 - discount)) / 100)
             : j.estimateIncGstCents;
         return {
           id: j.id,
@@ -164,6 +175,8 @@ export class MatchingService {
           marketplacePriority: j.marketplacePriority,
           rescueDiscountPercent: j.rescueDiscountPercent,
           minBidIncGstCents: discountedEstimate,
+          siteManeuverability: j.siteManeuverability,
+          siteFacility: j.siteFacility,
           pickupAt: j.pickupAt,
           publishedAt: j.publishedAt,
           alreadyBid: j.proposals.length > 0,
@@ -346,7 +359,7 @@ export class MatchingService {
     let minBase = policyMin;
     if (discount > 0 && job.estimateIncGstCents != null) {
       // Rescue listing: carrier may bid down to discounted sender estimate.
-      minBase = Math.floor((job.estimateIncGstCents * (100 - discount)) / 100);
+      minBase = Math.round((job.estimateIncGstCents * (100 - discount)) / 100);
     }
     if (input.amountIncGstCents < minBase) {
       throw new BadRequestException({

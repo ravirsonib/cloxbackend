@@ -588,6 +588,75 @@ export class NotificationsService {
     });
   }
 
+  /** Ops rejected company compliance review (REJECTED). */
+  async sendComplianceRejectedEmail(params: {
+    to: string;
+    companyName: string;
+    companyType: 'CARRIER' | 'SENDER';
+    caseType: string;
+    decisionNote?: string | null;
+  }) {
+    const accountType =
+      params.companyType === 'CARRIER'
+        ? accountTypeLabel('TRANSPORT_COMPANY')
+        : accountTypeLabel('SENDER');
+    const note = params.decisionNote?.trim();
+    const subject = 'CLOX — update on your compliance review';
+    const intro = note
+      ? `Our compliance team has reviewed your application and was unable to approve it at this time. Reason provided: “${note}”.`
+      : 'Our compliance team has reviewed your application and was unable to approve it at this time.';
+
+    const details: EmailDetailRow[] = [
+      { label: 'Account type', value: accountType },
+      { label: 'Company / Name', value: params.companyName },
+      { label: 'Email', value: params.to },
+      { label: 'Case type', value: params.caseType },
+      { label: 'Status', value: 'REJECTED' },
+    ];
+    if (note) {
+      details.push({ label: 'Decision reason', value: note });
+    }
+
+    const text = [
+      subject,
+      '',
+      intro,
+      `Account type: ${accountType}`,
+      `Company / Name: ${params.companyName}`,
+      `Email: ${params.to}`,
+      `Case type: ${params.caseType}`,
+      'Status: REJECTED',
+      note ? `Decision reason: ${note}` : undefined,
+      '',
+      `If you believe this was in error or need further assistance, please contact support: ${EMAIL_BRAND.supportEmail}`,
+    ]
+      .filter((line) => line !== undefined)
+      .join('\n');
+
+    return this.sendBranded({
+      to: params.to,
+      subject,
+      text,
+      eyebrow: 'Compliance Update',
+      title: 'Application Not Approved',
+      intro,
+      details,
+      nextSteps: [
+        {
+          title: 'Review the reason',
+          body: note
+            ? 'The specific reason from our compliance team is detailed above in the decision note.'
+            : 'Your submission did not meet the eligibility requirements for the Australian freight marketplace.',
+        },
+        {
+          title: 'Contact Support',
+          body: `If you have questions, updated documentation, or wish to dispute this decision, reach out to ${EMAIL_BRAND.supportEmail}.`,
+        },
+      ],
+      cta: { label: 'Contact Support', href: `mailto:${EMAIL_BRAND.supportEmail}` },
+    });
+  }
+
   async sendAccountSuspendedEmail(params: {
     to: string;
     companyName: string;

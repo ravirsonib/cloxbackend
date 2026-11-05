@@ -1587,6 +1587,47 @@ export class TripsService {
       includeDriver: true,
     });
 
+    // Reliability score recovery (+1 point toward 100 on clean delivery)
+    try {
+      const carrierCompanyId = trip.assignment?.carrierCompanyId;
+      const driverId = trip.assignment?.driverId;
+      if (carrierCompanyId) {
+        const company = await this.prisma.company.findUnique({
+          where: { id: carrierCompanyId },
+          select: { reliabilityScore: true },
+        });
+        if (company && company.reliabilityScore < 100) {
+          const nextScore = Math.min(100, company.reliabilityScore + 1);
+          await this.prisma.company.update({
+            where: { id: carrierCompanyId },
+            data: { reliabilityScore: nextScore },
+          });
+          await this.audit.recordPlatform({
+            action: AuditAction.CARRIER_RELIABILITY_RECOVERED,
+            actorUserId,
+            entityType: 'Company',
+            entityId: carrierCompanyId,
+            metadata: { tripId: trip.id, delta: 1, nextScore },
+          });
+        }
+      }
+      if (driverId) {
+        const driver = await this.prisma.driver.findUnique({
+          where: { id: driverId },
+          select: { reliabilityScore: true },
+        });
+        if (driver && driver.reliabilityScore < 100) {
+          const nextDriverScore = Math.min(100, driver.reliabilityScore + 1);
+          await this.prisma.driver.update({
+            where: { id: driverId },
+            data: { reliabilityScore: nextDriverScore },
+          });
+        }
+      }
+    } catch (err) {
+      this.logger.warn(`Failed to recover reliability score for trip ${trip.id}: ${err}`);
+    }
+
     try {
       await this.generateCompletionDocuments(trip.id, actorUserId);
     } catch {

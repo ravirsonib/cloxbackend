@@ -415,6 +415,22 @@ export class ExceptionsService {
     if (forceOffline && user.driver?.id) {
       await this.applyDriverReliabilityDelta(user.driver.id, created.id, user.id);
     }
+    if (setBreakdown && trip.assignment?.carrierCompanyId) {
+      const settings = await this.prisma.platformSettings.upsert({
+        where: { id: 'default' },
+        create: { id: 'default' },
+        update: {},
+      });
+      const breakdownDelta = Math.max(1, Math.round(settings.carrierMarketplaceReleaseScoreDelta / 2));
+      await this.applyCarrierReliabilityDelta(
+        trip.assignment.carrierCompanyId,
+        created.id,
+        breakdownDelta,
+        user.id,
+        undefined,
+        'VEHICLE_BREAKDOWN',
+      );
+    }
 
     const carrierEmails = [
       ...trip.assignment.carrierCompany.users.map((u) => u.email),
@@ -1693,6 +1709,7 @@ export class ExceptionsService {
     delta: number,
     actorUserId?: string,
     actorAdminId?: string,
+    outcome: string = 'MARKETPLACE_RELEASE',
   ) {
     const company = await this.prisma.company.findUnique({
       where: { id: companyId },
@@ -1705,14 +1722,14 @@ export class ExceptionsService {
       data: { reliabilityScore: nextScore },
     });
     await this.audit.recordPlatform({
-      action: AuditAction.EXCEPTION_PERFORMANCE_STUB,
+      action: AuditAction.CARRIER_PERFORMANCE_UPDATED,
       actorUserId,
       actorAdminId,
       entityType: 'Company',
       entityId: companyId,
       metadata: {
         exceptionId,
-        outcome: 'MARKETPLACE_RELEASE',
+        outcome,
         delta: -delta,
         nextScore,
       },
