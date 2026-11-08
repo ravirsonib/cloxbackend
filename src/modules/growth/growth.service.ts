@@ -86,10 +86,20 @@ export class GrowthService {
       where: { adminUserId },
       include: {
         region: { select: { id: true, code: true } },
-        localTerritory: { select: { id: true, code: true, name: true } },
+        localTerritory: {
+          select: {
+            id: true,
+            code: true,
+            name: true,
+            region: { select: { id: true, code: true } },
+          },
+        },
       },
     });
-    const region = scopes.find((s) => s.region)?.region ?? null;
+    const region =
+      scopes.find((s) => s.region)?.region ??
+      scopes.find((s) => s.localTerritory?.region)?.localTerritory?.region ??
+      null;
     const territory = scopes.find((s) => s.localTerritory)?.localTerritory ?? null;
     return { region, territory };
   }

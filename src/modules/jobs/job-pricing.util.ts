@@ -284,10 +284,16 @@ export function isVehicleAdequateForJob(
   chargeableKg: number | null | undefined,
   classes: VehicleClassSpec[] = DEFAULT_VEHICLE_CLASSES,
 ): boolean {
-  const rankMap = Object.fromEntries(classes.map((c) => [c.code, c.rank]));
-  const maxChargeableMap = Object.fromEntries(
-    classes.map((c) => [c.code, c.maxChargeableWeightKg]),
-  );
+  const rankMap: Record<string, number> = {
+    ...VEHICLE_CLASS_RANK,
+    ...Object.fromEntries(classes.map((c) => [c.code.toUpperCase(), c.rank])),
+  };
+  const maxChargeableMap: Record<string, number> = {
+    ...VEHICLE_CLASS_MAX_CHARGEABLE_KG,
+    ...Object.fromEntries(
+      classes.map((c) => [c.code.toUpperCase(), c.maxChargeableWeightKg]),
+    ),
+  };
 
   if (isVehicleClassAdequate(offeredClass, minClass, rankMap)) return true;
   if (chargeableKg == null || chargeableKg <= 0 || !offeredClass) return false;
@@ -313,4 +319,37 @@ export function gstSplitFromIncCents(incGstCents: number, gstRatePercent: number
  */
 export function carrierNetPayoutCents(grossIncGstCents: number): number {
   return Math.round(grossIncGstCents * 0.7);
+}
+
+export async function loadVehicleClassMaps(prisma?: {
+  vehicleClassConfig?: {
+    findMany?: (args?: { where?: { isActive?: boolean } }) => Promise<
+      Array<{
+        code: string;
+        rank: number;
+        maxChargeableWeightKg: number;
+        minLicenceClass: string;
+      }>
+    >;
+  };
+}): Promise<{
+  rankMap: Record<string, number>;
+  minLicenceMap: Record<string, string>;
+  maxChargeableMap: Record<string, number>;
+}> {
+  const rankMap: Record<string, number> = { ...VEHICLE_CLASS_RANK };
+  const minLicenceMap: Record<string, string> = { ...VEHICLE_MIN_LICENCE };
+  const maxChargeableMap: Record<string, number> = { ...VEHICLE_CLASS_MAX_CHARGEABLE_KG };
+  try {
+    const rows = await prisma?.vehicleClassConfig?.findMany?.({ where: { isActive: true } });
+    for (const r of rows ?? []) {
+      const key = r.code.toUpperCase();
+      rankMap[key] = r.rank;
+      minLicenceMap[key] = r.minLicenceClass;
+      maxChargeableMap[key] = r.maxChargeableWeightKg;
+    }
+  } catch {
+    // Fallback to defaults when table or test mock is absent.
+  }
+  return { rankMap, minLicenceMap, maxChargeableMap };
 }

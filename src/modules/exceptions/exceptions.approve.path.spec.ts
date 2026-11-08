@@ -55,15 +55,18 @@ describe('ExceptionsService propose / approve / reject replacement', () => {
     get: (key: string) => (key === 'NOTIFY_EMAIL' ? 'ops@yopmail.com' : undefined),
   };
 
+  const inbox = {
+    userIdsForCompanies: jest.fn().mockResolvedValue([]),
+    userIdForDriver: jest.fn().mockResolvedValue('user-drv-2'),
+    notifyUsers: jest.fn().mockResolvedValue(1),
+  };
+
   function makeService(prisma: Record<string, unknown>) {
     return new ExceptionsService(
       prisma as never,
       audit as never,
       notifications as never,
-      {
-        userIdsForCompanies: jest.fn().mockResolvedValue([]),
-        notifyUsers: jest.fn().mockResolvedValue(0),
-      } as never,
+      inbox as never,
       carrier as never,
       payments as never,
       config as never,
@@ -138,8 +141,13 @@ describe('ExceptionsService propose / approve / reject replacement', () => {
           job: {
             id: 'job-1',
             title: 'Load',
+            senderCompanyId: 'co-s',
             receiverEmail: 'sender@yopmail.com',
-            senderCompany: { email: null, users: [{ email: 'sender@yopmail.com' }] },
+            senderCompany: {
+              id: 'co-s',
+              email: null,
+              users: [{ id: 'user-sender', email: 'sender@yopmail.com' }],
+            },
           },
         }),
         update,
@@ -172,6 +180,14 @@ describe('ExceptionsService propose / approve / reject replacement', () => {
     expect(result.proposal.status).toBe('AWAITING_SENDER_APPROVAL');
     expect(carrier.reassignAssignment).not.toHaveBeenCalled();
     expect(notifications.notifyTripExceptionReplacementProposed).toHaveBeenCalled();
+    expect(inbox.notifyUsers).toHaveBeenCalledWith(
+      expect.objectContaining({
+        userIds: ['user-sender'],
+        href: '/jobs/job-1',
+        entityType: 'TripException',
+        entityId: 'ex-1',
+      }),
+    );
     expect(update).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({
@@ -220,13 +236,17 @@ describe('ExceptionsService propose / approve / reject replacement', () => {
           title: 'Load',
           senderCompanyId: 'co-s',
           receiverEmail: 'sender@yopmail.com',
-          senderCompany: { email: null, users: [{ email: 'sender@yopmail.com' }] },
+          senderCompany: {
+            id: 'co-s',
+            email: null,
+            users: [{ id: 'user-sender', email: 'sender@yopmail.com' }],
+          },
         }),
       },
       company: {
         findUnique: jest.fn().mockResolvedValue({
           email: 'carrier@yopmail.com',
-          users: [{ email: 'carrier@yopmail.com' }],
+          users: [{ id: 'user-carrier', email: 'carrier@yopmail.com' }],
         }),
       },
       tripException: {
@@ -256,6 +276,14 @@ describe('ExceptionsService propose / approve / reject replacement', () => {
       expect.objectContaining({ vehicleId: 'veh-2', driverId: 'drv-2' }),
     );
     expect(notifications.notifyTripExceptionReassigned).toHaveBeenCalled();
+    expect(inbox.notifyUsers).toHaveBeenCalledWith(
+      expect.objectContaining({
+        userIds: ['user-carrier'],
+        href: '/carrier/exceptions/ex-1',
+        entityType: 'TripException',
+        entityId: 'ex-1',
+      }),
+    );
   });
 
   it('rejectReplacement cancels job and refunds', async () => {
@@ -280,13 +308,13 @@ describe('ExceptionsService propose / approve / reject replacement', () => {
           title: 'Load',
           senderCompanyId: 'co-s',
           receiverEmail: 'sender@yopmail.com',
-          senderCompany: { email: null, users: [] },
+          senderCompany: { id: 'co-s', email: null, users: [] },
         }),
       },
       company: {
         findUnique: jest.fn().mockResolvedValue({
           email: 'carrier@yopmail.com',
-          users: [{ email: 'carrier@yopmail.com' }],
+          users: [{ id: 'user-carrier', email: 'carrier@yopmail.com' }],
         }),
       },
       tripException: {
@@ -317,5 +345,13 @@ describe('ExceptionsService propose / approve / reject replacement', () => {
     expect(result.cancelled).toBe(true);
     expect(payments.refundStub).toHaveBeenCalledWith(senderPrincipal, 'job-1');
     expect(notifications.notifyTripExceptionReplacementRejected).toHaveBeenCalled();
+    expect(inbox.notifyUsers).toHaveBeenCalledWith(
+      expect.objectContaining({
+        userIds: ['user-carrier'],
+        href: '/carrier/exceptions/ex-1',
+        entityType: 'TripException',
+        entityId: 'ex-1',
+      }),
+    );
   });
 });

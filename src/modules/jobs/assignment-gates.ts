@@ -5,7 +5,7 @@ import {
   DriverStatus,
   type PrismaClient,
 } from '@prisma/client';
-import { licenceCoversVehicleClass } from './job-pricing.util';
+import { licenceCoversVehicleClass, loadVehicleClassMaps } from './job-pricing.util';
 
 /** Uploaded (or further) — not pending intent, rejected, or expired. */
 export const USABLE_COMPLIANCE_DOC_STATUSES: ComplianceDocStatus[] = [
@@ -38,6 +38,7 @@ export function evaluateDriverLicenceFields(
   driver: DriverAssignmentFields,
   vehicleClass: string | null | undefined,
   now: Date = new Date(),
+  minLicenceMap?: Record<string, string>,
 ): AssignmentGateResult {
   if (driver.status !== DriverStatus.ACTIVE) {
     return {
@@ -60,7 +61,7 @@ export function evaluateDriverLicenceFields(
       message: 'Driver NHVR acknowledgement required',
     };
   }
-  if (!licenceCoversVehicleClass(driver.licenceClass, vehicleClass)) {
+  if (!licenceCoversVehicleClass(driver.licenceClass, vehicleClass, minLicenceMap)) {
     return {
       ok: false,
       code: 'LICENCE_CLASS_MISMATCH',
@@ -115,10 +116,14 @@ export async function evaluateAssignmentCompliance(
   },
   now: Date = new Date(),
 ): Promise<AssignmentGateResult> {
+  const { minLicenceMap } = await loadVehicleClassMaps(
+    prisma as Parameters<typeof loadVehicleClassMaps>[0],
+  );
   const licenceFields = evaluateDriverLicenceFields(
     params.driver,
     params.vehicleClass,
     now,
+    minLicenceMap,
   );
   if (!licenceFields.ok) return licenceFields;
 

@@ -948,7 +948,14 @@ export class OpsService {
         this.prisma.job.count({
           where: {
             ...(regionId ? { originRegionId: regionId } : {}),
-            status: { in: [JobStatus.PUBLISHED, JobStatus.ASSIGNED, JobStatus.IN_TRANSIT] },
+            status: {
+              in: [
+                JobStatus.PUBLISHED,
+                JobStatus.BIDDING,
+                JobStatus.ASSIGNED,
+                JobStatus.IN_TRANSIT,
+              ],
+            },
           },
         }),
         this.prisma.dispute.count({
@@ -1075,8 +1082,18 @@ export class OpsService {
         }),
         this.prisma.job.count({
           where: {
-            ...(territoryId ? { originTerritoryId: territoryId } : {}),
-            status: { in: [JobStatus.PUBLISHED, JobStatus.ASSIGNED, JobStatus.IN_TRANSIT] },
+            OR: [
+              ...(territoryId ? [{ originTerritoryId: territoryId }] : []),
+              { senderCompany: { referredByAdminUserId: actor.id } },
+            ],
+            status: {
+              in: [
+                JobStatus.PUBLISHED,
+                JobStatus.BIDDING,
+                JobStatus.ASSIGNED,
+                JobStatus.IN_TRANSIT,
+              ],
+            },
           },
         }),
         this.prisma.dispute.count({
@@ -1176,7 +1193,16 @@ export class OpsService {
           },
         }),
         this.prisma.job.count({
-          where: { status: { in: [JobStatus.PUBLISHED, JobStatus.ASSIGNED, JobStatus.IN_TRANSIT] } },
+          where: {
+            status: {
+              in: [
+                JobStatus.PUBLISHED,
+                JobStatus.BIDDING,
+                JobStatus.ASSIGNED,
+                JobStatus.IN_TRANSIT,
+              ],
+            },
+          },
         }),
         this.prisma.dispute.count({
           where: {

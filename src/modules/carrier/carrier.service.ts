@@ -45,7 +45,10 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { DriverService } from '../driver/driver.service';
 import { assertAssignmentCompliance } from '../jobs/assignment-gates';
-import { isVehicleClassAdequate } from '../jobs/job-pricing.util';
+import {
+  isVehicleClassAdequate,
+  loadVehicleClassMaps,
+} from '../jobs/job-pricing.util';
 import { InAppNotificationsService } from '../notifications/in-app-notifications.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { companyHasMockCarrierConnect } from '../payments/stripe-mock-ids.util';
@@ -255,7 +258,10 @@ export class CarrierService {
   async register(input: CarrierRegisterInput) {
     this.ensureDatabase();
     const existing = await this.prisma.user.findUnique({ where: { email: input.email } });
-    if (existing) {
+    const existingAdmin = await this.prisma.adminUser?.findUnique({
+      where: { email: input.email },
+    });
+    if (existing || existingAdmin) {
       throw new ConflictException('Email already registered');
     }
     const resolved = await this.attribution.resolveInviteForRegister(
@@ -264,6 +270,13 @@ export class CarrierService {
     );
     const vic = await this.prisma.region.findUnique({ where: { code: 'VIC' } });
     const homeRegionId = resolved.homeRegionId ?? vic?.id ?? null;
+    const homeRegion =
+      resolved.homeRegionId && resolved.homeRegionId !== vic?.id
+        ? await this.prisma.region.findUnique({ where: { id: resolved.homeRegionId } })
+        : vic;
+    const initialServiceRegions = Array.from(
+      new Set([homeRegion?.code, vic?.code].filter((c): c is string => Boolean(c))),
+    );
     const company = await this.prisma.company.create({
       data: {
         type: CompanyType.CARRIER,
@@ -271,8 +284,8 @@ export class CarrierService {
         legalName: input.name,
         email: input.email,
         phone: input.phone,
-        homeRegionId,
-        serviceRegionCodes: vic ? ['VIC'] : [],
+        homeRegionId: homeRegionId ?? undefined,
+        serviceRegionCodes: initialServiceRegions,
         referredByAdminUserId: resolved.referredByAdminUserId,
         referredAt: resolved.referredByAdminUserId ? new Date() : null,
       },
@@ -659,6 +672,93 @@ export class CarrierService {
     }
   }
 
+  /**
+   * Orphan per-driver compliance docs (caseId null) join/open CARRIER_DRIVER_LICENCE
+   * so Ops can review and approve without requiring driver re-upload.
+   */
+  private async reconcileOrphanDriverDocsForOps(company: {
+    id: string;
+    status: CompanyStatus;
+    homeRegionId: string | null;
+    legalName?: string | null;
+  }) {
+    if (
+      !this.prisma.complianceDocument?.findMany ||
+      !this.prisma.complianceCase?.findFirst
+    ) {
+      return;
+    }
+    const orphanRows =
+      (await this.prisma.complianceDocument.findMany({
+        where: {
+          companyId: company.id,
+          driverId: { not: null },
+          caseId: null,
+          status: {
+            in: [ComplianceDocStatus.UPLOADED, ComplianceDocStatus.UNDER_REVIEW],
+          },
+        },
+        select: { id: true, status: true },
+      })) ?? [];
+    const orphans = orphanRows.filter(
+      (d) =>
+        d.status === ComplianceDocStatus.UPLOADED ||
+        d.status === ComplianceDocStatus.UNDER_REVIEW,
+    );
+    if (orphans.length === 0) return;
+
+    let reviewCase = await this.prisma.complianceCase.findFirst({
+      where: {
+        companyId: company.id,
+        caseType: ComplianceCaseType.CARRIER_DRIVER_LICENCE,
+        status: {
+          in: [
+            ComplianceCaseStatus.OPEN,
+            ComplianceCaseStatus.INFO_REQUESTED,
+            ComplianceCaseStatus.ESCALATED,
+          ],
+        },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+    let shouldNotifyOps = false;
+    if (!reviewCase) {
+      reviewCase = await this.prisma.complianceCase.create({
+        data: {
+          companyId: company.id,
+          caseType: ComplianceCaseType.CARRIER_DRIVER_LICENCE,
+          status: ComplianceCaseStatus.OPEN,
+          regionId: company.homeRegionId,
+        },
+      });
+      shouldNotifyOps = true;
+    } else if (reviewCase.status === ComplianceCaseStatus.INFO_REQUESTED) {
+      reviewCase = await this.prisma.complianceCase.update({
+        where: { id: reviewCase.id },
+        data: { status: ComplianceCaseStatus.OPEN, decisionNote: null },
+      });
+      shouldNotifyOps = true;
+    }
+    await this.prisma.complianceDocument.updateMany({
+      where: { id: { in: orphans.map((d) => d.id) } },
+      data: {
+        caseId: reviewCase.id,
+        status: ComplianceDocStatus.UNDER_REVIEW,
+      },
+    });
+
+    if (shouldNotifyOps && this.inbox) {
+      const legalName = company.legalName || 'Carrier';
+      void this.inbox.notifyComplianceCaseToOps({
+        caseId: reviewCase.id,
+        regionId: reviewCase.regionId ?? company.homeRegionId,
+        type: NotificationType.DRIVER_LICENCE_REVIEW_OPENED,
+        title: `Licence review: ${legalName}`,
+        body: 'Driver compliance documents submitted for Ops review.',
+      });
+    }
+  }
+
   async listVehicles(principal: AuthenticatedPrincipal) {
     this.ensureDatabase();
     const user = await this.requireCarrier(principal);
@@ -913,6 +1013,7 @@ export class CarrierService {
     this.ensureDatabase();
     const user = await this.requireCarrier(principal);
     const company = user.company!;
+    await this.reconcileOrphanDriverDocsForOps(company);
     const rows = await this.prisma.driver.findMany({
       where: { companyId: company.id },
       orderBy: { createdAt: 'desc' },
@@ -1529,7 +1630,8 @@ export class CarrierService {
         code: 'VEHICLE_NOT_ACTIVE',
       });
     }
-    if (!isVehicleClassAdequate(vehicle.vehicleClass, assignment.job.minVehicleClass)) {
+    const { rankMap } = await loadVehicleClassMaps(this.prisma);
+    if (!isVehicleClassAdequate(vehicle.vehicleClass, assignment.job.minVehicleClass, rankMap)) {
       throw new BadRequestException({
         message: `Vehicle class ${vehicle.vehicleClass} undersized for min ${assignment.job.minVehicleClass}`,
         code: 'VEHICLE_CLASS_UNDERSIZE',
@@ -1874,6 +1976,24 @@ export class CarrierService {
       }
       attachIds.push(dg.id);
     }
+
+    const orphanDriverDocs =
+      (await this.prisma.complianceDocument.findMany({
+        where: {
+          companyId: company.id,
+          driverId: { not: null },
+          caseId: null,
+          status: { in: allowedDocStatuses },
+        },
+        orderBy: { updatedAt: 'desc' },
+        select: { id: true },
+      })) ?? [];
+    for (const d of orphanDriverDocs) {
+      if (!attachIds.includes(d.id)) {
+        attachIds.push(d.id);
+      }
+    }
+
     return attachIds;
   }
 

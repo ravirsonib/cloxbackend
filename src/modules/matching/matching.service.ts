@@ -36,10 +36,12 @@ import {
   checkDriverAvailabilityForWindow,
 } from './driver-schedule.util';
 import {
+  DEFAULT_VEHICLE_CLASSES,
   carrierNetPayoutCents,
   gstSplitFromIncCents,
   isVehicleAdequateForJob,
   isVehicleClassAdequate,
+  type VehicleClassSpec,
 } from '../jobs/job-pricing.util';
 import { carrierMatchesJob } from './matching.eligibility';
 
@@ -60,6 +62,13 @@ export class MatchingService {
     if (!this.prisma.isConnected()) {
       throw new ServiceUnavailableException('Database is unavailable');
     }
+  }
+
+  private async getActiveVehicleClasses(): Promise<VehicleClassSpec[]> {
+    if (typeof this.jobsService?.getActiveVehicleClasses === 'function') {
+      return this.jobsService.getActiveVehicleClasses();
+    }
+    return DEFAULT_VEHICLE_CLASSES;
   }
 
   private async getPlatformGstPercent(): Promise<number> {
@@ -86,6 +95,18 @@ export class MatchingService {
             vehicles: true,
             drivers: true,
             homeRegion: true,
+            referredByAdminUser: {
+              select: {
+                scopes: {
+                  select: {
+                    region: { select: { code: true } },
+                    localTerritory: {
+                      select: { region: { select: { code: true } } },
+                    },
+                  },
+                },
+              },
+            },
           },
         },
       },
@@ -127,7 +148,8 @@ export class MatchingService {
       take: 50,
     });
 
-    const visible = jobs.filter((j) => carrierMatchesJob(company, j));
+    const vehicleClasses = await this.getActiveVehicleClasses();
+    const visible = jobs.filter((j) => carrierMatchesJob(company, j, vehicleClasses));
     const reliabilityScore = company.reliabilityScore ?? 100;
     const reliabilityTier =
       reliabilityScore >= 90
@@ -216,8 +238,9 @@ export class MatchingService {
     const user = await this.requireCarrierCompany(principal);
     const company = user.company!;
     const job = await this.jobsService.assertJobOpenForBidding(input.jobId);
+    const vehicleClasses = await this.getActiveVehicleClasses();
 
-    if (!carrierMatchesJob(company, job)) {
+    if (!carrierMatchesJob(company, job, vehicleClasses)) {
       throw new ForbiddenException({
         message: 'Job not eligible for this carrier (region / DG / REEFER / OVERSIZE / vehicle class)',
         code: 'JOB_NOT_ELIGIBLE',
@@ -242,6 +265,7 @@ export class MatchingService {
         vehicle.vehicleClass,
         job.minVehicleClass,
         job.chargeableWeightKg,
+        vehicleClasses,
       )
     ) {
       throw new BadRequestException({

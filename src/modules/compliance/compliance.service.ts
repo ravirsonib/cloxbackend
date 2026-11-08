@@ -76,13 +76,15 @@ export class ComplianceService {
       throw new NotFoundException('Company not found');
     }
     if (principal.kind === 'admin') {
-      const regionCode = company.homeRegion?.code;
-      if (regionCode) {
-        this.scope.assertRegionAccess(principal, regionCode);
-      } else if (principal.role !== AdminRole.SUPER_ADMIN) {
-        throw new ForbiddenException('Company has no region — Super only');
-      }
       await this.assertAdminTerritoryForCompany(principal, company);
+      if (principal.role !== AdminRole.LOCAL_BDE) {
+        const regionCode = company.homeRegion?.code;
+        if (regionCode) {
+          this.scope.assertRegionAccess(principal, regionCode);
+        } else if (principal.role !== AdminRole.SUPER_ADMIN) {
+          throw new ForbiddenException('Company has no region — Super only');
+        }
+      }
       return company;
     }
     const user = await this.prisma.user.findUnique({ where: { id: principal.id } });
@@ -190,13 +192,15 @@ export class ComplianceService {
       throw new NotFoundException('Compliance case not found');
     }
 
-    const regionCode = complianceCase.region?.code ?? complianceCase.company.homeRegion?.code;
-    if (regionCode) {
-      this.scope.assertRegionAccess(principal, regionCode);
-    } else if (principal.role !== AdminRole.SUPER_ADMIN) {
-      throw new ForbiddenException('Case has no region — Super only');
-    }
     await this.assertAdminTerritoryForCompany(principal, complianceCase.company);
+    if (principal.role !== AdminRole.LOCAL_BDE) {
+      const regionCode = complianceCase.region?.code ?? complianceCase.company.homeRegion?.code;
+      if (regionCode) {
+        this.scope.assertRegionAccess(principal, regionCode);
+      } else if (principal.role !== AdminRole.SUPER_ADMIN) {
+        throw new ForbiddenException('Case has no region — Super only');
+      }
+    }
 
     return complianceCase;
   }
@@ -271,6 +275,7 @@ export class ComplianceService {
     const open = await this.prisma.complianceCase.findFirst({
       where: {
         companyId: company.id,
+        caseType: input.caseType,
         status: { in: [ComplianceCaseStatus.OPEN, ComplianceCaseStatus.INFO_REQUESTED, ComplianceCaseStatus.ESCALATED] },
       },
     });
@@ -340,9 +345,115 @@ export class ComplianceService {
     };
   }
 
+  private async reconcileOrphanCarrierDriverDocs() {
+    if (
+      !this.prisma.complianceDocument?.findMany ||
+      !this.prisma.complianceCase?.findFirst
+    ) {
+      return;
+    }
+    const orphans =
+      (await this.prisma.complianceDocument.findMany({
+        where: {
+          companyId: { not: null },
+          driverId: { not: null },
+          caseId: null,
+          status: {
+            in: [ComplianceDocStatus.UPLOADED, ComplianceDocStatus.UNDER_REVIEW],
+          },
+          company: { type: CompanyType.CARRIER },
+        },
+        select: {
+          id: true,
+          companyId: true,
+          company: {
+            select: { id: true, homeRegionId: true, legalName: true },
+          },
+        },
+      })) ?? [];
+    if (orphans.length === 0) return;
+
+    const byCompany = new Map<
+      string,
+      {
+        homeRegionId: string | null;
+        legalName: string | null;
+        docIds: string[];
+      }
+    >();
+    for (const row of orphans) {
+      if (!row.companyId || !row.company) continue;
+      const existing = byCompany.get(row.companyId);
+      if (existing) {
+        existing.docIds.push(row.id);
+      } else {
+        byCompany.set(row.companyId, {
+          homeRegionId: row.company.homeRegionId,
+          legalName: row.company.legalName,
+          docIds: [row.id],
+        });
+      }
+    }
+
+    for (const [companyId, info] of byCompany.entries()) {
+      let reviewCase = await this.prisma.complianceCase.findFirst({
+        where: {
+          companyId,
+          caseType: ComplianceCaseType.CARRIER_DRIVER_LICENCE,
+          status: {
+            in: [
+              ComplianceCaseStatus.OPEN,
+              ComplianceCaseStatus.INFO_REQUESTED,
+              ComplianceCaseStatus.ESCALATED,
+            ],
+          },
+        },
+        orderBy: { createdAt: 'desc' },
+      });
+      let shouldNotifyOps = false;
+      if (!reviewCase) {
+        reviewCase = await this.prisma.complianceCase.create({
+          data: {
+            companyId,
+            caseType: ComplianceCaseType.CARRIER_DRIVER_LICENCE,
+            status: ComplianceCaseStatus.OPEN,
+            regionId: info.homeRegionId,
+          },
+        });
+        shouldNotifyOps = true;
+      } else if (reviewCase.status === ComplianceCaseStatus.INFO_REQUESTED) {
+        reviewCase = await this.prisma.complianceCase.update({
+          where: { id: reviewCase.id },
+          data: { status: ComplianceCaseStatus.OPEN, decisionNote: null },
+        });
+        shouldNotifyOps = true;
+      }
+
+      await this.prisma.complianceDocument.updateMany({
+        where: { id: { in: info.docIds } },
+        data: {
+          caseId: reviewCase.id,
+          status: ComplianceDocStatus.UNDER_REVIEW,
+        },
+      });
+
+      if (shouldNotifyOps && this.inbox) {
+        void this.inbox.notifyComplianceCaseToOps({
+          caseId: reviewCase.id,
+          regionId: reviewCase.regionId ?? info.homeRegionId,
+          type: NotificationType.DRIVER_LICENCE_REVIEW_OPENED,
+          title: `Licence review: ${info.legalName || 'Carrier'}`,
+          body: 'Driver compliance documents submitted for Ops review.',
+        });
+      }
+    }
+  }
+
   async listCases(principal: AuthenticatedPrincipal, query: ComplianceCaseListQuery) {
     this.ensureDatabase();
     this.scope.assertAdmin(principal);
+
+    await this.reconcileOrphanCarrierDriverDocs();
 
     const where: Prisma.ComplianceCaseWhereInput = {};
     if (query.status) {
@@ -363,16 +474,16 @@ export class ComplianceService {
       where.AND = [...(Array.isArray(where.AND) ? where.AND : where.AND ? [where.AND] : []), searchCondition];
     }
 
+    // Local BDE: only cases for companies in their referred book (not territory-wide).
+    const bookFilter = this.attribution.complianceCaseBookFilter(principal);
     const allowedRegions = this.scope.allowedRegionCodes(principal);
     if (query.regionCode) {
       this.scope.assertRegionAccess(principal, query.regionCode);
       where.region = { code: query.regionCode };
-    } else if (allowedRegions !== null) {
+    } else if (allowedRegions !== null && (!bookFilter || allowedRegions.length > 0)) {
       where.region = { code: { in: allowedRegions } };
     }
 
-    // Local BDE: only cases for companies in their referred book (not territory-wide).
-    const bookFilter = this.attribution.complianceCaseBookFilter(principal);
     if (bookFilter) {
       where.AND = [...(Array.isArray(where.AND) ? where.AND : where.AND ? [where.AND] : []), bookFilter];
     }

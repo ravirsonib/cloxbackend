@@ -188,7 +188,10 @@ export class SenderService {
   async register(input: SenderRegisterInput) {
     this.ensureDatabase();
     const existing = await this.prisma.user.findUnique({ where: { email: input.email } });
-    if (existing) {
+    const existingAdmin = await this.prisma.adminUser?.findUnique({
+      where: { email: input.email },
+    });
+    if (existing || existingAdmin) {
       throw new ConflictException('Email already registered');
     }
 

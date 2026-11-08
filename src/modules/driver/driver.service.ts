@@ -382,11 +382,12 @@ export class DriverService {
         legalName: true,
       },
     });
-    const needsSuperReview =
-      company?.type === CompanyType.CARRIER &&
+    const isCarrierCompany = company?.type === CompanyType.CARRIER;
+    const isPostKybCarrier =
+      isCarrierCompany &&
       (company.status === CompanyStatus.BID_ELIGIBLE ||
         company.status === CompanyStatus.ACTIVE);
-    const nextStatus = needsSuperReview
+    const nextStatus = isPostKybCarrier
       ? DriverStatus.PENDING_REVIEW
       : DriverStatus.ACTIVE;
 
@@ -430,13 +431,14 @@ export class DriverService {
       },
     });
 
-    if (needsSuperReview && company) {
+    if (isCarrierCompany && company) {
       await this.attachDriverLicenceToReviewCase(
         company,
         driver.id,
         input.licenceDocumentId,
       );
-    } else {
+    }
+    if (!isPostKybCarrier) {
       await this.audit.recordPlatform({
         action: AuditAction.DRIVER_ACTIVATED,
         actorUserId: user.id,
@@ -450,8 +452,8 @@ export class DriverService {
   }
 
   /**
-   * Post-KYB driver licence opens/joins CARRIER_DRIVER_LICENCE for Super Admin review.
-   * Does not change company BID_ELIGIBLE.
+   * Driver licence (and any other driver compliance docs) opens/joins CARRIER_DRIVER_LICENCE
+   * for Super Admin review without changing company status.
    */
   private async attachDriverLicenceToReviewCase(
     company: {
@@ -462,6 +464,7 @@ export class DriverService {
     driverId: string,
     documentId: string,
   ) {
+    if (!this.prisma.complianceCase?.findFirst) return;
     let reviewCase = await this.prisma.complianceCase.findFirst({
       where: {
         companyId: company.id,
@@ -477,7 +480,6 @@ export class DriverService {
       orderBy: { createdAt: 'desc' },
     });
 
-    let shouldNotifyOps = false;
     if (!reviewCase) {
       reviewCase = await this.prisma.complianceCase.create({
         data: {
@@ -487,7 +489,6 @@ export class DriverService {
           regionId: company.homeRegionId,
         },
       });
-      shouldNotifyOps = true;
     } else if (reviewCase.status === ComplianceCaseStatus.INFO_REQUESTED) {
       reviewCase = await this.prisma.complianceCase.update({
         where: { id: reviewCase.id },
@@ -496,32 +497,54 @@ export class DriverService {
           decisionNote: null,
         },
       });
-      shouldNotifyOps = true;
     }
 
-    const orphanLicences = await this.prisma.complianceDocument.findMany({
-      where: {
-        companyId: company.id,
-        docType: ComplianceDocType.DRIVER_LICENCE,
-        driverId: { not: null },
-        status: {
-          in: [ComplianceDocStatus.UPLOADED, ComplianceDocStatus.UNDER_REVIEW],
+    const orphanDriverDocs =
+      (await this.prisma.complianceDocument.findMany({
+        where: {
+          companyId: company.id,
+          driverId: { not: null },
+          status: {
+            in: [ComplianceDocStatus.UPLOADED, ComplianceDocStatus.UNDER_REVIEW],
+          },
+          OR: [{ caseId: null }, { id: documentId }, { driverId }],
         },
-        OR: [{ caseId: null }, { id: documentId }, { driverId }],
-      },
-      select: { id: true },
-    });
-    const ids = [...new Set([documentId, ...orphanLicences.map((d) => d.id)])];
+        select: { id: true, driverId: true },
+      })) ?? [];
+    const currentDriverIds = [
+      ...new Set([
+        documentId,
+        ...orphanDriverDocs
+          .filter((d) => !d.driverId || d.driverId === driverId)
+          .map((d) => d.id),
+      ]),
+    ];
     await this.prisma.complianceDocument.updateMany({
-      where: { id: { in: ids } },
+      where: { id: { in: currentDriverIds } },
       data: {
         caseId: reviewCase.id,
         status: ComplianceDocStatus.UNDER_REVIEW,
         driverId,
       },
     });
+    const otherOrphanIds = [
+      ...new Set(
+        orphanDriverDocs
+          .filter((d) => d.driverId && d.driverId !== driverId)
+          .map((d) => d.id),
+      ),
+    ];
+    if (otherOrphanIds.length > 0) {
+      await this.prisma.complianceDocument.updateMany({
+        where: { id: { in: otherOrphanIds } },
+        data: {
+          caseId: reviewCase.id,
+          status: ComplianceDocStatus.UNDER_REVIEW,
+        },
+      });
+    }
 
-    if (shouldNotifyOps && this.inbox) {
+    if (this.inbox) {
       void this.inbox.notifyComplianceCaseToOps({
         caseId: reviewCase.id,
         regionId: reviewCase.regionId ?? company.homeRegionId,

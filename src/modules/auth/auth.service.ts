@@ -102,7 +102,10 @@ export class AuthService {
         where: { email: input.email },
         include: {
           scopes: {
-            include: { region: true, localTerritory: true },
+            include: {
+              region: true,
+              localTerritory: { include: { region: true } },
+            },
           },
         },
       });
@@ -122,15 +125,19 @@ export class AuthService {
           email: admin.email,
           name: admin.name,
           role: admin.role,
-          regionCodes: admin.scopes
-            .map((s) => s.region?.code)
-            .filter((code): code is string => Boolean(code)),
+          regionCodes: [
+            ...new Set(
+              admin.scopes
+                .map((s) => s.region?.code ?? s.localTerritory?.region?.code)
+                .filter((code): code is string => Boolean(code)),
+            ),
+          ],
           territoryCodes: admin.scopes
             .map((s) => s.localTerritory?.code)
             .filter((code): code is string => Boolean(code)),
           scopes: admin.scopes.map((s) => ({
             scopeType: s.scopeType,
-            regionCode: s.region?.code ?? null,
+            regionCode: s.region?.code ?? s.localTerritory?.region?.code ?? null,
             territoryCode: s.localTerritory?.code ?? null,
           })),
         };

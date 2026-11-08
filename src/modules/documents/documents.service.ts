@@ -584,6 +584,14 @@ export class DocumentsService {
       await this.attachVehicleRwcToFleetCaseIfBidEligible(updated.companyId, updated.id);
     }
 
+    if (updated.driverId && updated.companyId) {
+      await this.attachDriverDocToReviewCaseIfCarrier(
+        updated.companyId,
+        updated.driverId,
+        updated.id,
+      );
+    }
+
     if (
       updated.docType === ComplianceDocType.DG_LICENCE &&
       updated.companyId
@@ -697,6 +705,100 @@ export class DocumentsService {
         type: NotificationType.FLEET_RWC_REVIEW_OPENED,
         title: `RWC review: ${company.legalName || 'Carrier'}`,
         body: 'Fleet vehicle RWC submitted for Ops review.',
+      });
+    }
+  }
+
+  /**
+   * Driver documents uploaded via /documents/upload or driver onboarding open (or join)
+   * CARRIER_DRIVER_LICENCE for Ops review and attach any orphan UPLOADED driver docs.
+   */
+  private async attachDriverDocToReviewCaseIfCarrier(
+    companyId: string,
+    driverId: string,
+    documentId: string,
+  ) {
+    if (
+      !this.prisma.company?.findUnique ||
+      !this.prisma.complianceCase?.findFirst ||
+      !this.prisma.complianceDocument?.findMany
+    ) {
+      return;
+    }
+    const company = await this.prisma.company.findUnique({
+      where: { id: companyId },
+      select: {
+        id: true,
+        status: true,
+        homeRegionId: true,
+        type: true,
+        legalName: true,
+      },
+    });
+    if (!company || company.type !== CompanyType.CARRIER) return;
+
+    let reviewCase = await this.prisma.complianceCase.findFirst({
+      where: {
+        companyId,
+        caseType: ComplianceCaseType.CARRIER_DRIVER_LICENCE,
+        status: {
+          in: [
+            ComplianceCaseStatus.OPEN,
+            ComplianceCaseStatus.INFO_REQUESTED,
+            ComplianceCaseStatus.ESCALATED,
+          ],
+        },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    if (!reviewCase) {
+      reviewCase = await this.prisma.complianceCase.create({
+        data: {
+          companyId,
+          caseType: ComplianceCaseType.CARRIER_DRIVER_LICENCE,
+          status: ComplianceCaseStatus.OPEN,
+          regionId: company.homeRegionId,
+        },
+      });
+    } else if (reviewCase.status === ComplianceCaseStatus.INFO_REQUESTED) {
+      reviewCase = await this.prisma.complianceCase.update({
+        where: { id: reviewCase.id },
+        data: {
+          status: ComplianceCaseStatus.OPEN,
+          decisionNote: null,
+        },
+      });
+    }
+
+    const orphanDriverDocs =
+      (await this.prisma.complianceDocument.findMany({
+        where: {
+          companyId,
+          driverId: { not: null },
+          status: {
+            in: [ComplianceDocStatus.UPLOADED, ComplianceDocStatus.UNDER_REVIEW],
+          },
+          OR: [{ caseId: null }, { id: documentId }, { driverId }],
+        },
+        select: { id: true },
+      })) ?? [];
+    const ids = [...new Set([documentId, ...orphanDriverDocs.map((d) => d.id)])];
+    await this.prisma.complianceDocument.updateMany({
+      where: { id: { in: ids } },
+      data: {
+        caseId: reviewCase.id,
+        status: ComplianceDocStatus.UNDER_REVIEW,
+      },
+    });
+
+    if (this.inbox) {
+      void this.inbox.notifyComplianceCaseToOps({
+        caseId: reviewCase.id,
+        regionId: reviewCase.regionId ?? company.homeRegionId,
+        type: NotificationType.DRIVER_LICENCE_REVIEW_OPENED,
+        title: `Driver compliance review: ${company.legalName || 'Carrier'}`,
+        body: 'Driver compliance document submitted for Ops review.',
       });
     }
   }

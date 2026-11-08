@@ -1273,6 +1273,18 @@ export class JobsService {
       },
       include: {
         homeRegion: true,
+        referredByAdminUser: {
+          select: {
+            scopes: {
+              select: {
+                region: { select: { code: true } },
+                localTerritory: {
+                  select: { region: { select: { code: true } } },
+                },
+              },
+            },
+          },
+        },
         vehicles: true,
         users: {
           where: { role: PlatformRole.TRANSPORT_COMPANY },
@@ -1281,10 +1293,11 @@ export class JobsService {
       },
     });
 
+    const vehicleClasses = await this.getActiveVehicleClasses();
     const emails: string[] = [];
     const userIds: string[] = [];
     for (const company of carriers) {
-      if (!carrierMatchesJob(company, job)) continue;
+      if (!carrierMatchesJob(company, job, vehicleClasses)) continue;
       for (const u of company.users) {
         if (u.id) userIds.push(u.id);
         const email = u.email?.trim();

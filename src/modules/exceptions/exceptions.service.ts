@@ -41,6 +41,7 @@ import {
 } from '../jobs/assignment-gates';
 import {
   isVehicleClassAdequate,
+  loadVehicleClassMaps,
   vehicleClassRank,
 } from '../jobs/job-pricing.util';
 import { PrismaService } from '../../prisma/prisma.service';
@@ -741,14 +742,19 @@ export class ExceptionsService {
           select: {
             id: true,
             title: true,
+            senderCompanyId: true,
             receiverEmail: true,
             senderCompany: {
               select: {
+                id: true,
                 email: true,
                 users: {
-                  where: { role: 'SENDER', status: UserStatus.ACTIVE },
-                  select: { email: true },
-                  take: 5,
+                  where: {
+                    role: 'SENDER',
+                    status: { in: [UserStatus.ACTIVE, UserStatus.PENDING] },
+                  },
+                  select: { id: true, email: true },
+                  take: 10,
                 },
               },
             },
@@ -758,13 +764,14 @@ export class ExceptionsService {
           include: {
             carrierCompany: {
               select: {
+                id: true,
                 email: true,
                 users: {
                   where: {
                     role: 'TRANSPORT_COMPANY',
                     status: { in: [UserStatus.ACTIVE, UserStatus.PENDING] },
                   },
-                  select: { email: true },
+                  select: { id: true, email: true },
                   take: 10,
                 },
               },
@@ -852,16 +859,60 @@ export class ExceptionsService {
       row.job.senderCompany.email ??
       null;
 
+    const vehicleLabel =
+      vehicle.registration ?? vehicle.label ?? input.vehicleId.slice(0, 8);
+    const driverName =
+      driver.user.name ?? driver.user.email ?? input.driverId.slice(0, 8);
+
     await this.notifications.notifyTripExceptionReplacementProposed({
       carrierEmails,
       senderEmail,
       jobTitle: row.job.title ?? '',
       jobId: row.job.id,
-      vehicleLabel: vehicle.registration ?? vehicle.label ?? input.vehicleId.slice(0, 8),
-      driverName: driver.user.name ?? driver.user.email ?? input.driverId.slice(0, 8),
+      vehicleLabel,
+      driverName,
       exceptionId: id,
       note: input.note?.trim() || null,
     });
+
+    if (this.inbox) {
+      try {
+        const senderCompanyId =
+          row.job.senderCompanyId ?? row.job.senderCompany?.id ?? null;
+        const directSenderUserIds =
+          row.job.senderCompany?.users?.map((u) => u.id) ?? [];
+        const querySenderUserIds =
+          senderCompanyId && this.inbox.userIdsForCompanies
+            ? await this.inbox.userIdsForCompanies({
+                companyIds: [senderCompanyId],
+                roles: [PlatformRole.SENDER],
+              })
+            : [];
+        const senderUserIds = [
+          ...new Set(
+            [...directSenderUserIds, ...querySenderUserIds].filter(
+              (uid): uid is string => Boolean(uid),
+            ),
+          ),
+        ];
+
+        if (senderUserIds.length > 0) {
+          await this.inbox.notifyUsers({
+            userIds: senderUserIds,
+            type: NotificationType.TRIP_EXCEPTION,
+            title: 'Replacement driver & vehicle proposed (Action required)',
+            body: `Carrier proposed replacement vehicle ${vehicleLabel} and driver ${driverName} for "${row.job.title ?? 'your shipment'}". Open the job to approve or reject.`,
+            href: `/jobs/${row.job.id}`,
+            entityType: 'TripException',
+            entityId: id,
+          });
+        }
+      } catch (err) {
+        this.logger.warn(
+          `Trip exception replacement-proposed in-app notify failed for ${id}: ${err}`,
+        );
+      }
+    }
 
     return {
       exception: this.mapException(proposed),
@@ -1014,6 +1065,57 @@ export class ExceptionsService {
       exceptionId: id,
     });
 
+    if (this.inbox) {
+      try {
+        const queryCarrierUserIds =
+          row.companyId && this.inbox.userIdsForCompanies
+            ? await this.inbox.userIdsForCompanies({
+                companyIds: [row.companyId],
+                roles: [PlatformRole.TRANSPORT_COMPANY],
+              })
+            : [];
+        const carrierUserIds = [
+          ...new Set(
+            [...notify.carrierUserIds, ...queryCarrierUserIds].filter(
+              (uid): uid is string => Boolean(uid),
+            ),
+          ),
+        ];
+
+        if (carrierUserIds.length > 0) {
+          await this.inbox.notifyUsers({
+            userIds: carrierUserIds,
+            type: NotificationType.TRIP_EXCEPTION,
+            title: 'Sender approved replacement driver & vehicle',
+            body: `Sender approved replacement vehicle ${vehicleLabel} and driver ${driverName} for "${notify.jobTitle || 'job'}". Crew swap is now active.`,
+            href: `/carrier/exceptions/${id}`,
+            entityType: 'TripException',
+            entityId: id,
+          });
+        }
+
+        const newDriverUserId =
+          row.proposedDriverId && this.inbox.userIdForDriver
+            ? await this.inbox.userIdForDriver(row.proposedDriverId)
+            : null;
+        if (newDriverUserId) {
+          await this.inbox.notifyUsers({
+            userIds: [newDriverUserId],
+            type: NotificationType.TRIP_EXCEPTION,
+            title: 'Assigned to rescue trip',
+            body: `You have been assigned with vehicle ${vehicleLabel} to continue "${notify.jobTitle || 'job'}" after sender approval.`,
+            href: '/driver/trips',
+            entityType: 'TripException',
+            entityId: id,
+          });
+        }
+      } catch (err) {
+        this.logger.warn(
+          `Trip exception approve-replacement in-app notify failed for ${id}: ${err}`,
+        );
+      }
+    }
+
     return {
       exception: this.mapException(resolved),
       reassignment: reassigned,
@@ -1100,6 +1202,53 @@ export class ExceptionsService {
       note,
       exceptionId: id,
     });
+
+    if (this.inbox) {
+      try {
+        const queryCarrierUserIds =
+          row.companyId && this.inbox.userIdsForCompanies
+            ? await this.inbox.userIdsForCompanies({
+                companyIds: [row.companyId],
+                roles: [PlatformRole.TRANSPORT_COMPANY],
+              })
+            : [];
+        const carrierUserIds = [
+          ...new Set(
+            [...notify.carrierUserIds, ...queryCarrierUserIds].filter(
+              (uid): uid is string => Boolean(uid),
+            ),
+          ),
+        ];
+
+        if (carrierUserIds.length > 0) {
+          await this.inbox.notifyUsers({
+            userIds: carrierUserIds,
+            type: NotificationType.TRIP_EXCEPTION,
+            title: 'Sender rejected replacement crew — Job cancelled',
+            body: `Sender rejected the proposed replacement for "${notify.jobTitle || 'job'}" (${note}). The trip and assignment have been cancelled.`,
+            href: `/carrier/exceptions/${id}`,
+            entityType: 'TripException',
+            entityId: id,
+          });
+        }
+
+        if (row.reportedByUserId) {
+          await this.inbox.notifyUsers({
+            userIds: [row.reportedByUserId],
+            type: NotificationType.TRIP_EXCEPTION,
+            title: 'Trip cancelled after breakdown',
+            body: `Sender rejected the proposed replacement for "${notify.jobTitle || 'job'}". Your trip has been cancelled.`,
+            href: '/driver/trips',
+            entityType: 'TripException',
+            entityId: id,
+          });
+        }
+      } catch (err) {
+        this.logger.warn(
+          `Trip exception reject-replacement in-app notify failed for ${id}: ${err}`,
+        );
+      }
+    }
 
     return {
       exception: this.mapException(resolved),
@@ -1207,6 +1356,53 @@ export class ExceptionsService {
       etaNote,
       exceptionId: id,
     });
+
+    if (this.inbox) {
+      try {
+        const querySenderUserIds =
+          notify.senderCompanyId && this.inbox.userIdsForCompanies
+            ? await this.inbox.userIdsForCompanies({
+                companyIds: [notify.senderCompanyId],
+                roles: [PlatformRole.SENDER],
+              })
+            : [];
+        const senderUserIds = [
+          ...new Set(
+            [...notify.senderUserIds, ...querySenderUserIds].filter(
+              (uid): uid is string => Boolean(uid),
+            ),
+          ),
+        ];
+
+        if (senderUserIds.length > 0) {
+          await this.inbox.notifyUsers({
+            userIds: senderUserIds,
+            type: NotificationType.TRIP_EXCEPTION,
+            title: 'Trip exception resolved — Trip continuing',
+            body: `Carrier cleared the exception for "${notify.jobTitle || 'your shipment'}" (${etaNote ? `${note} · ETA: ${etaNote}` : note}).`,
+            href: `/jobs/${notify.jobId}`,
+            entityType: 'TripException',
+            entityId: id,
+          });
+        }
+
+        if (row.reportedByUserId) {
+          await this.inbox.notifyUsers({
+            userIds: [row.reportedByUserId],
+            type: NotificationType.TRIP_EXCEPTION,
+            title: 'Exception resolved — Continue trip',
+            body: `Your carrier cleared the exception for "${notify.jobTitle || 'job'}" (${etaNote ? `${note} · ETA: ${etaNote}` : note}).`,
+            href: '/driver/trips',
+            entityType: 'TripException',
+            entityId: id,
+          });
+        }
+      } catch (err) {
+        this.logger.warn(
+          `Trip exception continue in-app notify failed for ${id}: ${err}`,
+        );
+      }
+    }
 
     return { exception: this.mapException(resolved) };
   }
@@ -1397,6 +1593,68 @@ export class ExceptionsService {
       exceptionId: id,
       phase: row.phase,
     });
+
+    if (this.inbox) {
+      try {
+        const querySenderUserIds =
+          notify.senderCompanyId && this.inbox.userIdsForCompanies
+            ? await this.inbox.userIdsForCompanies({
+                companyIds: [notify.senderCompanyId],
+                roles: [PlatformRole.SENDER],
+              })
+            : [];
+        const senderUserIds = [
+          ...new Set(
+            [...notify.senderUserIds, ...querySenderUserIds].filter(
+              (uid): uid is string => Boolean(uid),
+            ),
+          ),
+        ];
+
+        if (senderUserIds.length > 0) {
+          await this.inbox.notifyUsers({
+            userIds: senderUserIds,
+            type: NotificationType.TRIP_EXCEPTION,
+            title: 'Job re-listed to marketplace with priority',
+            body: `"${notify.jobTitle || 'Your shipment'}" was released back to the marketplace with priority after an exception (${note}). Your price estimate is unchanged.`,
+            href: `/jobs/${notify.jobId}`,
+            entityType: 'TripException',
+            entityId: id,
+          });
+        }
+
+        const queryCarrierUserIds =
+          row.companyId && this.inbox.userIdsForCompanies
+            ? await this.inbox.userIdsForCompanies({
+                companyIds: [row.companyId],
+                roles: [PlatformRole.TRANSPORT_COMPANY],
+              })
+            : [];
+        const carrierUserIds = [
+          ...new Set(
+            [...notify.carrierUserIds, ...queryCarrierUserIds].filter(
+              (uid): uid is string => Boolean(uid),
+            ),
+          ),
+        ];
+
+        if (carrierUserIds.length > 0) {
+          await this.inbox.notifyUsers({
+            userIds: carrierUserIds,
+            type: NotificationType.TRIP_EXCEPTION,
+            title: 'Exception released to marketplace',
+            body: `"${notify.jobTitle || 'Job'}" was released back to the marketplace (${note}).`,
+            href: `/carrier/exceptions/${id}`,
+            entityType: 'TripException',
+            entityId: id,
+          });
+        }
+      } catch (err) {
+        this.logger.warn(
+          `Trip exception release in-app notify failed for ${id}: ${err}`,
+        );
+      }
+    }
 
     return {
       exception: this.mapException(resolved),
@@ -1798,8 +2056,9 @@ export class ExceptionsService {
       }),
     ]);
 
+    const { rankMap, minLicenceMap } = await loadVehicleClassMaps(this.prisma);
     const minClass = job?.minVehicleClass ?? null;
-    const minRank = vehicleClassRank(minClass);
+    const minRank = vehicleClassRank(minClass, rankMap);
     const excludeVehicleId =
       params.kind === TripExceptionKind.VEHICLE_BREAKDOWN
         ? assignment?.vehicleId
@@ -1858,16 +2117,21 @@ export class ExceptionsService {
     for (const vehicle of vehicles) {
       if (excludeVehicleId && vehicle.id === excludeVehicleId) continue;
       if (!vehiclesWithRwc.has(vehicle.id)) continue;
-      if (!isVehicleClassAdequate(vehicle.vehicleClass, minClass)) continue;
+      if (!isVehicleClassAdequate(vehicle.vehicleClass, minClass, rankMap)) continue;
       const classDelta = Math.max(
         0,
-        vehicleClassRank(vehicle.vehicleClass) - minRank,
+        vehicleClassRank(vehicle.vehicleClass, rankMap) - minRank,
       );
       const classScore = Math.max(20, 100 - classDelta * 12);
 
       for (const driver of drivers) {
         if (!driversWithLicenceDoc.has(driver.id)) continue;
-        const licenceGate = evaluateDriverLicenceFields(driver, vehicle.vehicleClass, now);
+        const licenceGate = evaluateDriverLicenceFields(
+          driver,
+          vehicle.vehicleClass,
+          now,
+          minLicenceMap,
+        );
         if (!licenceGate.ok) continue;
         if (
           assignment?.vehicleId === vehicle.id &&
@@ -2017,7 +2281,7 @@ export class ExceptionsService {
               role: 'TRANSPORT_COMPANY',
               status: { in: [UserStatus.ACTIVE, UserStatus.PENDING] },
             },
-            select: { email: true },
+            select: { id: true, email: true },
             take: 10,
           },
         },
@@ -2027,15 +2291,20 @@ export class ExceptionsService {
         select: {
           id: true,
           title: true,
+          senderCompanyId: true,
           originRegionId: true,
           receiverEmail: true,
           senderCompany: {
             select: {
+              id: true,
               email: true,
               users: {
-                where: { role: 'SENDER', status: UserStatus.ACTIVE },
-                select: { email: true },
-                take: 5,
+                where: {
+                  role: 'SENDER',
+                  status: { in: [UserStatus.ACTIVE, UserStatus.PENDING] },
+                },
+                select: { id: true, email: true },
+                take: 10,
               },
             },
           },
@@ -2047,16 +2316,24 @@ export class ExceptionsService {
       ...(company?.users.map((u) => u.email) ?? []),
       ...(company?.email ? [company.email] : []),
     ];
+    const carrierUserIds =
+      company?.users.map((u) => u.id).filter((id): id is string => Boolean(id)) ?? [];
     const senderEmail =
       job?.receiverEmail ??
-      job?.senderCompany.users[0]?.email ??
-      job?.senderCompany.email ??
+      job?.senderCompany?.users[0]?.email ??
+      job?.senderCompany?.email ??
       null;
+    const senderUserIds =
+      job?.senderCompany?.users.map((u) => u.id).filter((id): id is string => Boolean(id)) ?? [];
+    const senderCompanyId = job?.senderCompanyId ?? job?.senderCompany?.id ?? null;
 
     return {
       driverEmail: reporter?.email ?? null,
       carrierEmails,
+      carrierUserIds,
       senderEmail,
+      senderUserIds,
+      senderCompanyId,
       jobTitle: job?.title ?? row.job?.title ?? '',
       jobId: job?.id ?? row.jobId,
       originRegionId: job?.originRegionId ?? null,
