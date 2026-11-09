@@ -185,6 +185,27 @@ export class SenderService {
     });
   }
 
+  private async resolveDefaultRegion(): Promise<{
+    id: string;
+    code: string;
+    enabled?: boolean;
+  } | null> {
+    if (typeof (this.prisma.region as { findFirst?: unknown })?.findFirst === 'function') {
+      const firstEnabled = await this.prisma.region.findFirst({
+        where: { enabled: true },
+        orderBy: { code: 'asc' },
+      });
+      if (firstEnabled) return firstEnabled;
+    }
+    if (typeof this.prisma.region?.findUnique === 'function') {
+      const fallback = await this.prisma.region.findUnique({ where: { code: 'VIC' } });
+      if (fallback && (fallback as { enabled?: boolean }).enabled !== false) {
+        return fallback;
+      }
+    }
+    return null;
+  }
+
   async register(input: SenderRegisterInput) {
     this.ensureDatabase();
     const existing = await this.prisma.user.findUnique({ where: { email: input.email } });
@@ -199,8 +220,8 @@ export class SenderService {
       input.inviteToken,
       CompanyType.SENDER,
     );
-    const vic = await this.prisma.region.findUnique({ where: { code: 'VIC' } });
-    const homeRegionId = resolved.homeRegionId ?? vic?.id ?? null;
+    const defaultRegion = await this.resolveDefaultRegion();
+    const homeRegionId = resolved.homeRegionId ?? defaultRegion?.id ?? null;
 
     const company = await this.prisma.company.create({
       data: {
@@ -346,6 +367,13 @@ export class SenderService {
     });
     if (!region) {
       throw new NotFoundException(`Unknown region ${input.homeRegionCode}`);
+    }
+    if ((region as { enabled?: boolean }).enabled === false) {
+      throw new BadRequestException({
+        message: `Service region ${input.homeRegionCode} is not currently enabled on the platform`,
+        code: 'REGION_NOT_ENABLED',
+        state: input.homeRegionCode,
+      });
     }
 
     const invoicePatch =

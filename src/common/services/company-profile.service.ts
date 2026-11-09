@@ -265,6 +265,13 @@ export class CompanyProfileService {
         if (!region) {
           throw new NotFoundException(`Unknown region ${code}`);
         }
+        if ((region as { enabled?: boolean }).enabled === false) {
+          throw new BadRequestException({
+            message: `Service region ${code} is not currently enabled on the platform`,
+            code: 'REGION_NOT_ENABLED',
+            state: code,
+          });
+        }
       }
       data.serviceRegionCodes = input.serviceRegionCodes;
     }
@@ -392,6 +399,13 @@ export class CompanyProfileService {
       });
       if (!region) {
         throw new NotFoundException(`Unknown region ${proposedChanges.homeRegionCode}`);
+      }
+      if ((region as { enabled?: boolean }).enabled === false) {
+        throw new BadRequestException({
+          message: `Service region ${proposedChanges.homeRegionCode} is not currently enabled on the platform`,
+          code: 'REGION_NOT_ENABLED',
+          state: proposedChanges.homeRegionCode,
+        });
       }
     }
 

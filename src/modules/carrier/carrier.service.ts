@@ -255,6 +255,27 @@ export class CarrierService {
     });
   }
 
+  private async resolveDefaultRegion(): Promise<{
+    id: string;
+    code: string;
+    enabled?: boolean;
+  } | null> {
+    if (typeof (this.prisma.region as { findFirst?: unknown })?.findFirst === 'function') {
+      const firstEnabled = await this.prisma.region.findFirst({
+        where: { enabled: true },
+        orderBy: { code: 'asc' },
+      });
+      if (firstEnabled) return firstEnabled;
+    }
+    if (typeof this.prisma.region?.findUnique === 'function') {
+      const fallback = await this.prisma.region.findUnique({ where: { code: 'VIC' } });
+      if (fallback && (fallback as { enabled?: boolean }).enabled !== false) {
+        return fallback;
+      }
+    }
+    return null;
+  }
+
   async register(input: CarrierRegisterInput) {
     this.ensureDatabase();
     const existing = await this.prisma.user.findUnique({ where: { email: input.email } });
@@ -268,14 +289,14 @@ export class CarrierService {
       input.inviteToken,
       CompanyType.CARRIER,
     );
-    const vic = await this.prisma.region.findUnique({ where: { code: 'VIC' } });
-    const homeRegionId = resolved.homeRegionId ?? vic?.id ?? null;
+    const defaultRegion = await this.resolveDefaultRegion();
+    const homeRegionId = resolved.homeRegionId ?? defaultRegion?.id ?? null;
     const homeRegion =
-      resolved.homeRegionId && resolved.homeRegionId !== vic?.id
+      resolved.homeRegionId && resolved.homeRegionId !== defaultRegion?.id
         ? await this.prisma.region.findUnique({ where: { id: resolved.homeRegionId } })
-        : vic;
+        : defaultRegion;
     const initialServiceRegions = Array.from(
-      new Set([homeRegion?.code, vic?.code].filter((c): c is string => Boolean(c))),
+      new Set([homeRegion?.code].filter((c): c is string => Boolean(c))),
     );
     const company = await this.prisma.company.create({
       data: {
@@ -450,6 +471,13 @@ export class CarrierService {
     const region = await this.prisma.region.findUnique({ where: { code: input.homeRegionCode } });
     if (!region) {
       throw new NotFoundException(`Unknown region ${input.homeRegionCode}`);
+    }
+    if ((region as { enabled?: boolean }).enabled === false) {
+      throw new BadRequestException({
+        message: `Service region ${input.homeRegionCode} is not currently enabled on the platform`,
+        code: 'REGION_NOT_ENABLED',
+        state: input.homeRegionCode,
+      });
     }
     await this.prisma.company.update({
       where: { id: company.id },
@@ -1874,6 +1902,13 @@ export class CarrierService {
       const region = await this.prisma.region.findUnique({ where: { code } });
       if (!region) {
         throw new NotFoundException(`Unknown region ${code}`);
+      }
+      if ((region as { enabled?: boolean }).enabled === false) {
+        throw new BadRequestException({
+          message: `Service region ${code} is not currently enabled on the platform`,
+          code: 'REGION_NOT_ENABLED',
+          state: code,
+        });
       }
     }
     if (input.capabilities.includes('DG')) {

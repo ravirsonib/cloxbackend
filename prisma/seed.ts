@@ -19,42 +19,56 @@ import {
 
 const prisma = new PrismaClient();
 
-const AU_REGIONS: Array<{ code: string; name: string; enabled: boolean }> = [
-  { code: 'VIC', name: 'Victoria', enabled: true },
-  { code: 'NSW', name: 'New South Wales', enabled: false },
-  { code: 'QLD', name: 'Queensland', enabled: false },
-  { code: 'SA', name: 'South Australia', enabled: false },
-  { code: 'WA', name: 'Western Australia', enabled: false },
-  { code: 'TAS', name: 'Tasmania', enabled: false },
-  { code: 'NT', name: 'Northern Territory', enabled: false },
-  { code: 'ACT', name: 'Australian Capital Territory', enabled: false },
+const AU_REGIONS: Array<{
+  code: string;
+  name: string;
+  enabled: boolean;
+  territoryCode: string;
+  territoryName: string;
+}> = [
+  { code: 'VIC', name: 'Victoria', enabled: true, territoryCode: 'MEL', territoryName: 'Melbourne Metro' },
+  { code: 'NSW', name: 'New South Wales', enabled: false, territoryCode: 'SYD', territoryName: 'Sydney Metro' },
+  { code: 'QLD', name: 'Queensland', enabled: false, territoryCode: 'BNE', territoryName: 'Brisbane Metro' },
+  { code: 'SA', name: 'South Australia', enabled: false, territoryCode: 'ADL', territoryName: 'Adelaide Metro' },
+  { code: 'WA', name: 'Western Australia', enabled: false, territoryCode: 'PER', territoryName: 'Perth Metro' },
+  { code: 'TAS', name: 'Tasmania', enabled: false, territoryCode: 'HBA', territoryName: 'Hobart Metro' },
+  { code: 'NT', name: 'Northern Territory', enabled: false, territoryCode: 'DRW', territoryName: 'Darwin Metro' },
+  { code: 'ACT', name: 'Australian Capital Territory', enabled: false, territoryCode: 'CBR', territoryName: 'Canberra Metro' },
 ];
 
 async function seedRegions() {
   for (const region of AU_REGIONS) {
-    await prisma.region.upsert({
+    const upsertedRegion = await prisma.region.upsert({
       where: { code: region.code },
-      update: { name: region.name, enabled: region.enabled },
-      create: region,
+      update: {
+        name: region.name,
+        ...(region.enabled ? { enabled: true } : {}),
+      },
+      create: {
+        code: region.code,
+        name: region.name,
+        enabled: region.enabled,
+      },
+    });
+
+    await prisma.localTerritory.upsert({
+      where: {
+        regionId_code: { regionId: upsertedRegion.id, code: region.territoryCode },
+      },
+      update: { name: region.territoryName, enabled: true },
+      create: {
+        regionId: upsertedRegion.id,
+        code: region.territoryCode,
+        name: region.territoryName,
+        enabled: true,
+      },
     });
   }
 
   const vic = await prisma.region.findUniqueOrThrow({ where: { code: 'VIC' } });
-  await prisma.localTerritory.upsert({
-    where: {
-      regionId_code: { regionId: vic.id, code: 'MEL' },
-    },
-    update: { name: 'Melbourne Metro', enabled: true },
-    create: {
-      regionId: vic.id,
-      code: 'MEL',
-      name: 'Melbourne Metro',
-      enabled: true,
-    },
-  });
 
   // eslint-disable-next-line no-console
-  console.log(`Seeded regions (VIC enabled=${vic.enabled ? 'yes' : 'no'})`);
+  console.log(`Seeded 8 AU regions + metro territories (VIC enabled=${vic.enabled ? 'yes' : 'no'})`);
   return vic;
 }
 

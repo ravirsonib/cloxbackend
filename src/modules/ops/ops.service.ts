@@ -896,14 +896,37 @@ export class OpsService {
     };
   }
 
+  private async resolveDefaultRegionCode(): Promise<string> {
+    if (typeof (this.prisma.region as { findFirst?: unknown })?.findFirst === 'function') {
+      const enabled = await this.prisma.region.findFirst({
+        where: { enabled: true },
+        orderBy: { code: 'asc' },
+      });
+      if (enabled?.code) return enabled.code;
+      const anyRegion = await this.prisma.region.findFirst({ orderBy: { code: 'asc' } });
+      if (anyRegion?.code) return anyRegion.code;
+    }
+    return 'VIC';
+  }
+
   /** Demo policy mutation — Super only + step-up (M1). */
   async publishPolicyStub(actor: AuthenticatedPrincipal) {
     this.ensureDatabase();
+    const enabledRegions =
+      typeof (this.prisma.region as { findMany?: unknown })?.findMany === 'function'
+        ? await this.prisma.region.findMany({
+            where: { enabled: true },
+            orderBy: { code: 'asc' },
+            select: { code: true },
+          })
+        : [];
+    const enabledStates =
+      enabledRegions.length > 0 ? enabledRegions.map((r) => r.code) : ['VIC'];
     const version = await this.prisma.policyVersion.create({
       data: {
         key: 'pilot.enabled_states',
         version: Date.now(),
-        payload: { enabled_states: ['VIC'] },
+        payload: { enabled_states: enabledStates },
         publishedAt: new Date(),
         publishedBy: actor.id,
       },
@@ -921,7 +944,7 @@ export class OpsService {
     this.ensureDatabase();
 
     if (actor.role === AdminRole.STATE_MASTER) {
-      const regionCode = actor.regionCodes[0] || 'VIC';
+      const regionCode = actor.regionCodes[0] || (await this.resolveDefaultRegionCode());
       const region = await this.prisma.region.findUnique({
         where: { code: regionCode },
       });
@@ -1263,8 +1286,7 @@ export class OpsService {
 
     let regionCode = actor.regionCodes?.[0];
     if (actor.role === AdminRole.SUPER_ADMIN && !regionCode) {
-      const firstRegion = await this.prisma.region.findFirst({ orderBy: { code: 'asc' } });
-      regionCode = firstRegion?.code ?? 'VIC';
+      regionCode = await this.resolveDefaultRegionCode();
     }
     if (!regionCode) {
       throw new BadRequestException('State Master has no assigned region');
@@ -1413,7 +1435,10 @@ export class OpsService {
     const territoryId = localTerritory?.id ?? null;
     const territoryCode = localTerritory?.code ?? null;
     const territoryName = localTerritory?.name ?? territoryCode ?? null;
-    const regionCode = territoryScope?.region?.code ?? localTerritory?.region?.code ?? 'VIC';
+    const regionCode =
+      territoryScope?.region?.code ??
+      localTerritory?.region?.code ??
+      (await this.resolveDefaultRegionCode());
 
     if (actor.role === AdminRole.STATE_MASTER && actor.regionCodes?.[0] !== regionCode) {
       throw new ForbiddenException('Cross-region access prohibited');
@@ -1536,7 +1561,10 @@ export class OpsService {
     }
 
     const territoryScope = bde.scopes.find((s) => s.localTerritoryId != null);
-    const regionCode = territoryScope?.region?.code ?? territoryScope?.localTerritory?.region?.code ?? 'VIC';
+    const regionCode =
+      territoryScope?.region?.code ??
+      territoryScope?.localTerritory?.region?.code ??
+      (await this.resolveDefaultRegionCode());
 
     if (actor.role === AdminRole.STATE_MASTER && actor.regionCodes?.[0] !== regionCode) {
       throw new ForbiddenException('Cross-region access prohibited');

@@ -49,6 +49,12 @@ export class JobsController {
     return this.jobsService.getVehicleClassesMeta();
   }
 
+  @Get('meta/regions')
+  @ApiOperation({ summary: 'List AU service regions + enabled status for booking & onboarding' })
+  async regionsMeta() {
+    return this.jobsService.getRegionsMeta();
+  }
+
   @Post('meta/recommend')
   @ApiOperation({
     summary: 'Recommend vehicle class from dead weight + dimensions (50 t chargeable cap)',

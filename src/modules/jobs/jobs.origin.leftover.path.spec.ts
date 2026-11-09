@@ -378,4 +378,170 @@ describe('JobsService origin/create leftovers', () => {
       }),
     );
   });
+
+  it('createJob resolves NSW origin region and SYD primary territory when NSW is enabled', async () => {
+    const created = {
+      id: 'job-nsw',
+      status: 'DRAFT',
+      pricingModel: 'PER_KM',
+      title: 'Sydney Run',
+      receiverName: 'R',
+      receiverEmail: 'recv@yopmail.com',
+      receiverPhone: null,
+      pickupAt: null,
+      deadWeightKg: 50,
+      lengthCm: 50,
+      widthCm: 50,
+      heightCm: 50,
+      chargeableWeightKg: 50,
+      loadTypes: ['GENERAL'],
+      requiresDg: false,
+      requiresReefer: false,
+      requiresOversize: false,
+      minVehicleClass: 'UTE',
+      recommendedVehicleClass: 'UTE',
+      siteManeuverability: null,
+      siteFacility: null,
+      siteDisclaimerAcceptedAt: new Date(),
+      hourlyPattern: null,
+      routeDistanceKm: 10,
+      routeDurationMinutes: 20,
+      routeFatigueBreakMinutes: 0,
+      billableHours: null,
+      estimateExGstCents: 4545,
+      estimateGstCents: 455,
+      estimateIncGstCents: 5000,
+      publishedAt: null,
+      createdAt: new Date(),
+      stops: [],
+      proposals: [],
+    };
+    const prisma = {
+      isConnected: () => true,
+      user: {
+        findUnique: jest.fn().mockResolvedValue({
+          id: 'user-sender',
+          company: { id: 'co-s', homeRegionId: 'reg-nsw' },
+        }),
+      },
+      region: {
+        findUnique: jest.fn().mockResolvedValue({ id: 'reg-nsw', code: 'NSW', enabled: true }),
+      },
+      localTerritory: {
+        findMany: jest.fn().mockResolvedValue([
+          { id: 'terr-ncl', code: 'NCL' },
+          { id: 'terr-syd', code: 'SYD' },
+        ]),
+      },
+      policyVersion: { findFirst: jest.fn().mockResolvedValue(null) },
+      job: { create: jest.fn().mockResolvedValue(created) },
+    };
+    const service = makeService(prisma);
+    await service.createJob(sender, {
+      title: 'Sydney Run',
+      pricingModel: 'PER_KM',
+      deadWeightKg: 50,
+      lengthCm: 50,
+      widthCm: 50,
+      heightCm: 50,
+      distanceKm: 12,
+      loadTypes: ['GENERAL'],
+      siteDisclaimerAccepted: true,
+      receiverName: 'R',
+      receiverEmail: 'recv@yopmail.com',
+      stops: [
+        {
+          sequence: 1,
+          stopType: 'PICKUP',
+          lat: -33.8688,
+          lng: 151.2093,
+          suburb: 'Sydney',
+          state: 'NSW',
+          postcode: '2000',
+          addressLine: '1 George St',
+        },
+        {
+          sequence: 2,
+          stopType: 'DROPOFF',
+          lat: -33.9399,
+          lng: 151.1753,
+          suburb: 'Mascot',
+          state: 'NSW',
+          postcode: '2020',
+          addressLine: '100 Keith Smith Ave',
+        },
+      ],
+    } as never);
+    expect(prisma.job.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          originRegionId: 'reg-nsw',
+          originTerritoryId: 'terr-syd',
+        }),
+      }),
+    );
+  });
+
+  it('createJob rejects disabled pickup region with REGION_NOT_ENABLED', async () => {
+    const prisma = {
+      isConnected: () => true,
+      user: {
+        findUnique: jest.fn().mockResolvedValue({
+          id: 'user-sender',
+          company: { id: 'co-s', homeRegionId: 'reg-vic' },
+        }),
+      },
+      region: {
+        findUnique: jest.fn().mockResolvedValue({ id: 'reg-nsw', code: 'NSW', enabled: false }),
+      },
+      localTerritory: { findMany: jest.fn() },
+      policyVersion: { findFirst: jest.fn().mockResolvedValue(null) },
+      job: { create: jest.fn() },
+    };
+    const service = makeService(prisma);
+    try {
+      await service.createJob(sender, {
+        title: 'Disabled NSW Run',
+        pricingModel: 'PER_KM',
+        deadWeightKg: 50,
+        lengthCm: 50,
+        widthCm: 50,
+        heightCm: 50,
+        distanceKm: 12,
+        loadTypes: ['GENERAL'],
+        siteDisclaimerAccepted: true,
+        receiverName: 'R',
+        receiverEmail: 'recv@yopmail.com',
+        stops: [
+          {
+            sequence: 1,
+            stopType: 'PICKUP',
+            lat: -33.8688,
+            lng: 151.2093,
+            suburb: 'Sydney',
+            state: 'NSW',
+            postcode: '2000',
+            addressLine: '1 George St',
+          },
+          {
+            sequence: 2,
+            stopType: 'DROPOFF',
+            lat: -33.9399,
+            lng: 151.1753,
+            suburb: 'Mascot',
+            state: 'NSW',
+            postcode: '2020',
+            addressLine: '100 Keith Smith Ave',
+          },
+        ],
+      } as never);
+      fail('expected REGION_NOT_ENABLED');
+    } catch (err) {
+      expect(err).toBeInstanceOf(BadRequestException);
+      expect((err as BadRequestException).getResponse()).toMatchObject({
+        code: 'REGION_NOT_ENABLED',
+      });
+    }
+    expect(prisma.job.create).not.toHaveBeenCalled();
+  });
 });

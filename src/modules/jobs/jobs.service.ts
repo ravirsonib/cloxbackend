@@ -55,6 +55,18 @@ const DEFAULT_MIN_BASE_CENTS = {
 /** Map AU state abbreviations on stops → Region.code */
 const AU_STATE_CODES = new Set(['VIC', 'NSW', 'QLD', 'SA', 'WA', 'TAS', 'NT', 'ACT']);
 
+/** Default capital metro territory code per AU state. */
+const STATE_PRIMARY_TERRITORY_CODE: Record<string, string> = {
+  VIC: 'MEL',
+  NSW: 'SYD',
+  QLD: 'BNE',
+  SA: 'ADL',
+  WA: 'PER',
+  TAS: 'HBA',
+  NT: 'DRW',
+  ACT: 'CBR',
+};
+
 @Injectable()
 export class JobsService {
   private readonly logger = new Logger(JobsService.name);
@@ -77,7 +89,7 @@ export class JobsService {
   /**
    * Matching + commission origin from primary pickup stop state when known;
    * falls back to sender company home region. Territory = enabled territory
-   * in that region (MEL preferred for VIC when present).
+   * in that region (primary metro territory preferred for the state when present).
    */
   private async resolveJobOrigin(
     stops: Array<{ stopType: string; state: string | null }>,
@@ -88,9 +100,20 @@ export class JobsService {
     const stateCode = pickup?.state?.trim().toUpperCase() ?? null;
 
     let originRegionId = fallbackRegionId;
+    let resolvedStateCode: string | null = null;
     if (stateCode && AU_STATE_CODES.has(stateCode)) {
       const region = await this.prisma.region.findUnique({ where: { code: stateCode } });
-      if (region) originRegionId = region.id;
+      if (region) {
+        if ((region as { enabled?: boolean }).enabled === false) {
+          throw new BadRequestException({
+            message: `Service region ${stateCode} is not currently enabled on the platform`,
+            code: 'REGION_NOT_ENABLED',
+            state: stateCode,
+          });
+        }
+        originRegionId = region.id;
+        resolvedStateCode = region.code ?? stateCode;
+      }
     }
 
     if (!originRegionId) {
@@ -104,8 +127,13 @@ export class JobsService {
     if (territories.length === 0) {
       return { originRegionId, originTerritoryId: null };
     }
+    const primaryCode = resolvedStateCode
+      ? STATE_PRIMARY_TERRITORY_CODE[resolvedStateCode]
+      : undefined;
     const preferred =
-      territories.find((t) => t.code === 'MEL') ?? territories[0];
+      (primaryCode ? territories.find((t) => t.code === primaryCode) : undefined) ??
+      territories.find((t) => Object.values(STATE_PRIMARY_TERRITORY_CODE).includes(t.code)) ??
+      territories[0];
     return { originRegionId, originTerritoryId: preferred.id };
   }
 
@@ -248,6 +276,41 @@ export class JobsService {
       suggestedTareKg: suggestedTareMap,
       chargeableFormula: 'max(deadKg, L×W×Hcm/4000)',
     };
+  }
+
+  async getRegionsMeta() {
+    try {
+      const regions = await this.prisma.region.findMany({
+        orderBy: { code: 'asc' },
+        include: {
+          territories: {
+            where: { enabled: true },
+            orderBy: { code: 'asc' },
+            select: {
+              id: true,
+              code: true,
+              name: true,
+              enabled: true,
+            },
+          },
+        },
+      });
+      return {
+        regions: regions.map((r) => ({
+          id: r.id,
+          code: r.code,
+          name: r.name,
+          enabled: r.enabled,
+          territories: r.territories ?? [],
+        })),
+        enabledCodes: regions.filter((r) => r.enabled).map((r) => r.code),
+      };
+    } catch {
+      return {
+        regions: [],
+        enabledCodes: Array.from(AU_STATE_CODES),
+      };
+    }
   }
 
   private mapJob(job: {
@@ -1201,11 +1264,20 @@ export class JobsService {
 
     const job = await this.prisma.job.findFirst({
       where: { id: jobId, senderCompanyId: user.companyId },
-      include: { stops: true },
+      include: { stops: true, originRegion: true },
     });
     if (!job) throw new NotFoundException('Job not found');
     if (job.status !== JobStatus.DRAFT) {
       throw new BadRequestException('Only DRAFT jobs can be published');
+    }
+    if ((job as { originRegion?: { code?: string; enabled?: boolean } | null }).originRegion?.enabled === false) {
+      const disabledCode =
+        (job as { originRegion?: { code?: string } | null }).originRegion?.code ?? 'selected state';
+      throw new BadRequestException({
+        message: `Service region ${disabledCode} is not currently enabled on the platform`,
+        code: 'REGION_NOT_ENABLED',
+        state: disabledCode,
+      });
     }
     if (!job.receiverEmail || !job.receiverName) {
       throw new BadRequestException('Receiver name + email required to publish');

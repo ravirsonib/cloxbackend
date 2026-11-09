@@ -25,7 +25,7 @@ export type CarrierEligibilityJob = {
   requiresOversize: boolean;
   minVehicleClass: string | null;
   chargeableWeightKg?: number | null;
-  originRegion: { code: string } | null;
+  originRegion: { code: string; enabled?: boolean } | null;
 };
 
 /**
@@ -37,6 +37,7 @@ export function carrierMatchesJob(
   job: CarrierEligibilityJob,
   classes: VehicleClassSpec[] = DEFAULT_VEHICLE_CLASSES,
 ): boolean {
+  if (job.originRegion?.enabled === false) return false;
   if (job.requiresDg && !company.capabilities.includes('DG')) return false;
   if (job.requiresReefer && !company.capabilities.includes('REEFER')) return false;
   if (job.requiresOversize && !company.capabilities.includes('OVERSIZE')) return false;
