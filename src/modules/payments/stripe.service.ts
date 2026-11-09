@@ -282,11 +282,30 @@ export class StripeService {
       createParams.payment_method = params.paymentMethodId;
       createParams.confirm = true;
       createParams.off_session = true;
+    } else {
+      createParams.setup_future_usage = 'off_session';
     }
 
-    const intent = await stripe.paymentIntents.create(createParams, {
-      idempotencyKey: params.idempotencyKey,
-    });
+    let intent: Stripe.PaymentIntent;
+    try {
+      intent = await stripe.paymentIntents.create(createParams, {
+        idempotencyKey: params.idempotencyKey,
+      });
+    } catch (err: unknown) {
+      const errPi =
+        (
+          err as {
+            payment_intent?: Stripe.PaymentIntent;
+            raw?: { payment_intent?: Stripe.PaymentIntent };
+          }
+        )?.payment_intent ??
+        (err as { raw?: { payment_intent?: Stripe.PaymentIntent } })?.raw?.payment_intent;
+      if (errPi?.id && errPi.client_secret && errPi.status) {
+        intent = errPi;
+      } else {
+        throw err;
+      }
+    }
 
     return {
       id: intent.id,
@@ -330,6 +349,18 @@ export class StripeService {
     }
     const intent = await this.getClient().paymentIntents.retrieve(paymentIntentId);
     return intent.status;
+  }
+
+  /** Payment method id used on a succeeded PaymentIntent (for saving as company default). */
+  async retrievePaymentIntentPaymentMethod(paymentIntentId: string): Promise<string | null> {
+    if (this.isMockMode() || paymentIntentId.startsWith('pi_mock_')) {
+      return 'pm_mock_default';
+    }
+    const intent = await this.getClient().paymentIntents.retrieve(paymentIntentId);
+    if (!intent.payment_method) return null;
+    return typeof intent.payment_method === 'string'
+      ? intent.payment_method
+      : intent.payment_method.id;
   }
 
   /** Best-effort cancel so waived/failed accepts do not leave live Stripe intents. */

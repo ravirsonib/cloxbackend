@@ -36,6 +36,10 @@ import { NotificationsService } from '../notifications/notifications.service';
 import { RevenueSplitService } from '../settlements/revenue-split.service';
 import { TripsService } from '../trips/trips.service';
 import { splitIncGst } from '../trips/geofence.util';
+import {
+  isMockStripeCustomerId,
+  isMockStripePaymentMethodId,
+} from './stripe-mock-ids.util';
 import { StripeService } from './stripe.service';
 
 @Injectable()
@@ -106,7 +110,17 @@ export class PaymentsService {
       throw new NotFoundException('Sender company not found');
     }
 
-    let stripeCustomerId = user.company.stripeCustomerId;
+    const isLive =
+      typeof this.stripe.isMockMode === 'function' ? !this.stripe.isMockMode() : false;
+    let stripeCustomerId =
+      isLive && isMockStripeCustomerId(user.company.stripeCustomerId)
+        ? null
+        : user.company.stripeCustomerId;
+    const defaultPaymentMethodId =
+      isLive && isMockStripePaymentMethodId(user.company.stripeDefaultPaymentMethodId)
+        ? null
+        : user.company.stripeDefaultPaymentMethodId;
+
     if (!stripeCustomerId) {
       const customer = await this.stripe.createCustomer({
         email: user.email,
@@ -116,7 +130,12 @@ export class PaymentsService {
       stripeCustomerId = customer.id;
       await this.prisma.company.update({
         where: { id: user.company.id },
-        data: { stripeCustomerId },
+        data: {
+          stripeCustomerId,
+          ...(isLive && isMockStripePaymentMethodId(user.company.stripeDefaultPaymentMethodId)
+            ? { stripeDefaultPaymentMethodId: null, paymentReady: false }
+            : {}),
+        },
       });
     }
 
@@ -128,6 +147,7 @@ export class PaymentsService {
     });
 
     // Recover stuck accepts so a fresh attempt can proceed.
+    let replayPiStatus: string | null = null;
     if (existing) {
       const assignmentStatus = existing.job?.assignment?.status;
       const locked = assignmentStatus === AssignmentStatus.LOCKED;
@@ -159,6 +179,7 @@ export class PaymentsService {
         const piStatus = await this.stripe.retrievePaymentIntentStatus(
           existing.stripePaymentIntentId,
         );
+        replayPiStatus = piStatus;
         if (piStatus === 'succeeded') {
           liveSucceeded = true;
         } else if (piStatus === 'canceled') {
@@ -202,6 +223,7 @@ export class PaymentsService {
           ...base,
           clientSecret,
           publishableKey: this.stripe.publishableKey(),
+          ...(replayPiStatus ? { stripeStatus: replayPiStatus } : {}),
           message: 'Idempotent replay — complete SCA with clientSecret if required',
         };
       }
@@ -357,7 +379,7 @@ export class PaymentsService {
       pi = await this.stripe.createPaymentIntent({
         amountCents: amountInc,
         customerId: stripeCustomerId,
-        paymentMethodId: user.company.stripeDefaultPaymentMethodId,
+        paymentMethodId: defaultPaymentMethodId,
         // PE-scoped key so retries after unwind never hit a stale Stripe idempotency cache.
         idempotencyKey: `${key}:pe:${created.paymentEvent.id}`,
         metadata: {
@@ -443,7 +465,9 @@ export class PaymentsService {
           ? 'Payment succeeded — assignment locked'
           : pi.status === 'requires_action'
             ? 'Complete SCA with clientSecret'
-            : 'Payment pending — wait for webhook',
+            : pi.status === 'requires_payment_method' || pi.status === 'requires_confirmation'
+              ? 'Complete card payment to lock assignment'
+              : 'Payment pending — wait for webhook',
     };
   }
 
@@ -1385,7 +1409,70 @@ export class PaymentsService {
       });
     }
 
+    await this.syncSenderDefaultPaymentMethodFromIntent(pe.jobId, params.paymentIntentId);
+
     return { skipped: false as const };
+  }
+
+  /**
+   * Best-effort: when a job PaymentIntent succeeds, save its payment method on the
+   * sender company so future bid accepts and surcharges can charge off-session.
+   */
+  private async syncSenderDefaultPaymentMethodFromIntent(
+    jobId: string,
+    paymentIntentId: string,
+  ): Promise<void> {
+    if (
+      !paymentIntentId ||
+      typeof this.stripe.retrievePaymentIntentPaymentMethod !== 'function' ||
+      !this.prisma.job?.findUnique ||
+      !this.prisma.company?.update
+    ) {
+      return;
+    }
+    try {
+      const pmId = await this.stripe.retrievePaymentIntentPaymentMethod(paymentIntentId);
+      if (!pmId) return;
+      const job = await this.prisma.job.findUnique({
+        where: { id: jobId },
+        select: {
+          senderCompany: {
+            select: {
+              id: true,
+              stripeCustomerId: true,
+              stripeDefaultPaymentMethodId: true,
+              paymentReady: true,
+            },
+          },
+        },
+      });
+      const co = job?.senderCompany;
+      if (!co) return;
+      if (co.stripeDefaultPaymentMethodId === pmId && co.paymentReady) {
+        return;
+      }
+      if (co.stripeCustomerId && typeof this.stripe.attachPaymentMethod === 'function') {
+        await this.stripe
+          .attachPaymentMethod({
+            customerId: co.stripeCustomerId,
+            paymentMethodId: pmId,
+          })
+          .catch(() => undefined);
+      }
+      await this.prisma.company.update({
+        where: { id: co.id },
+        data: {
+          stripeDefaultPaymentMethodId: pmId,
+          paymentReady: true,
+        },
+      });
+    } catch (err) {
+      this.logger.warn(
+        `syncSenderDefaultPaymentMethodFromIntent job=${jobId}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
   }
 
   /** Job-level + per-dropoff receiver contacts for assignment-locked email. */
@@ -2282,16 +2369,29 @@ export class PaymentsService {
         paymentIntentId: pe.stripePaymentIntentId,
         source: 'client_sync',
       });
-    } else if (status === 'canceled' || status === 'requires_payment_method') {
+    } else if (status === 'canceled') {
       await this.prisma.paymentEvent.update({
         where: { id: pe.id },
         data: { status: PaymentEventStatus.FAILED },
       });
+      if (!job.assignment || job.assignment.status === AssignmentStatus.PENDING) {
+        await this.unwindFailedAccept({
+          ...pe,
+          status: PaymentEventStatus.FAILED,
+        });
+      }
     } else if (status === 'requires_action') {
       await this.prisma.paymentEvent.update({
         where: { id: pe.id },
         data: { status: PaymentEventStatus.REQUIRES_ACTION },
       });
+    } else if (status === 'requires_payment_method' || status === 'requires_confirmation') {
+      if (pe.status !== PaymentEventStatus.PENDING) {
+        await this.prisma.paymentEvent.update({
+          where: { id: pe.id },
+          data: { status: PaymentEventStatus.PENDING },
+        });
+      }
     }
 
     const freshPe = await this.prisma.paymentEvent.findUnique({ where: { id: pe.id } });
@@ -2317,7 +2417,9 @@ export class PaymentsService {
           ? 'Payment succeeded — assignment locked'
           : status === 'requires_action'
             ? 'Complete SCA with clientSecret'
-            : `Payment status: ${status ?? 'unknown'}`,
+            : status === 'requires_payment_method' || status === 'requires_confirmation'
+              ? 'Complete card payment to lock assignment'
+              : `Payment status: ${status ?? 'unknown'}`,
     };
   }
 

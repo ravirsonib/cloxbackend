@@ -221,10 +221,37 @@ describe('StripeService live SDK paths (mocked Stripe client)', () => {
       }),
     ).resolves.toMatchObject({ id: 'pi_2', mock: false, status: 'succeeded' });
 
+    expect(api.paymentIntents.create.mock.calls[0][0]).toMatchObject({
+      setup_future_usage: 'off_session',
+    });
     expect(api.paymentIntents.create.mock.calls[1][0]).toMatchObject({
       payment_method: 'pm_1',
       confirm: true,
       off_session: true,
+    });
+
+    api.paymentIntents.create.mockRejectedValueOnce({
+      raw: {
+        payment_intent: {
+          id: 'pi_err_1',
+          client_secret: 'sec_err_1',
+          status: 'requires_payment_method',
+        },
+      },
+    });
+    await expect(
+      svc.createPaymentIntent({
+        amountCents: 1000,
+        customerId: 'cus_1',
+        paymentMethodId: 'pm_declined',
+        idempotencyKey: 'k3',
+        metadata: { jobId: 'j1' },
+      }),
+    ).resolves.toMatchObject({
+      id: 'pi_err_1',
+      clientSecret: 'sec_err_1',
+      status: 'requires_payment_method',
+      mock: false,
     });
   });
 

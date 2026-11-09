@@ -60,31 +60,103 @@ describe('PaymentsService acceptProposal + webhook paths', () => {
       ).rejects.toBeInstanceOf(ForbiddenException);
     });
 
-    it('rejects when payment not ready', async () => {
+    it('creates Stripe customer on the fly when sender has no stripeCustomerId and returns requires_payment_method message', async () => {
+      const createCustomer = jest.fn().mockResolvedValue({ id: 'cus_auto', mock: false });
+      const stripeWithCustomer = { ...stripe, createCustomer };
+      const assignment = {
+        id: 'asg-auto',
+        status: AssignmentStatus.PENDING,
+        lockedAt: null as Date | null,
+      };
+      const pePending = {
+        id: 'pe-auto',
+        jobId: 'job-1',
+        status: PaymentEventStatus.PENDING,
+        amountIncGstCents: 11000,
+        amountExGstCents: 10000,
+        amountGstCents: 1000,
+        stripePaymentIntentId: null as string | null,
+        metadata: { proposalId: 'prop-1', assignmentId: 'asg-auto', conflictIds: [] },
+      };
+      stripe.createPaymentIntent.mockResolvedValueOnce({
+        id: 'pi_rpm',
+        status: 'requires_payment_method',
+        clientSecret: 'cs_rpm',
+        mock: false,
+      });
       const prisma = {
         isConnected: () => true,
         user: {
           findUnique: jest.fn().mockResolvedValue({
             id: 'user-sender',
+            email: 'sender@yopmail.com',
+            name: 'Sender',
             companyId: 'co-s',
             company: {
               id: 'co-s',
+              legalName: 'Sender Co',
               paymentReady: false,
               stripeCustomerId: null,
+              stripeDefaultPaymentMethodId: null,
             },
           }),
         },
+        company: { update: jest.fn().mockResolvedValue({}) },
+        paymentEvent: {
+          findUnique: jest.fn().mockResolvedValue(null),
+          update: jest.fn().mockResolvedValue({
+            ...pePending,
+            stripePaymentIntentId: 'pi_rpm',
+          }),
+        },
+        job: {
+          findFirst: jest.fn().mockResolvedValue({
+            id: 'job-1',
+            status: JobStatus.BIDDING,
+            assignment: null,
+            proposals: [
+              {
+                id: 'prop-1',
+                status: ProposalStatus.SUBMITTED,
+                carrierCompanyId: 'co-c',
+                vehicleId: 'veh-1',
+                driverId: 'drv-1',
+                amountIncGstCents: 11000,
+                amountExGstCents: 10000,
+                amountGstCents: 1000,
+              },
+            ],
+          }),
+        },
+        assignment: { findUnique: jest.fn().mockResolvedValue(assignment) },
+        $transaction: jest.fn().mockImplementation(async (fn: (tx: unknown) => unknown) =>
+          fn({
+            assignment: { create: jest.fn().mockResolvedValue(assignment) },
+            proposal: {
+              update: jest.fn(),
+              findMany: jest.fn().mockResolvedValue([]),
+              updateMany: jest.fn(),
+            },
+            job: { update: jest.fn() },
+            paymentEvent: { create: jest.fn().mockResolvedValue(pePending) },
+          }),
+        ),
       };
-      const service = makeService(prisma);
-      try {
-        await service.acceptProposal(senderPrincipal, 'job-1', 'prop-1');
-        fail('expected');
-      } catch (err) {
-        expect(err).toBeInstanceOf(BadRequestException);
-        expect((err as BadRequestException).getResponse()).toMatchObject({
-          code: 'SENDER_NOT_PAYMENT_READY',
-        });
-      }
+      const service = new PaymentsService(
+        prisma as never,
+        audit as never,
+        stripeWithCustomer as never,
+        trips as never,
+      );
+      const res = await service.acceptProposal(senderPrincipal, 'job-1', 'prop-1');
+      expect(createCustomer).toHaveBeenCalled();
+      expect(res).toMatchObject({
+        stripeStatus: 'requires_payment_method',
+        clientSecret: 'cs_rpm',
+        publishableKey: 'pk_test',
+        paidAndConfirmed: false,
+        message: 'Complete card payment to lock assignment',
+      });
     });
 
     it('idempotent replay returns clientSecret when SCA pending', async () => {
