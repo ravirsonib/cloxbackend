@@ -507,7 +507,7 @@ async function seedPilotJobAndTrip(vicRegionId: string, carrierCompanyId: string
 
   await prisma.assignment.upsert({
     where: { id: assignmentId },
-    update: { status: AssignmentStatus.IN_TRANSIT, paidAndConfirmed: true },
+    update: { status: AssignmentStatus.LOCKED, lockedAt: new Date() },
     create: {
       id: assignmentId,
       jobId,
@@ -515,9 +515,8 @@ async function seedPilotJobAndTrip(vicRegionId: string, carrierCompanyId: string
       carrierCompanyId,
       driverId: driver.id,
       vehicleId: '00000000-0000-4000-8000-0000000000a1',
-      status: AssignmentStatus.IN_TRANSIT,
-      paidAndConfirmed: true,
-      paidAt: new Date(),
+      status: AssignmentStatus.LOCKED,
+      lockedAt: new Date(),
     },
   });
 
@@ -530,10 +529,11 @@ async function seedPilotJobAndTrip(vicRegionId: string, carrierCompanyId: string
       assignmentId,
       status: TripStatus.IN_TRANSIT,
       startedAt: new Date(),
-      preTripSafetyPassed: true,
-      preTripSafetyAt: new Date(),
-      massDeclarationPassed: true,
-      massDeclarationAt: new Date(),
+      safetyPassedAt: new Date(),
+      declaredMassKg: 1500,
+      actualMassKg: 1500,
+      massCheckOk: true,
+      massCheckedAt: new Date(),
     },
   });
 
@@ -544,7 +544,7 @@ async function seedPilotJobAndTrip(vicRegionId: string, carrierCompanyId: string
       tripId,
       jobStopId: pickupStopId,
       arrivalRecorded: true,
-      arrivedAt: new Date(Date.now() - 25 * 60 * 1000),
+      enteredAt: new Date(Date.now() - 25 * 60 * 1000),
       exitedAt: new Date(Date.now() - 15 * 60 * 1000),
     },
   });
@@ -567,6 +567,8 @@ async function seedPilotJobAndTrip(vicRegionId: string, carrierCompanyId: string
       jobId,
       type: PaymentEventType.CHARGE,
       status: PaymentEventStatus.SUCCEEDED,
+      amountExGstCents: 15000,
+      amountGstCents: 1500,
       amountIncGstCents: 16500,
       stripePaymentIntentId: 'pi_mock_seed_pilot',
     },
@@ -579,10 +581,9 @@ async function seedPilotJobAndTrip(vicRegionId: string, carrierCompanyId: string
       id: '00000000-0000-4000-8000-0000000000l1',
       jobId,
       recipientType: SettlementRecipientType.CARRIER,
-      recipientEntityId: carrierCompanyId,
       amountCents: 11550,
       status: SettlementLineStatus.ACCRUED,
-      originRegionId: vicRegionId,
+      regionId: vicRegionId,
     },
   });
 
