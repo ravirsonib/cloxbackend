@@ -443,6 +443,9 @@ async function seedPilotJobAndTrip(vicRegionId: string, carrierCompanyId: string
       routeDistanceKm: 12.5,
       routeDurationMinutes: 35,
       billableHours: 1.0,
+      receiverName: 'Jamie Receiver',
+      receiverEmail: 'receiver.qa@yopmail.com',
+      receiverPhone: '+61400000004',
       publishedAt: new Date(),
     },
   });
@@ -482,7 +485,6 @@ async function seedPilotJobAndTrip(vicRegionId: string, carrierCompanyId: string
       lng: 144.9961,
       receiverName: 'Jamie Receiver',
       receiverEmail: 'receiver.qa@yopmail.com',
-      receiverPhone: '+61400000004',
     },
   });
 
