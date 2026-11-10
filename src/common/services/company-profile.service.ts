@@ -21,6 +21,16 @@ import {
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuditService } from '../../modules/audit/audit.service';
 
+export type CompanyProfileHistoryItem = {
+  id: string;
+  category: 'PROFILE_CHANGE_REQUEST' | 'SELF_SERVE_UPDATE';
+  status: string;
+  proposedChanges: unknown;
+  note: string | null;
+  createdAt: string;
+  decidedAt: string | null;
+};
+
 type CompanyProfileRow = {
   id: string;
   type: CompanyType;
@@ -158,6 +168,7 @@ export class CompanyProfileService {
       decisionNote: string | null;
       createdAt: Date;
     } | null,
+    history: CompanyProfileHistoryItem[] = [],
   ) {
     return {
       company: {
@@ -210,6 +221,7 @@ export class CompanyProfileService {
             createdAt: pendingChange.createdAt,
           }
         : null,
+      history,
     };
   }
 
@@ -237,11 +249,84 @@ export class CompanyProfileService {
     });
   }
 
+  private async findProfileHistory(
+    companyId: string,
+    limit = 15,
+  ): Promise<CompanyProfileHistoryItem[]> {
+    const items: CompanyProfileHistoryItem[] = [];
+
+    if (this.prisma.complianceCase?.findMany) {
+      const cases = await this.prisma.complianceCase.findMany({
+        where: {
+          companyId,
+          caseType: ComplianceCaseType.COMPANY_PROFILE_CHANGE,
+        },
+        orderBy: { createdAt: 'desc' },
+        take: limit,
+        select: {
+          id: true,
+          status: true,
+          proposedChanges: true,
+          decisionNote: true,
+          createdAt: true,
+          decidedAt: true,
+        },
+      });
+
+      for (const c of cases) {
+        items.push({
+          id: c.id,
+          category: 'PROFILE_CHANGE_REQUEST',
+          status: c.status,
+          proposedChanges: c.proposedChanges,
+          note: c.decisionNote,
+          createdAt: c.createdAt.toISOString(),
+          decidedAt: c.decidedAt ? c.decidedAt.toISOString() : null,
+        });
+      }
+    }
+
+    if (this.prisma.auditEvent?.findMany) {
+      const selfUpdates = await this.prisma.auditEvent.findMany({
+        where: {
+          entityType: 'Company',
+          entityId: companyId,
+          action: AuditAction.COMPANY_PROFILE_SELF_UPDATED,
+        },
+        orderBy: { createdAt: 'desc' },
+        take: limit,
+        select: {
+          id: true,
+          metadata: true,
+          createdAt: true,
+        },
+      });
+
+      for (const u of selfUpdates) {
+        items.push({
+          id: u.id,
+          category: 'SELF_SERVE_UPDATE',
+          status: 'APPLIED',
+          proposedChanges: u.metadata,
+          note: null,
+          createdAt: u.createdAt.toISOString(),
+          decidedAt: u.createdAt.toISOString(),
+        });
+      }
+    }
+
+    items.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    return items.slice(0, limit);
+  }
+
   async getProfile(principal: AuthenticatedPrincipal) {
     this.ensureDatabase();
     const { company } = await this.requireCompany(principal);
-    const pendingChange = await this.findPendingProfileChange(company.id);
-    return this.toResponse(company, pendingChange);
+    const [pendingChange, history] = await Promise.all([
+      this.findPendingProfileChange(company.id),
+      this.findProfileHistory(company.id),
+    ]);
+    return this.toResponse(company, pendingChange, history);
   }
 
   async updateSelf(principal: AuthenticatedPrincipal, input: CompanyProfileSelfInput) {

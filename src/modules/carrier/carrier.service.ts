@@ -206,14 +206,25 @@ export class CarrierService {
       return 'documents';
     }
     if (!company.stripeConnectPayoutsEnabled) return 'connect';
-    // Align with fleetReady / submitForReview — DRAFT fleet does not unlock submit.
-    if (company.vehicles.filter((v) => v.status === 'ACTIVE').length < 1) {
+    // Align with fleet submission — vehicles with RWC + drivers (ACTIVE, INVITED, or PENDING_REVIEW).
+    if (
+      company.vehicles.filter(
+        (v) => v.status === VehicleStatus.ACTIVE || v.status === VehicleStatus.PENDING_REVIEW,
+      ).length < 1
+    ) {
       return 'vehicles';
     }
     if (!this.activeVehiclesHaveRwc(company)) {
       return 'vehicles';
     }
-    if (company.drivers.filter((d) => d.status === 'ACTIVE').length < 1) {
+    if (
+      company.drivers.filter(
+        (d) =>
+          d.status === DriverStatus.ACTIVE ||
+          d.status === DriverStatus.INVITED ||
+          d.status === DriverStatus.PENDING_REVIEW,
+      ).length < 1
+    ) {
       return 'drivers';
     }
     if (company.serviceRegionCodes.length < 1) return 'capabilities';
@@ -2045,14 +2056,19 @@ export class CarrierService {
     if (!company.stripeConnectPayoutsEnabled) {
       throw new BadRequestException('Complete Stripe Connect before submit');
     }
-    if (!this.fleetReady(company)) {
+    const hasVehicle = company.vehicles.some(
+      (v) => v.status === VehicleStatus.ACTIVE || v.status === VehicleStatus.PENDING_REVIEW,
+    );
+    const hasRwc = this.activeVehiclesHaveRwc(company);
+    const hasDriver = company.drivers.some(
+      (d) =>
+        d.status === DriverStatus.ACTIVE ||
+        d.status === DriverStatus.INVITED ||
+        d.status === DriverStatus.PENDING_REVIEW,
+    );
+    if (!hasVehicle || !hasRwc || !hasDriver) {
       throw new BadRequestException(
-        'Add at least one ACTIVE vehicle (each with a vehicle RWC) and one ACTIVE driver before submit',
-      );
-    }
-    if (!this.activeVehiclesHaveRwc(company)) {
-      throw new BadRequestException(
-        'Each ACTIVE vehicle must have a roadworthy certificate (RWC) uploaded for that vehicle',
+        'Add at least one vehicle (each with a vehicle RWC) and at least one driver before submit',
       );
     }
     if (company.serviceRegionCodes.length < 1) {

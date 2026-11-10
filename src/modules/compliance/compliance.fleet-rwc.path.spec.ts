@@ -475,4 +475,79 @@ describe('ComplianceService CARRIER_FLEET_RWC + CARRIER_DRIVER_LICENCE', () => {
       driverStatus: DriverStatus.PENDING_REVIEW,
     });
   });
+
+  it('CARRIER_KYB item approve vehicle activates vehicle but leaves case and company pending', async () => {
+    const tx = {
+      complianceDocument: { updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
+      vehicle: { updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
+      driver: { updateMany: jest.fn().mockResolvedValue({ count: 0 }) },
+      complianceCase: { update: jest.fn() },
+      company: { update: jest.fn() },
+    };
+    const prisma = {
+      isConnected: () => true,
+      complianceCase: {
+        findUnique: jest.fn().mockResolvedValue({
+          id: 'case-kyb',
+          caseType: ComplianceCaseType.CARRIER_KYB,
+          status: ComplianceCaseStatus.OPEN,
+          companyId: 'co-1',
+          company: {
+            id: 'co-1',
+            type: CompanyType.CARRIER,
+            status: CompanyStatus.PENDING_VERIFICATION,
+            legalName: 'Acme Carrier',
+            email: 'carrier@yopmail.com',
+            homeRegion: { code: 'VIC' },
+            homeRegionId: 'reg-vic',
+            referredByAdminUserId: null,
+          },
+          documents: [
+            {
+              id: 'doc-rwc-1',
+              docType: 'RWC',
+              vehicleId: 'veh-1',
+              driverId: null,
+              status: ComplianceDocStatus.UPLOADED,
+            },
+            {
+              id: 'doc-pl-1',
+              docType: 'PUBLIC_LIABILITY',
+              vehicleId: null,
+              driverId: null,
+              status: ComplianceDocStatus.UPLOADED,
+            },
+          ],
+        }),
+      },
+      $transaction: jest.fn().mockImplementation((cb) => cb(tx)),
+    };
+
+    const service = makeService(prisma);
+    const result = await service.approve(superAdmin, 'case-kyb', {
+      vehicleId: 'veh-1',
+      documentId: 'doc-rwc-1',
+    });
+
+    expect(result).toMatchObject({
+      id: 'case-kyb',
+      status: ComplianceCaseStatus.OPEN,
+      companyStatus: CompanyStatus.PENDING_VERIFICATION,
+    });
+    expect(tx.complianceDocument.updateMany).toHaveBeenCalledWith({
+      where: { caseId: 'case-kyb', id: 'doc-rwc-1' },
+      data: expect.objectContaining({ status: ComplianceDocStatus.APPROVED }),
+    });
+    expect(tx.vehicle.updateMany).toHaveBeenCalledWith({
+      where: {
+        id: { in: ['veh-1'] },
+        companyId: 'co-1',
+        status: VehicleStatus.PENDING_REVIEW,
+      },
+      data: { status: VehicleStatus.ACTIVE },
+    });
+    // Crucial: CARRIER_KYB case itself and company MUST NOT be approved yet!
+    expect(tx.complianceCase.update).not.toHaveBeenCalled();
+    expect(tx.company.update).not.toHaveBeenCalled();
+  });
 });

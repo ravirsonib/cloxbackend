@@ -607,18 +607,13 @@ export class ComplianceService {
       return this.approveAdminPartnerKyb(principal, caseId, complianceCase, input);
     }
 
-    // Fleet RWC / driver licence: approve docs + activate linked PENDING_REVIEW assets.
-    if (this.isAssetReviewCase(complianceCase.caseType)) {
-      const isSpecificDocument = Boolean(input.documentId);
-      const isSpecificDriver = Boolean(
-        input.driverId &&
-          complianceCase.caseType === ComplianceCaseType.CARRIER_DRIVER_LICENCE,
-      );
-      const isSpecificVehicle = Boolean(
-        input.vehicleId &&
-          complianceCase.caseType === ComplianceCaseType.CARRIER_FLEET_RWC,
-      );
+    // Fleet RWC / driver licence asset review OR individual item decision inside CARRIER_KYB
+    const isSpecificDocument = Boolean(input.documentId);
+    const isSpecificDriver = Boolean(input.driverId);
+    const isSpecificVehicle = Boolean(input.vehicleId);
+    const isItemDecision = isSpecificDocument || isSpecificDriver || isSpecificVehicle;
 
+    if (this.isAssetReviewCase(complianceCase.caseType) || isItemDecision) {
       const targetDoc = isSpecificDocument
         ? complianceCase.documents.find((d) => d.id === input.documentId)
         : null;
@@ -627,24 +622,28 @@ export class ComplianceService {
         ? [input.vehicleId!]
         : targetDoc?.vehicleId
         ? [targetDoc.vehicleId]
-        : [
+        : complianceCase.caseType === ComplianceCaseType.CARRIER_FLEET_RWC
+        ? [
             ...new Set(
               complianceCase.documents
                 .map((d) => d.vehicleId)
                 .filter((id): id is string => Boolean(id)),
             ),
-          ];
+          ]
+        : [];
       const driverIds = isSpecificDriver
         ? [input.driverId!]
         : targetDoc?.driverId
         ? [targetDoc.driverId]
-        : [
+        : complianceCase.caseType === ComplianceCaseType.CARRIER_DRIVER_LICENCE
+        ? [
             ...new Set(
               complianceCase.documents
                 .map((d) => d.driverId)
                 .filter((id): id is string => Boolean(id)),
             ),
-          ];
+          ]
+        : [];
 
       let caseResolved = false;
       await this.prisma.$transaction(async (tx) => {
@@ -661,10 +660,7 @@ export class ComplianceService {
           data: { status: ComplianceDocStatus.APPROVED, reviewedAt: new Date() },
         });
 
-        if (
-          complianceCase.caseType === ComplianceCaseType.CARRIER_FLEET_RWC &&
-          vehicleIds.length
-        ) {
+        if (vehicleIds.length) {
           await tx.vehicle.updateMany({
             where: {
               id: { in: vehicleIds },
@@ -674,10 +670,7 @@ export class ComplianceService {
             data: { status: VehicleStatus.ACTIVE },
           });
         }
-        if (
-          complianceCase.caseType === ComplianceCaseType.CARRIER_DRIVER_LICENCE &&
-          driverIds.length
-        ) {
+        if (driverIds.length) {
           await tx.driver.updateMany({
             where: {
               id: { in: driverIds },
@@ -688,26 +681,31 @@ export class ComplianceService {
           });
         }
 
-        const unreviewedCount = tx.complianceDocument.count
-          ? await tx.complianceDocument.count({
-              where: {
-                caseId,
-                status: { in: [ComplianceDocStatus.UPLOADED, ComplianceDocStatus.UNDER_REVIEW] },
-              },
-            })
-          : 0;
+        // In CARRIER_KYB, individual asset approvals DO NOT resolve the overall KYB case
+        // or promote company status to BID_ELIGIBLE. Only the bottom full "Approve" button does that.
+        const isKybCase = complianceCase.caseType === ComplianceCaseType.CARRIER_KYB;
+        if (!isKybCase) {
+          const unreviewedCount = tx.complianceDocument.count
+            ? await tx.complianceDocument.count({
+                where: {
+                  caseId,
+                  status: { in: [ComplianceDocStatus.UPLOADED, ComplianceDocStatus.UNDER_REVIEW] },
+                },
+              })
+            : 0;
 
-        if (unreviewedCount === 0) {
-          caseResolved = true;
-          await tx.complianceCase.update({
-            where: { id: caseId },
-            data: {
-              status: ComplianceCaseStatus.APPROVED,
-              decisionNote: input.note,
-              decidedAt: new Date(),
-              decidedByAdminId: principal.id,
-            },
-          });
+          if (unreviewedCount === 0) {
+            caseResolved = true;
+            await tx.complianceCase.update({
+              where: { id: caseId },
+              data: {
+                status: ComplianceCaseStatus.APPROVED,
+                decisionNote: input.note,
+                decidedAt: new Date(),
+                decidedByAdminId: principal.id,
+              },
+            });
+          }
         }
       });
       await this.audit.recordPlatform({
@@ -826,6 +824,20 @@ export class ComplianceService {
       await tx.complianceDocument.updateMany({
         where: { caseId },
         data: { status: ComplianceDocStatus.APPROVED, reviewedAt: new Date() },
+      });
+      await tx.vehicle.updateMany({
+        where: {
+          companyId: complianceCase.companyId,
+          status: VehicleStatus.PENDING_REVIEW,
+        },
+        data: { status: VehicleStatus.ACTIVE },
+      });
+      await tx.driver.updateMany({
+        where: {
+          companyId: complianceCase.companyId,
+          status: DriverStatus.PENDING_REVIEW,
+        },
+        data: { status: DriverStatus.ACTIVE },
       });
       if (!statusUnchanged) {
         await tx.company.update({
@@ -1087,23 +1099,19 @@ export class ComplianceService {
     this.assertCanDecideCase(principal, complianceCase.caseType);
     this.assertCaseActionable(complianceCase.status);
 
-    // Fleet/driver asset / profile change / post-ops KYB re-review: close case only — keep company status.
+    // Fleet/driver asset / profile change / post-ops KYB re-review / item-level reject: keep company status.
+    const isSpecificDocument = Boolean(input.documentId);
+    const isSpecificDriver = Boolean(input.driverId);
+    const isSpecificVehicle = Boolean(input.vehicleId);
+    const isItemDecision = isSpecificDocument || isSpecificDriver || isSpecificVehicle;
+
     const preserveCompanyOnReject =
       this.isAssetReviewCase(complianceCase.caseType) ||
       complianceCase.caseType === ComplianceCaseType.COMPANY_PROFILE_CHANGE ||
-      this.isPostOpsOperationalStatus(complianceCase.company.status);
+      this.isPostOpsOperationalStatus(complianceCase.company.status) ||
+      isItemDecision;
 
     if (preserveCompanyOnReject) {
-      const isSpecificDocument = Boolean(input.documentId);
-      const isSpecificDriver = Boolean(
-        input.driverId &&
-          complianceCase.caseType === ComplianceCaseType.CARRIER_DRIVER_LICENCE,
-      );
-      const isSpecificVehicle = Boolean(
-        input.vehicleId &&
-          complianceCase.caseType === ComplianceCaseType.CARRIER_FLEET_RWC,
-      );
-
       let caseResolved = false;
       await this.prisma.$transaction(async (tx) => {
         const docWhere: any = { caseId };
@@ -1115,40 +1123,38 @@ export class ComplianceService {
           docWhere.vehicleId = input.vehicleId;
         }
 
-        if (
-          this.isAssetReviewCase(complianceCase.caseType) ||
-          this.isPostOpsOperationalStatus(complianceCase.company.status)
-        ) {
-          await tx.complianceDocument.updateMany({
-            where: docWhere,
-            data: {
-              status: ComplianceDocStatus.REJECTED,
-              reviewedAt: new Date(),
-              reviewNote: input.note,
-            },
-          });
-        }
+        await tx.complianceDocument.updateMany({
+          where: docWhere,
+          data: {
+            status: ComplianceDocStatus.REJECTED,
+            reviewedAt: new Date(),
+            reviewNote: input.note,
+          },
+        });
 
-        const unreviewedCount = tx.complianceDocument.count
-          ? await tx.complianceDocument.count({
-              where: {
-                caseId,
-                status: { in: [ComplianceDocStatus.UPLOADED, ComplianceDocStatus.UNDER_REVIEW] },
+        const isKybCase = complianceCase.caseType === ComplianceCaseType.CARRIER_KYB;
+        if (!isKybCase) {
+          const unreviewedCount = tx.complianceDocument.count
+            ? await tx.complianceDocument.count({
+                where: {
+                  caseId,
+                  status: { in: [ComplianceDocStatus.UPLOADED, ComplianceDocStatus.UNDER_REVIEW] },
+                },
+              })
+            : 0;
+
+          if (unreviewedCount === 0) {
+            caseResolved = true;
+            await tx.complianceCase.update({
+              where: { id: caseId },
+              data: {
+                status: ComplianceCaseStatus.REJECTED,
+                decisionNote: input.note,
+                decidedAt: new Date(),
+                decidedByAdminId: principal.id,
               },
-            })
-          : 0;
-
-        if (unreviewedCount === 0) {
-          caseResolved = true;
-          await tx.complianceCase.update({
-            where: { id: caseId },
-            data: {
-              status: ComplianceCaseStatus.REJECTED,
-              decisionNote: input.note,
-              decidedAt: new Date(),
-              decidedByAdminId: principal.id,
-            },
-          });
+            });
+          }
         }
       });
       await this.audit.recordPlatform({

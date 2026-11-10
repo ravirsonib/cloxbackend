@@ -180,7 +180,10 @@ describe('CarrierService profile / connect / submit leftover paths', () => {
     expect(stripe.createConnectAccount).toHaveBeenCalled();
     expect(prisma.company.update).toHaveBeenCalledWith({
       where: { id: 'co-c' },
-      data: { stripeConnectAccountId: 'acct_new' },
+      data: {
+        stripeConnectAccountId: 'acct_new',
+        stripeConnectPayoutsEnabled: false,
+      },
     });
   });
 
