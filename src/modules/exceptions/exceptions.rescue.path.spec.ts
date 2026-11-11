@@ -147,6 +147,195 @@ describe('ExceptionsService rescue candidates + release', () => {
     expect(result.items).toHaveLength(1);
   });
 
+  it('excludes current assignment vehicle and driver from rescue candidates', async () => {
+    const openRow = {
+      id: 'ex-1',
+      jobId: 'job-1',
+      assignmentId: 'asg-1',
+      tripId: 'trip-1',
+      companyId: 'co-c',
+      reportedByUserId: 'user-drv',
+      kind: TripExceptionKind.VEHICLE_BREAKDOWN,
+      phase: TripExceptionPhase.MID_TRIP,
+      status: TripExceptionStatus.AWAITING_CARRIER,
+      reasonCode: null,
+      note: 'Engine',
+      gpsLat: -37.8,
+      gpsLng: 144.9,
+      photoDocumentId: null,
+      openedAt: new Date(),
+      escalatedAt: null,
+      resolvedAt: null,
+      resolutionNote: null,
+      job: { id: 'job-1', title: 'Load' },
+      assignment: { vehicle: null, driver: null },
+    };
+
+    const prisma = {
+      isConnected: () => true,
+      user: {
+        findUnique: jest.fn().mockResolvedValue({ id: 'user-carrier', companyId: 'co-c' }),
+      },
+      tripException: {
+        findUnique: jest.fn().mockResolvedValue(openRow),
+      },
+      assignment: {
+        findUnique: jest.fn().mockResolvedValue({
+          vehicleId: 'veh-broken',
+          driverId: 'drv-broken',
+        }),
+      },
+      job: {
+        findUnique: jest.fn().mockResolvedValue({
+          minVehicleClass: 'UTE',
+          stops: [{ lat: -37.81, lng: 144.96 }],
+        }),
+      },
+      vehicle: {
+        findMany: jest.fn().mockResolvedValue([
+          {
+            id: 'veh-broken',
+            registration: 'BROKEN1',
+            vehicleClass: 'UTE',
+            status: VehicleStatus.ACTIVE,
+          },
+          {
+            id: 'veh-2',
+            registration: 'ABC123',
+            vehicleClass: 'UTE',
+            status: VehicleStatus.ACTIVE,
+          },
+        ]),
+      },
+      driver: {
+        findMany: jest.fn().mockResolvedValue([
+          {
+            id: 'drv-broken',
+            licenceClass: 'C',
+            licenceExpiry: new Date(Date.now() + 86_400_000),
+            nhvrAcknowledgedAt: new Date(),
+            status: DriverStatus.ACTIVE,
+            user: { email: 'broken@yopmail.com', name: 'Broken' },
+          },
+          {
+            id: 'drv-2',
+            licenceClass: 'C',
+            licenceExpiry: new Date(Date.now() + 86_400_000),
+            nhvrAcknowledgedAt: new Date(),
+            status: DriverStatus.ACTIVE,
+            user: { email: 'd2@yopmail.com', name: 'Relief' },
+          },
+        ]),
+      },
+      trip: { findMany: jest.fn().mockResolvedValue([]) },
+      complianceDocument: {
+        findFirst: jest.fn().mockResolvedValue({ id: 'doc-ok' }),
+      },
+    };
+
+    const result = await makeService(prisma).listRescueCandidates(
+      carrierPrincipal,
+      'ex-1',
+    );
+
+    expect(result.items.some((c) => c.vehicleId === 'veh-broken')).toBe(false);
+    expect(result.items.some((c) => c.vehicleId === 'veh-2')).toBe(true);
+    // Same driver may continue with a replacement vehicle on VEHICLE_BREAKDOWN.
+    expect(result.items.some((c) => c.driverId === 'drv-broken')).toBe(true);
+    expect(result.recommended?.vehicleId).toBe('veh-2');
+  });
+
+  it('excludes unavailable driver but keeps current vehicle eligible', async () => {
+    const openRow = {
+      id: 'ex-1',
+      jobId: 'job-1',
+      assignmentId: 'asg-1',
+      tripId: 'trip-1',
+      companyId: 'co-c',
+      reportedByUserId: 'user-drv',
+      kind: TripExceptionKind.DRIVER_UNAVAILABLE,
+      phase: TripExceptionPhase.PRE_TRIP,
+      status: TripExceptionStatus.AWAITING_CARRIER,
+      reasonCode: null,
+      note: 'Sick',
+      gpsLat: -37.8,
+      gpsLng: 144.9,
+      photoDocumentId: null,
+      openedAt: new Date(),
+      escalatedAt: null,
+      resolvedAt: null,
+      resolutionNote: null,
+      job: { id: 'job-1', title: 'Load' },
+      assignment: { vehicle: null, driver: null },
+    };
+
+    const prisma = {
+      isConnected: () => true,
+      user: {
+        findUnique: jest.fn().mockResolvedValue({ id: 'user-carrier', companyId: 'co-c' }),
+      },
+      tripException: {
+        findUnique: jest.fn().mockResolvedValue(openRow),
+      },
+      assignment: {
+        findUnique: jest.fn().mockResolvedValue({
+          vehicleId: 'veh-1',
+          driverId: 'drv-sick',
+        }),
+      },
+      job: {
+        findUnique: jest.fn().mockResolvedValue({
+          minVehicleClass: 'UTE',
+          stops: [{ lat: -37.81, lng: 144.96 }],
+        }),
+      },
+      vehicle: {
+        findMany: jest.fn().mockResolvedValue([
+          {
+            id: 'veh-1',
+            registration: 'KEEP1',
+            vehicleClass: 'UTE',
+            status: VehicleStatus.ACTIVE,
+          },
+        ]),
+      },
+      driver: {
+        findMany: jest.fn().mockResolvedValue([
+          {
+            id: 'drv-sick',
+            licenceClass: 'C',
+            licenceExpiry: new Date(Date.now() + 86_400_000),
+            nhvrAcknowledgedAt: new Date(),
+            status: DriverStatus.ACTIVE,
+            user: { email: 'sick@yopmail.com', name: 'Sick' },
+          },
+          {
+            id: 'drv-2',
+            licenceClass: 'C',
+            licenceExpiry: new Date(Date.now() + 86_400_000),
+            nhvrAcknowledgedAt: new Date(),
+            status: DriverStatus.ACTIVE,
+            user: { email: 'd2@yopmail.com', name: 'Relief' },
+          },
+        ]),
+      },
+      trip: { findMany: jest.fn().mockResolvedValue([]) },
+      complianceDocument: {
+        findFirst: jest.fn().mockResolvedValue({ id: 'doc-ok' }),
+      },
+    };
+
+    const result = await makeService(prisma).listRescueCandidates(
+      carrierPrincipal,
+      'ex-1',
+    );
+
+    expect(result.items).toHaveLength(1);
+    expect(result.recommended?.vehicleId).toBe('veh-1');
+    expect(result.recommended?.driverId).toBe('drv-2');
+    expect(result.items.some((c) => c.driverId === 'drv-sick')).toBe(false);
+  });
+
   it('release re-lists job to marketplace with priority and discount', async () => {
     const openRow = {
       id: 'ex-1',

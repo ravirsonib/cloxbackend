@@ -1,5 +1,6 @@
 import {
   PaymentEventStatus,
+  SettlementRecipientType,
   SurchargeKind,
   SurchargeStatus,
 } from '@prisma/client';
@@ -57,6 +58,9 @@ describe('PaymentsService markSurchargePaid MASS leftovers', () => {
             status: SurchargeStatus.PAID,
             kind: SurchargeKind.MASS,
             tripId: 'trip-1',
+            jobId: 'job-1',
+            amountIncGstCents: 5000,
+            metadata: { settlementAccrued: true },
           },
         }),
       },
@@ -75,6 +79,14 @@ describe('PaymentsService markSurchargePaid MASS leftovers', () => {
       paymentEvent: { update: jest.fn() },
       surcharge: { update: jest.fn() },
       trip: { update: jest.fn() },
+      job: {
+        findUnique: jest.fn().mockResolvedValue({
+          originRegionId: null,
+          originTerritoryId: null,
+          senderCompanyId: 'co-1',
+        }),
+      },
+      settlementLine: { createMany: jest.fn() },
     };
     const prisma = {
       paymentEvent: {
@@ -87,6 +99,9 @@ describe('PaymentsService markSurchargePaid MASS leftovers', () => {
             status: SurchargeStatus.PENDING_PAYMENT,
             kind: SurchargeKind.MASS,
             tripId: 'trip-1',
+            jobId: 'job-1',
+            amountIncGstCents: 5000,
+            metadata: { actualMassKg: 1200 },
           },
         }),
       },
@@ -101,15 +116,34 @@ describe('PaymentsService markSurchargePaid MASS leftovers', () => {
     expect(result).toEqual({ skipped: false });
     expect(tx.trip.update).toHaveBeenCalledWith({
       where: { id: 'trip-1' },
-      data: { massCheckOk: true, massOverDeclared: false },
+      data: {
+        massCheckOk: true,
+        massOverDeclared: false,
+        declaredMassKg: 1200,
+        actualMassKg: 1200,
+      },
     });
     expect(tx.surcharge.update).toHaveBeenCalledWith({
       where: { id: 's-mass' },
       data: expect.objectContaining({ status: SurchargeStatus.PAID }),
     });
+    expect(tx.settlementLine.createMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.arrayContaining([
+          expect.objectContaining({
+            recipientType: SettlementRecipientType.CARRIER,
+            sharePercent: 70,
+            amountCents: 3500,
+          }),
+        ]),
+      }),
+    );
     expect(audit.recordPlatform).toHaveBeenCalledWith(
       expect.objectContaining({
-        metadata: expect.objectContaining({ kind: SurchargeKind.MASS }),
+        metadata: expect.objectContaining({
+          kind: SurchargeKind.MASS,
+          settlementAccrued: true,
+        }),
       }),
     );
   });

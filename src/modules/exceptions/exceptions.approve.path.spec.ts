@@ -1,3 +1,4 @@
+import { BadRequestException } from '@nestjs/common';
 import {
   DriverStatus,
   TripExceptionKind,
@@ -98,11 +99,14 @@ describe('ExceptionsService propose / approve / reject replacement', () => {
     resolutionNote: null,
     job: { id: 'job-1', title: 'Load', rescueDiscountPercent: null, marketplacePriority: false },
     assignment: {
+      vehicleId: 'veh-broken',
+      driverId: 'drv-old',
       vehicle: null,
       driver: null,
       carrierCompany: {
+        id: 'co-c',
         email: 'carrier@yopmail.com',
-        users: [{ email: 'carrier@yopmail.com' }],
+        users: [{ id: 'user-carrier', email: 'carrier@yopmail.com' }],
       },
     },
     proposedVehicle: null,
@@ -199,6 +203,146 @@ describe('ExceptionsService propose / approve / reject replacement', () => {
     );
   });
 
+  it('reassign rejects same vehicle on VEHICLE_BREAKDOWN but allows same driver', async () => {
+    const baseFind = {
+      ...openRow,
+      kind: TripExceptionKind.VEHICLE_BREAKDOWN,
+      job: {
+        id: 'job-1',
+        title: 'Load',
+        senderCompanyId: 'co-s',
+        receiverEmail: 'sender@yopmail.com',
+        senderCompany: {
+          id: 'co-s',
+          email: null,
+          users: [{ id: 'user-sender', email: 'sender@yopmail.com' }],
+        },
+      },
+    };
+    const prisma = {
+      isConnected: () => true,
+      user: {
+        findUnique: jest.fn().mockResolvedValue({ id: 'user-carrier', companyId: 'co-c' }),
+      },
+      tripException: {
+        findUnique: jest.fn().mockResolvedValue(baseFind),
+        update: jest.fn().mockResolvedValue({
+          ...baseFind,
+          status: TripExceptionStatus.AWAITING_SENDER_APPROVAL,
+          proposedVehicleId: 'veh-2',
+          proposedDriverId: 'drv-old',
+          proposedVehicle: {
+            id: 'veh-2',
+            registration: 'NEW',
+            label: null,
+            vehicleClass: 'UTE',
+          },
+          proposedDriver: {
+            id: 'drv-old',
+            user: { email: 'old@yopmail.com', name: 'Old' },
+          },
+        }),
+      },
+      vehicle: {
+        findFirst: jest.fn().mockResolvedValue({
+          id: 'veh-2',
+          registration: 'NEW',
+          label: null,
+          vehicleClass: 'UTE',
+          status: VehicleStatus.ACTIVE,
+        }),
+      },
+      driver: {
+        findFirst: jest.fn().mockResolvedValue({
+          id: 'drv-old',
+          status: DriverStatus.ACTIVE,
+          user: { email: 'old@yopmail.com', name: 'Old' },
+        }),
+      },
+    };
+
+    try {
+      await makeService(prisma).reassign(carrierPrincipal, 'ex-1', {
+        vehicleId: 'veh-broken',
+        driverId: 'drv-2',
+      });
+      fail('expected BadRequestException');
+    } catch (err) {
+      expect(err).toBeInstanceOf(BadRequestException);
+      expect((err as BadRequestException).getResponse()).toMatchObject({
+        code: 'REPLACEMENT_SAME_VEHICLE',
+      });
+    }
+
+    const ok = await makeService(prisma).reassign(carrierPrincipal, 'ex-1', {
+      vehicleId: 'veh-2',
+      driverId: 'drv-old',
+      note: 'Same driver, new truck',
+    });
+    expect(ok.proposal.status).toBe('AWAITING_SENDER_APPROVAL');
+  });
+
+  it('reassign rejects same driver on DRIVER_UNAVAILABLE and both on ACCIDENT', async () => {
+    const unavailableRow = {
+      ...openRow,
+      kind: TripExceptionKind.DRIVER_UNAVAILABLE,
+      job: {
+        id: 'job-1',
+        title: 'Load',
+        senderCompanyId: 'co-s',
+        receiverEmail: null,
+        senderCompany: {
+          id: 'co-s',
+          email: 'sender@yopmail.com',
+          users: [{ id: 'user-sender', email: 'sender@yopmail.com' }],
+        },
+      },
+    };
+    const unavailablePrisma = {
+      isConnected: () => true,
+      user: {
+        findUnique: jest.fn().mockResolvedValue({ id: 'user-carrier', companyId: 'co-c' }),
+      },
+      tripException: { findUnique: jest.fn().mockResolvedValue(unavailableRow) },
+    };
+    try {
+      await makeService(unavailablePrisma).reassign(carrierPrincipal, 'ex-1', {
+        vehicleId: 'veh-broken',
+        driverId: 'drv-old',
+      });
+      fail('expected BadRequestException');
+    } catch (err) {
+      expect(err).toBeInstanceOf(BadRequestException);
+      expect((err as BadRequestException).getResponse()).toMatchObject({
+        code: 'REPLACEMENT_SAME_DRIVER',
+      });
+    }
+
+    const accidentRow = {
+      ...unavailableRow,
+      kind: TripExceptionKind.ACCIDENT,
+    };
+    const accidentPrisma = {
+      isConnected: () => true,
+      user: {
+        findUnique: jest.fn().mockResolvedValue({ id: 'user-carrier', companyId: 'co-c' }),
+      },
+      tripException: { findUnique: jest.fn().mockResolvedValue(accidentRow) },
+    };
+    try {
+      await makeService(accidentPrisma).reassign(carrierPrincipal, 'ex-1', {
+        vehicleId: 'veh-2',
+        driverId: 'drv-old',
+      });
+      fail('expected BadRequestException');
+    } catch (err) {
+      expect(err).toBeInstanceOf(BadRequestException);
+      expect((err as BadRequestException).getResponse()).toMatchObject({
+        code: 'REPLACEMENT_SAME_DRIVER',
+      });
+    }
+  });
+
   it('approveReplacement applies reassignAssignment', async () => {
     const pending = {
       ...openRow,
@@ -274,6 +418,7 @@ describe('ExceptionsService propose / approve / reject replacement', () => {
       expect.objectContaining({ id: 'user-carrier', role: 'TRANSPORT_COMPANY' }),
       'asg-1',
       expect.objectContaining({ vehicleId: 'veh-2', driverId: 'drv-2' }),
+      { allowExceptionResolution: true },
     );
     expect(notifications.notifyTripExceptionReassigned).toHaveBeenCalled();
     expect(inbox.notifyUsers).toHaveBeenCalledWith(

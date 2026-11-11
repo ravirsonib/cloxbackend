@@ -85,6 +85,41 @@ const OPEN_STATUSES: TripExceptionStatus[] = [
 
 const PRE_TRIP_STATUSES: TripStatus[] = [TripStatus.PENDING_GATES];
 
+/** What must change when proposing a replacement crew, by exception kind. */
+export function replacementRequirements(kind: TripExceptionKind): {
+  mustReplaceVehicle: boolean;
+  mustReplaceDriver: boolean;
+  /** TRAFFIC/OTHER: keep same pair forbidden, but either asset alone may stay. */
+  mustChangeAtLeastOne: boolean;
+} {
+  switch (kind) {
+    case TripExceptionKind.VEHICLE_BREAKDOWN:
+      return {
+        mustReplaceVehicle: true,
+        mustReplaceDriver: false,
+        mustChangeAtLeastOne: false,
+      };
+    case TripExceptionKind.DRIVER_UNAVAILABLE:
+      return {
+        mustReplaceVehicle: false,
+        mustReplaceDriver: true,
+        mustChangeAtLeastOne: false,
+      };
+    case TripExceptionKind.ACCIDENT:
+      return {
+        mustReplaceVehicle: true,
+        mustReplaceDriver: true,
+        mustChangeAtLeastOne: false,
+      };
+    default:
+      return {
+        mustReplaceVehicle: false,
+        mustReplaceDriver: false,
+        mustChangeAtLeastOne: true,
+      };
+  }
+}
+
 @Injectable()
 export class ExceptionsService {
   private readonly logger = new Logger(ExceptionsService.name);
@@ -152,12 +187,14 @@ export class ExceptionsService {
       id: string;
       user?: { email: string; name: string | null } | null;
     } | null;
+    trip?: { id: string; status: TripStatus } | null;
   }) {
     return {
       id: row.id,
       jobId: row.jobId,
       assignmentId: row.assignmentId,
       tripId: row.tripId,
+      tripStatus: row.trip?.status ?? null,
       companyId: row.companyId,
       reportedByUserId: row.reportedByUserId,
       kind: row.kind,
@@ -220,6 +257,9 @@ export class ExceptionsService {
           rescueDiscountPercent: true,
           marketplacePriority: true,
         },
+      },
+      trip: {
+        select: { id: true, status: true },
       },
       assignment: {
         select: {
@@ -761,7 +801,9 @@ export class ExceptionsService {
           },
         },
         assignment: {
-          include: {
+          select: {
+            vehicleId: true,
+            driverId: true,
             carrierCompany: {
               select: {
                 id: true,
@@ -791,6 +833,31 @@ export class ExceptionsService {
       row.status === TripExceptionStatus.AWAITING_SENDER_APPROVAL;
     if (!canPropose) {
       throw new BadRequestException('Exception is already resolved');
+    }
+
+    const requirements = replacementRequirements(row.kind);
+    const sameVehicle =
+      Boolean(row.assignment.vehicleId) && input.vehicleId === row.assignment.vehicleId;
+    const sameDriver =
+      Boolean(row.assignment.driverId) && input.driverId === row.assignment.driverId;
+
+    if (requirements.mustReplaceVehicle && sameVehicle) {
+      throw new BadRequestException({
+        message: 'Vehicle breakdown requires a different vehicle',
+        code: 'REPLACEMENT_SAME_VEHICLE',
+      });
+    }
+    if (requirements.mustReplaceDriver && sameDriver) {
+      throw new BadRequestException({
+        message: 'Driver unavailable requires a different driver',
+        code: 'REPLACEMENT_SAME_DRIVER',
+      });
+    }
+    if (requirements.mustChangeAtLeastOne && sameVehicle && sameDriver) {
+      throw new BadRequestException({
+        message: 'Choose a different vehicle or driver than the current crew',
+        code: 'REPLACEMENT_SAME_CREW',
+      });
     }
 
     const vehicle = await this.prisma.vehicle.findFirst({
@@ -979,6 +1046,7 @@ export class ExceptionsService {
         reason: `Exception ${row.kind}`,
         note: input.note ?? row.resolutionNote ?? undefined,
       },
+      { allowExceptionResolution: true },
     );
 
     const resolved = await this.prisma.tripException.update({
@@ -2059,10 +2127,13 @@ export class ExceptionsService {
     const { rankMap, minLicenceMap } = await loadVehicleClassMaps(this.prisma);
     const minClass = job?.minVehicleClass ?? null;
     const minRank = vehicleClassRank(minClass, rankMap);
-    const excludeVehicleId =
-      params.kind === TripExceptionKind.VEHICLE_BREAKDOWN
-        ? assignment?.vehicleId
-        : null;
+    const requirements = replacementRequirements(params.kind);
+    const excludeVehicleId = requirements.mustReplaceVehicle
+      ? (assignment?.vehicleId ?? null)
+      : null;
+    const excludeDriverId = requirements.mustReplaceDriver
+      ? (assignment?.driverId ?? null)
+      : null;
     const now = new Date();
 
     const originLat =
@@ -2125,6 +2196,14 @@ export class ExceptionsService {
       const classScore = Math.max(20, 100 - classDelta * 12);
 
       for (const driver of drivers) {
+        if (excludeDriverId && driver.id === excludeDriverId) continue;
+        if (
+          requirements.mustChangeAtLeastOne &&
+          assignment?.vehicleId === vehicle.id &&
+          assignment?.driverId === driver.id
+        ) {
+          continue;
+        }
         if (!driversWithLicenceDoc.has(driver.id)) continue;
         const licenceGate = evaluateDriverLicenceFields(
           driver,
@@ -2133,15 +2212,12 @@ export class ExceptionsService {
           minLicenceMap,
         );
         if (!licenceGate.ok) continue;
-        if (
-          assignment?.vehicleId === vehicle.id &&
-          assignment?.driverId === driver.id
-        ) {
-          continue;
-        }
 
         let proximityScore = 50;
-        const reasons = [`class_fit:${vehicle.vehicleClass ?? 'na'}`];
+        const reasons = [
+          `exception:${params.kind}`,
+          `class_fit:${vehicle.vehicleClass ?? 'na'}`,
+        ];
         const last = latestByDriver.get(driver.id);
         if (originLat != null && originLng != null && last) {
           const km = this.haversineKm(originLat, originLng, last.lat, last.lng);

@@ -23,6 +23,7 @@ import {
   SettlementRecipientType,
   SurchargeKind,
   SurchargeStatus,
+  TripExceptionStatus,
   TripStatus,
   type Prisma,
 } from '@prisma/client';
@@ -816,6 +817,159 @@ export class PaymentsService {
     };
   }
 
+  /**
+   * Accrue 70/30 SettlementLines for a paid surcharge (same policy as base fare).
+   * Idempotent via surcharge.metadata.settlementAccrued.
+   * Spec: docs/payments/stripe-payment-specification.md §4 / §6.4.
+   */
+  private async accrueSurchargeSettlementLines(
+    tx: Prisma.TransactionClient,
+    surcharge: {
+      id: string;
+      jobId: string;
+      amountIncGstCents: number;
+      metadata: unknown;
+    },
+  ): Promise<boolean> {
+    const meta =
+      surcharge.metadata && typeof surcharge.metadata === 'object'
+        ? { ...(surcharge.metadata as Record<string, unknown>) }
+        : {};
+    if (meta.settlementAccrued === true) return false;
+    if (!surcharge.jobId || !Number.isFinite(surcharge.amountIncGstCents)) return false;
+    if (surcharge.amountIncGstCents <= 0) {
+      await tx.surcharge.update({
+        where: { id: surcharge.id },
+        data: {
+          metadata: {
+            ...meta,
+            settlementAccrued: true,
+            settlementAccruedAt: new Date().toISOString(),
+            settlementAccruedSkip: 'zero_amount',
+          },
+        },
+      });
+      return false;
+    }
+
+    const job = await tx.job.findUnique({
+      where: { id: surcharge.jobId },
+      select: {
+        originRegionId: true,
+        originTerritoryId: true,
+        senderCompanyId: true,
+      },
+    });
+
+    const resolved = this.revenueSplit
+      ? await this.revenueSplit.resolveForJob({
+          grossIncGstCents: surcharge.amountIncGstCents,
+          originRegionId: job?.originRegionId ?? null,
+          originTerritoryId: job?.originTerritoryId ?? null,
+          senderCompanyId: job?.senderCompanyId ?? null,
+        })
+      : null;
+
+    if (resolved) {
+      await tx.settlementLine.createMany({
+        data: resolved.lines.map((line) => ({
+          jobId: surcharge.jobId,
+          recipientType: line.recipientType,
+          sharePercent: line.sharePercent,
+          amountCents: line.amountCents,
+          status: SettlementLineStatus.ACCRUED,
+          regionId: line.regionId,
+          territoryId: line.territoryId,
+          policyVersionId: resolved.policyVersionId,
+          overrideId: resolved.overrideId,
+          adminPackageId: resolved.adminPackageId,
+          adminUserId: line.adminUserId,
+        })),
+      });
+    } else {
+      // Specs / fallback when RevenueSplitService not injected — same as fare lock.
+      const gross = surcharge.amountIncGstCents;
+      const carrier = Math.round(gross * 0.7);
+      const superShare = Math.round(gross * 0.15);
+      const stateShare = Math.round(gross * 0.1);
+      const localShare = gross - carrier - superShare - stateShare;
+      await tx.settlementLine.createMany({
+        data: [
+          {
+            jobId: surcharge.jobId,
+            recipientType: SettlementRecipientType.CARRIER,
+            sharePercent: 70,
+            amountCents: carrier,
+            status: SettlementLineStatus.ACCRUED,
+          },
+          {
+            jobId: surcharge.jobId,
+            recipientType: SettlementRecipientType.SUPER_ADMIN,
+            sharePercent: 15,
+            amountCents: superShare,
+            status: SettlementLineStatus.ACCRUED,
+          },
+          {
+            jobId: surcharge.jobId,
+            recipientType: SettlementRecipientType.STATE_MASTER,
+            sharePercent: 10,
+            amountCents: stateShare,
+            status: SettlementLineStatus.ACCRUED,
+          },
+          {
+            jobId: surcharge.jobId,
+            recipientType: SettlementRecipientType.LOCAL_BDE,
+            sharePercent: 5,
+            amountCents: localShare,
+            status: SettlementLineStatus.ACCRUED,
+          },
+        ],
+      });
+    }
+
+    await tx.surcharge.update({
+      where: { id: surcharge.id },
+      data: {
+        metadata: {
+          ...meta,
+          settlementAccrued: true,
+          settlementAccruedAt: new Date().toISOString(),
+        },
+      },
+    });
+    return true;
+  }
+
+  /** Self-heal: paid surcharges without ledger lines get accrued (webhook retry / backfill). */
+  private async ensureSurchargeSettlementAccrued(surcharge: {
+    id: string;
+    jobId: string;
+    amountIncGstCents: number;
+    metadata: unknown;
+  }): Promise<void> {
+    const meta =
+      surcharge.metadata && typeof surcharge.metadata === 'object'
+        ? (surcharge.metadata as Record<string, unknown>)
+        : {};
+    if (meta.settlementAccrued === true) return;
+    if (!surcharge.jobId || !Number.isFinite(surcharge.amountIncGstCents)) return;
+
+    await this.prisma.$transaction(async (tx) => {
+      // Re-read inside tx to avoid double accrual under concurrent webhooks.
+      const fresh = await tx.surcharge.findUnique({
+        where: { id: surcharge.id },
+        select: {
+          id: true,
+          jobId: true,
+          amountIncGstCents: true,
+          metadata: true,
+        },
+      });
+      if (!fresh) return;
+      await this.accrueSurchargeSettlementLines(tx, fresh);
+    });
+  }
+
   async markSurchargePaid(params: {
     paymentEventId: string;
     paymentIntentId: string;
@@ -828,6 +982,7 @@ export class PaymentsService {
     if (!pe?.surcharge) return { skipped: true as const };
 
     if (pe.surcharge.status === SurchargeStatus.PAID) {
+      await this.ensureSurchargeSettlementAccrued(pe.surcharge);
       return { skipped: true as const, alreadyPaid: true as const };
     }
 
@@ -905,6 +1060,7 @@ export class PaymentsService {
           },
         });
       }
+      await this.accrueSurchargeSettlementLines(tx, pe.surcharge!);
     });
 
     await this.audit.recordPlatform({
@@ -915,6 +1071,7 @@ export class PaymentsService {
         paymentIntentId: params.paymentIntentId,
         source: params.source,
         kind: pe.surcharge.kind,
+        settlementAccrued: true,
       },
     });
 
@@ -1908,6 +2065,22 @@ export class PaymentsService {
             },
           },
         },
+        tripExceptions: {
+          where: {
+            status: {
+              in: [
+                TripExceptionStatus.OPEN,
+                TripExceptionStatus.AWAITING_CARRIER,
+                TripExceptionStatus.REASSIGN_IN_PROGRESS,
+                TripExceptionStatus.AWAITING_SENDER_APPROVAL,
+                TripExceptionStatus.ESCALATED,
+              ],
+            },
+          },
+          select: { id: true, status: true, kind: true },
+          orderBy: { openedAt: 'desc' as const },
+          take: 1,
+        },
       },
       orderBy: { createdAt: 'desc' },
       take: 50,
@@ -1918,6 +2091,7 @@ export class PaymentsService {
         !!a.trip &&
         a.trip.status !== TripStatus.COMPLETED &&
         a.trip.status !== TripStatus.CANCELLED;
+      const openTripException = a.tripExceptions?.[0] ?? null;
       return {
         id: a.id,
         status: a.status,
@@ -1932,7 +2106,12 @@ export class PaymentsService {
         amountIncGstCents: a.proposal.amountIncGstCents,
         etaMinutes: a.proposal.etaMinutes,
         tripBlockedUntilPaid: a.status !== AssignmentStatus.LOCKED,
-        canReassign: a.status === AssignmentStatus.LOCKED && tripActive,
+        /** Direct assign-board reassign; blocked while a trip exception needs Exceptions → sender approve. */
+        canReassign:
+          a.status === AssignmentStatus.LOCKED && tripActive && !openTripException,
+        openTripExceptionId: openTripException?.id ?? null,
+        openTripExceptionStatus: openTripException?.status ?? null,
+        openTripExceptionKind: openTripException?.kind ?? null,
         exceptions: a.trip?.surcharges ?? [],
       };
     });
@@ -2424,8 +2603,10 @@ export class PaymentsService {
   }
 
   /**
-   * M12 — Transfer carrier 70% after clearing window (default 7 days; 0 = immediate).
-   * Safe to call repeatedly (idempotent via PaymentEvent TRANSFER key).
+   * M12 — Transfer carrier share after clearing window (default 7 days; 0 = immediate).
+   * Sums all unpaid CARRIER SettlementLines (base fare + paid surcharges).
+   * Late surcharge lines after a prior Transfer get a separate top-up Transfer
+   * (idempotency key scoped to the unpaid line ids).
    */
   async tryDisburseCarrierTransfer(jobId: string): Promise<{
     transferred: boolean;
@@ -2449,14 +2630,15 @@ export class PaymentsService {
       return { transferred: false, reason: 'clearing_hold' };
     }
 
-    const line = await this.prisma.settlementLine.findFirst({
+    const carrierLines = await this.prisma.settlementLine.findMany({
       where: {
         jobId,
         recipientType: SettlementRecipientType.CARRIER,
         status: { in: [SettlementLineStatus.ACCRUED, SettlementLineStatus.PAYABLE] },
       },
+      orderBy: { createdAt: 'asc' },
     });
-    if (!line) {
+    if (carrierLines.length === 0) {
       const paid = await this.prisma.settlementLine.findFirst({
         where: {
           jobId,
@@ -2469,20 +2651,31 @@ export class PaymentsService {
         : { transferred: false, reason: 'no_carrier_line' };
     }
 
+    const amountCents = carrierLines.reduce((sum, l) => sum + l.amountCents, 0);
+    if (amountCents <= 0) {
+      return { transferred: false, reason: 'zero_carrier_amount' };
+    }
+
+    const lineIds = carrierLines.map((l) => l.id).sort();
+    const idempotencyKey = `carrier-transfer:${jobId}:${lineIds.join(',')}`;
+    const currency = carrierLines[0]?.currency ?? 'AUD';
+
     const existingTransfer = await this.prisma.paymentEvent.findFirst({
       where: {
         jobId,
         type: PaymentEventType.TRANSFER,
         status: PaymentEventStatus.SUCCEEDED,
+        idempotencyKey,
       },
     });
     if (existingTransfer?.stripeTransferId) {
-      if (line.status !== SettlementLineStatus.PAID) {
-        await this.prisma.settlementLine.update({
-          where: { id: line.id },
-          data: { status: SettlementLineStatus.PAID, paidAt: new Date() },
-        });
-      }
+      await this.prisma.settlementLine.updateMany({
+        where: {
+          id: { in: lineIds },
+          status: { not: SettlementLineStatus.PAID },
+        },
+        data: { status: SettlementLineStatus.PAID, paidAt: new Date() },
+      });
       return {
         transferred: false,
         reason: 'already_transferred',
@@ -2510,17 +2703,16 @@ export class PaymentsService {
       return { transferred: false, reason: 'carrier_payouts_disabled' };
     }
 
-    const idempotencyKey = `carrier-transfer:${jobId}:${line.id}`;
     let transfer;
     try {
       transfer = await this.stripe.createTransfer({
-        amountCents: line.amountCents,
+        amountCents,
         destinationAccountId: dest,
         idempotencyKey,
         transferGroup: jobId,
         metadata: {
           jobId,
-          settlementLineId: line.id,
+          settlementLineIds: lineIds.join(','),
           companyId: assignment.carrierCompany.id,
         },
       });
@@ -2540,21 +2732,21 @@ export class PaymentsService {
           jobId,
           type: PaymentEventType.TRANSFER,
           status: PaymentEventStatus.SUCCEEDED,
-          amountExGstCents: line.amountCents,
+          amountExGstCents: amountCents,
           amountGstCents: 0,
-          amountIncGstCents: line.amountCents,
-          currency: line.currency,
+          amountIncGstCents: amountCents,
+          currency,
           stripeTransferId: transfer.id,
           idempotencyKey,
           metadata: {
-            settlementLineId: line.id,
+            settlementLineIds: lineIds,
             destination: dest,
             mock: transfer.mock,
           },
         },
       });
-      await tx.settlementLine.update({
-        where: { id: line.id },
+      await tx.settlementLine.updateMany({
+        where: { id: { in: lineIds } },
         data: { status: SettlementLineStatus.PAID, paidAt: new Date() },
       });
     });
@@ -2565,7 +2757,8 @@ export class PaymentsService {
       entityId: jobId,
       metadata: {
         transferId: transfer.id,
-        amountCents: line.amountCents,
+        amountCents,
+        settlementLineIds: lineIds,
         destination: dest,
         mock: transfer.mock,
       },

@@ -22,6 +22,7 @@ import {
   NotificationType,
   PlatformRole,
   ProposalStatus,
+  TripExceptionStatus,
   TripStatus,
   UserStatus,
   VehicleStatus,
@@ -1624,11 +1625,16 @@ export class CarrierService {
   /**
    * Reassign vehicle/driver on a locked assignment with an in-progress trip.
    * When the driver changes, safety gate is reset so the new driver re-runs NHVR.
+   *
+   * Unresolved trip exceptions (breakdown / unavailable / etc.) must go through
+   * `POST /exceptions/:id/reassign` → sender approve (M10 propose-then-commit).
+   * `allowExceptionResolution` is only for ExceptionsService after sender approval.
    */
   async reassignAssignment(
     principal: AuthenticatedPrincipal,
     assignmentId: string,
     input: AssignmentReassignInput,
+    options?: { allowExceptionResolution?: boolean },
   ) {
     this.ensureDatabase();
     const user = await this.requireCarrier(principal);
@@ -1654,6 +1660,35 @@ export class CarrierService {
       assignment.trip.status === TripStatus.CANCELLED
     ) {
       throw new BadRequestException('No active trip to reassign');
+    }
+
+    if (!options?.allowExceptionResolution) {
+      const openException = await this.prisma.tripException.findFirst({
+        where: {
+          assignmentId,
+          status: {
+            in: [
+              TripExceptionStatus.OPEN,
+              TripExceptionStatus.AWAITING_CARRIER,
+              TripExceptionStatus.REASSIGN_IN_PROGRESS,
+              TripExceptionStatus.AWAITING_SENDER_APPROVAL,
+              TripExceptionStatus.ESCALATED,
+            ],
+          },
+        },
+        select: { id: true, status: true, kind: true },
+        orderBy: { openedAt: 'desc' },
+      });
+      if (openException) {
+        throw new BadRequestException({
+          message:
+            'Open trip exception requires sender approval — propose replacement from Exceptions',
+          code: 'USE_EXCEPTION_REASSIGN',
+          exceptionId: openException.id,
+          exceptionStatus: openException.status,
+          exceptionKind: openException.kind,
+        });
+      }
     }
 
     const vehicle = await this.prisma.vehicle.findFirst({

@@ -342,6 +342,8 @@ describe('PaymentsService surcharge charge + status paths', () => {
               },
               proposal: { amountIncGstCents: 11000, etaMinutes: 60 },
               trip: {
+                id: 'trip-1',
+                status: 'EN_ROUTE_PICKUP',
                 surcharges: [
                   {
                     id: 's-1',
@@ -351,6 +353,7 @@ describe('PaymentsService surcharge charge + status paths', () => {
                   },
                 ],
               },
+              tripExceptions: [],
             },
           ]),
         },
@@ -360,7 +363,61 @@ describe('PaymentsService surcharge charge + status paths', () => {
       expect(rows[0]).toMatchObject({
         paidAndConfirmed: true,
         tripBlockedUntilPaid: false,
+        canReassign: true,
+        openTripExceptionId: null,
         exceptions: [{ id: 's-1', kind: SurchargeKind.WAITING }],
+      });
+    });
+
+    it('listCarrierAssignments disables canReassign when open trip exception exists', async () => {
+      const prisma = {
+        isConnected: () => true,
+        user: {
+          findUnique: jest.fn().mockResolvedValue({
+            id: 'user-carrier',
+            companyId: 'co-c',
+          }),
+        },
+        assignment: {
+          findMany: jest.fn().mockResolvedValue([
+            {
+              id: 'asg-1',
+              status: 'LOCKED',
+              lockedAt: new Date(),
+              job: {
+                id: 'job-1',
+                title: 'J',
+                status: 'ASSIGNED',
+                pricingModel: 'PER_KM',
+                estimateIncGstCents: 10000,
+                minVehicleClass: 'UTE',
+              },
+              proposal: { amountIncGstCents: 11000, etaMinutes: 60 },
+              vehicle: null,
+              driver: null,
+              trip: {
+                id: 'trip-1',
+                status: 'BREAKDOWN',
+                surcharges: [],
+              },
+              tripExceptions: [
+                {
+                  id: 'ex-1',
+                  status: 'AWAITING_CARRIER',
+                  kind: 'VEHICLE_BREAKDOWN',
+                },
+              ],
+            },
+          ]),
+        },
+      };
+      const service = makeService(prisma);
+      const rows = await service.listCarrierAssignments(carrierPrincipal);
+      expect(rows[0]).toMatchObject({
+        canReassign: false,
+        openTripExceptionId: 'ex-1',
+        openTripExceptionStatus: 'AWAITING_CARRIER',
+        openTripExceptionKind: 'VEHICLE_BREAKDOWN',
       });
     });
   });
