@@ -33,6 +33,7 @@ import { PaymentsService } from '../payments/payments.service';
 import { SenderService } from '../sender/sender.service';
 import { NotificationType } from '@prisma/client';
 import { resolveJobEditMode } from './job-edit-mode';
+import { isAssignmentPaidAndConfirmed } from './assignment-status.util';
 import {
   DEFAULT_VEHICLE_CLASSES,
   VehicleClassSpec,
@@ -673,7 +674,7 @@ export class JobsService {
             id: job.assignment.id,
             status: job.assignment.status,
             lockedAt: job.assignment.lockedAt,
-            paidAndConfirmed: job.assignment.status === AssignmentStatus.LOCKED,
+            paidAndConfirmed: isAssignmentPaidAndConfirmed(job.assignment.status),
           }
         : null,
       payment: job.paymentEvents[0]

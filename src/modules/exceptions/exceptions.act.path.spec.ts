@@ -73,8 +73,10 @@ describe('ExceptionsService continue / escalate / watchdog', () => {
       {
         userIdsForCompanies: jest.fn().mockResolvedValue([]),
         notifyUsers: jest.fn().mockResolvedValue(0),
+        notifyUsersLocalized: jest.fn().mockResolvedValue(0),
         adminIdsSuperAndStateForRegion: jest.fn().mockResolvedValue(['super-1', 'state-1']),
         notifyAdmins: jest.fn().mockResolvedValue(2),
+        notifyAdminsLocalized: jest.fn().mockResolvedValue(2),
         ...inboxExtras,
       } as never,
       carrier as never,

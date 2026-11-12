@@ -1,5 +1,9 @@
 import { Injectable, ServiceUnavailableException } from '@nestjs/common';
 import type { AuthenticatedPrincipal } from '../../common/guards/jwt-auth.guard';
+import {
+  normalizeAppLocale,
+  type UpdateLocaleInput,
+} from '../../shared/types';
 import { PrismaService } from '../../prisma/prisma.service';
 
 @Injectable()
@@ -29,6 +33,7 @@ export class IdentityService {
         id: admin.id,
         email: admin.email,
         name: admin.name,
+        locale: normalizeAppLocale(admin.locale),
         role: admin.role,
         active: admin.active,
         status: admin.status,
@@ -56,6 +61,7 @@ export class IdentityService {
       email: user.email,
       phone: user.phone,
       name: user.name,
+      locale: normalizeAppLocale(user.locale),
       role: user.role,
       status: user.status,
       company: user.company
@@ -75,5 +81,26 @@ export class IdentityService {
           }
         : null,
     };
+  }
+
+  async updateLocale(principal: AuthenticatedPrincipal, input: UpdateLocaleInput) {
+    this.ensureDatabase();
+    const locale = input.locale;
+
+    if (principal.kind === 'admin') {
+      const admin = await this.prisma.adminUser.update({
+        where: { id: principal.id },
+        data: { locale },
+        select: { id: true, locale: true },
+      });
+      return { locale: normalizeAppLocale(admin.locale) };
+    }
+
+    const user = await this.prisma.user.update({
+      where: { id: principal.id },
+      data: { locale },
+      select: { id: true, locale: true },
+    });
+    return { locale: normalizeAppLocale(user.locale) };
   }
 }

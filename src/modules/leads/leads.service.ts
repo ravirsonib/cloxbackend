@@ -193,6 +193,7 @@ export class LeadsService {
         leadId: lead.id,
         email: lead.email,
         companyName: lead.companyName,
+        locale: lead.locale,
       })
       .catch((error: unknown) => {
         this.logger.error(
@@ -284,6 +285,7 @@ export class LeadsService {
         leadId: lead.id,
         email: lead.email,
         companyName: lead.companyName,
+        locale: lead.locale,
       })
       .catch((error: unknown) => {
         this.logger.error(
@@ -372,6 +374,7 @@ export class LeadsService {
         leadId: lead.id,
         email: lead.email,
         companyName: lead.companyName,
+        locale: lead.locale,
       })
       .catch((error: unknown) => {
         this.logger.error(

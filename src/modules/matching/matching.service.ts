@@ -502,11 +502,15 @@ export class MatchingService {
       const senderUserIds =
         jobNotify?.senderCompany?.users.map((u) => u.id).filter(Boolean) ?? [];
       if (this.inbox && senderUserIds.length > 0) {
-        void this.inbox.notifyUsers({
+        void this.inbox.notifyUsersLocalized({
           userIds: senderUserIds,
           type: NotificationType.BID_RECEIVED,
-          title: `New bid on ${jobLabel}`,
-          body: `A carrier bid $${(proposal.amountIncGstCents / 100).toFixed(2)} incl. GST.`,
+          titleKey: 'bid.received.title',
+          bodyKey: 'bid.received.body',
+          vars: {
+            jobTitle: jobLabel,
+            amount: (proposal.amountIncGstCents / 100).toFixed(2),
+          },
           href: `/jobs/${job.id}`,
           entityType: 'Proposal',
           entityId: proposal.id,

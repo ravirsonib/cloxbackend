@@ -49,8 +49,10 @@ describe('ExceptionsService.open', () => {
       {
         userIdsForCompanies: jest.fn().mockResolvedValue([]),
         notifyUsers: jest.fn().mockResolvedValue(0),
+        notifyUsersLocalized: jest.fn().mockResolvedValue(0),
         adminIdsSuperAndStateForRegion: jest.fn().mockResolvedValue([]),
         notifyAdmins: jest.fn().mockResolvedValue(0),
+        notifyAdminsLocalized: jest.fn().mockResolvedValue(0),
       } as never,
       carrier as never,
       { adjustForMarketplaceRelease: jest.fn() } as never,
@@ -309,6 +311,17 @@ describe('ExceptionsService.open', () => {
           driver: { id: 'drv-1' },
         }),
       },
+      platformSettings: {
+        upsert: jest.fn().mockResolvedValue({
+          id: 'default',
+          forceOfflineOnVehicleBreakdown: false,
+          carrierMarketplaceReleaseScoreDelta: 10,
+        }),
+      },
+      company: {
+        findUnique: jest.fn().mockResolvedValue({ reliabilityScore: 100 }),
+        update: jest.fn().mockResolvedValue({}),
+      },
       trip: {
         findFirst: jest.fn().mockResolvedValue({
           id: 'trip-1',
@@ -377,6 +390,7 @@ describe('ExceptionsService.open', () => {
 
   it('notifies carrier in-app with direct link to exception when breakdown opens', async () => {
     const notifyUsersMock = jest.fn().mockResolvedValue(1);
+    const notifyUsersLocalizedMock = jest.fn().mockResolvedValue(1);
     const service = new ExceptionsService(
       {
         isConnected: () => true,
@@ -386,6 +400,17 @@ describe('ExceptionsService.open', () => {
             email: 'driver@yopmail.com',
             driver: { id: 'drv-1', companyId: 'co-c' },
           }),
+        },
+        platformSettings: {
+          upsert: jest.fn().mockResolvedValue({
+            id: 'default',
+            forceOfflineOnVehicleBreakdown: false,
+            carrierMarketplaceReleaseScoreDelta: 10,
+          }),
+        },
+        company: {
+          findUnique: jest.fn().mockResolvedValue({ reliabilityScore: 100 }),
+          update: jest.fn().mockResolvedValue({}),
         },
         trip: {
           findFirst: jest.fn().mockResolvedValue({
@@ -416,7 +441,21 @@ describe('ExceptionsService.open', () => {
             },
           }),
         },
-        tripException: { findFirst: jest.fn().mockResolvedValue(null) },
+        tripException: {
+          findFirst: jest.fn().mockResolvedValue(null),
+          findUnique: jest.fn().mockResolvedValue({
+            id: 'ex-breakdown-1',
+            job: { id: 'job-1', title: 'Heavy machinery delivery' },
+            assignment: {
+              vehicle: { registration: 'XYZ-123' },
+              carrierCompany: {
+                id: 'co-c',
+                legalName: 'Carrier Pty',
+                users: [{ id: 'usr-carrier-1', email: 'carrier@yopmail.com' }],
+              },
+            },
+          }),
+        },
         complianceDocument: {
           findFirst: jest.fn().mockResolvedValue({
             id: '22222222-2222-2222-2222-222222222222',
@@ -456,8 +495,10 @@ describe('ExceptionsService.open', () => {
       {
         userIdsForCompanies: jest.fn().mockResolvedValue(['usr-carrier-1']),
         notifyUsers: notifyUsersMock,
+        notifyUsersLocalized: notifyUsersLocalizedMock,
         adminIdsSuperAndStateForRegion: jest.fn().mockResolvedValue([]),
         notifyAdmins: jest.fn().mockResolvedValue(0),
+        notifyAdminsLocalized: jest.fn().mockResolvedValue(0),
       } as never,
       carrier as never,
       { adjustForMarketplaceRelease: jest.fn() } as never,
@@ -476,13 +517,14 @@ describe('ExceptionsService.open', () => {
     // Wait for in-app notify async microtask
     await new Promise((r) => setTimeout(r, 50));
 
-    expect(notifyUsersMock).toHaveBeenCalledWith(
+    expect(notifyUsersLocalizedMock).toHaveBeenCalledWith(
       expect.objectContaining({
         userIds: expect.arrayContaining(['usr-carrier-1']),
         type: 'TRIP_EXCEPTION',
         href: '/carrier/exceptions/ex-breakdown-1',
         entityType: 'TripException',
         entityId: 'ex-breakdown-1',
+        titleKey: 'exception.reported.carrier.title',
       }),
     );
   });

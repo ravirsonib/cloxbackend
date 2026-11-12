@@ -44,6 +44,7 @@ type ResolvedAccount =
       email: string;
       name: string | null;
       role: PrismaAdminRole;
+      locale: string;
       regionCodes: string[];
       territoryCodes: string[];
       scopes: Array<{
@@ -58,6 +59,7 @@ type ResolvedAccount =
       email: string;
       name: string | null;
       role: PrismaPlatformRole;
+      locale: string;
       regionCodes: string[];
       territoryCodes: string[];
       scopes?: undefined;
@@ -125,6 +127,7 @@ export class AuthService {
           email: admin.email,
           name: admin.name,
           role: admin.role,
+          locale: admin.locale,
           regionCodes: [
             ...new Set(
               admin.scopes
@@ -151,6 +154,7 @@ export class AuthService {
           email: user.email,
           name: user.name,
           role: user.role,
+          locale: user.locale,
           regionCodes: [],
           territoryCodes: [],
         };
@@ -168,6 +172,7 @@ export class AuthService {
           email: user.email,
           name: user.name,
           role: user.role,
+          locale: user.locale,
           regionCodes: [],
           territoryCodes: [],
         };
@@ -223,6 +228,7 @@ export class AuthService {
         code,
         ttlMinutes,
         accountType: account.role,
+        locale: account.locale,
       })
       .then((mailResult) => {
         if (mailResult.skipped) {
@@ -511,11 +517,16 @@ export class AuthService {
       actorAdminId: principal.id,
     });
 
+    const adminLocale = await this.prisma.adminUser.findUnique({
+      where: { id: principal.id },
+      select: { locale: true },
+    });
     void this.notifications.sendOtpEmail({
       to: principal.email,
       code,
       ttlMinutes,
       accountType: principal.role,
+      locale: adminLocale?.locale,
     });
 
     if (this.config.get('EXPOSE_OTP_IN_RESPONSE', { infer: true })) {

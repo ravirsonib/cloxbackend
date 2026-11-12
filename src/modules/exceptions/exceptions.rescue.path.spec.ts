@@ -55,6 +55,8 @@ describe('ExceptionsService rescue candidates + release', () => {
       {
         userIdsForCompanies: jest.fn().mockResolvedValue([]),
         notifyUsers: jest.fn().mockResolvedValue(0),
+        notifyUsersLocalized: jest.fn().mockResolvedValue(0),
+        notifyAdminsLocalized: jest.fn().mockResolvedValue(0),
       } as never,
       carrier as never,
       payments as never,

@@ -80,6 +80,7 @@ import {
   evaluateAssignmentCompliance,
   type DriverAssignmentFields,
 } from '../jobs/assignment-gates';
+import { isAssignmentPaidAndConfirmed } from '../jobs/assignment-status.util';
 import { createReadStream, type ReadStream } from 'fs';
 import { access, readFile } from 'fs/promises';
 import { extname, join } from 'path';
@@ -583,7 +584,7 @@ export class TripsService {
     const massOk = trip.massCheckOk && !pendingMass;
     const complianceOk = opts?.complianceOk ?? true;
     const gates = {
-      paid: trip.assignment?.status === AssignmentStatus.LOCKED,
+      paid: isAssignmentPaidAndConfirmed(trip.assignment?.status),
       safetyOk: Boolean(trip.safetyPassedAt) && !trip.safetyFailedAt,
       massOk,
       complianceOk,

@@ -554,14 +554,21 @@ export class ExceptionsService {
           ];
 
           if (carrierUserIds.length > 0) {
-            await this.inbox!.notifyUsers({
+            const kindLabel = created.kind.toLowerCase().replace(/_/g, ' ');
+            await this.inbox!.notifyUsersLocalized({
               userIds: carrierUserIds,
               type: NotificationType.TRIP_EXCEPTION,
-              title:
+              titleKey:
                 created.kind === TripExceptionKind.VEHICLE_BREAKDOWN
-                  ? 'Vehicle breakdown reported (Action required)'
-                  : `Trip exception: ${created.kind} (Action required)`,
-              body: `Vehicle ${trip.assignment.vehicle?.registration ?? 'Truck'} reported ${created.kind.toLowerCase().replace(/_/g, ' ')} on "${trip.job.title ?? 'job'}". Assign replacement driver/vehicle to continue.`,
+                  ? 'exception.reported.carrier.title'
+                  : 'exception.reported.carrier.titleGeneric',
+              bodyKey: 'exception.reported.carrier.body',
+              vars: {
+                kind: created.kind,
+                kindLabel,
+                vehicle: trip.assignment.vehicle?.registration ?? 'Truck',
+                jobTitle: trip.job.title ?? 'job',
+              },
               href: `/carrier/exceptions/${created.id}`,
               entityType: 'TripException',
               entityId: created.id,
@@ -588,11 +595,14 @@ export class ExceptionsService {
             ];
 
             if (senderUserIds.length > 0) {
-              await this.inbox!.notifyUsers({
+              await this.inbox!.notifyUsersLocalized({
                 userIds: senderUserIds,
                 type: NotificationType.TRIP_EXCEPTION,
-                title: 'Trip delay / issue reported',
-                body: `A delay or exception was reported for "${trip.job.title ?? 'your shipment'}". Carrier is arranging resolution.`,
+                titleKey: 'exception.reported.sender.title',
+                bodyKey: 'exception.reported.sender.body',
+                vars: {
+                  jobTitle: trip.job.title ?? 'your shipment',
+                },
                 href: `/jobs/${trip.job.id}`,
                 entityType: 'TripException',
                 entityId: created.id,
@@ -606,11 +616,16 @@ export class ExceptionsService {
                 trip.job.originRegionId,
               );
             if (adminUserIds.length > 0) {
-              await this.inbox!.notifyAdmins({
+              await this.inbox!.notifyAdminsLocalized({
                 adminUserIds,
                 type: NotificationType.TRIP_EXCEPTION,
-                title: `Trip exception: ${created.kind}`,
-                body: `${created.kind} on "${trip.job.title ?? trip.job.id}". Carrier: ${trip.assignment.carrierCompany.legalName}. Status: AWAITING_CARRIER.`,
+                titleKey: 'exception.reported.admin.title',
+                bodyKey: 'exception.reported.admin.body',
+                vars: {
+                  kind: created.kind,
+                  jobTitle: trip.job.title ?? trip.job.id,
+                  carrier: trip.assignment.carrierCompany.legalName,
+                },
                 href: '/ops/exceptions',
                 entityType: 'TripException',
                 entityId: created.id,
@@ -931,6 +946,22 @@ export class ExceptionsService {
     const driverName =
       driver.user.name ?? driver.user.email ?? input.driverId.slice(0, 8);
 
+    const emailTargets = [
+      ...carrierEmails,
+      ...(senderEmail ? [senderEmail] : []),
+    ].map((e) => e.toLowerCase());
+    const localeRows =
+      emailTargets.length > 0
+        ? await this.prisma.user.findMany({
+            where: { email: { in: emailTargets } },
+            select: { email: true, locale: true },
+          })
+        : [];
+    const localeByEmail: Record<string, string> = {};
+    for (const u of localeRows) {
+      localeByEmail[u.email.toLowerCase()] = u.locale;
+    }
+
     await this.notifications.notifyTripExceptionReplacementProposed({
       carrierEmails,
       senderEmail,
@@ -940,6 +971,7 @@ export class ExceptionsService {
       driverName,
       exceptionId: id,
       note: input.note?.trim() || null,
+      localeByEmail,
     });
 
     if (this.inbox) {
@@ -964,11 +996,16 @@ export class ExceptionsService {
         ];
 
         if (senderUserIds.length > 0) {
-          await this.inbox.notifyUsers({
+          await this.inbox.notifyUsersLocalized({
             userIds: senderUserIds,
             type: NotificationType.TRIP_EXCEPTION,
-            title: 'Replacement driver & vehicle proposed (Action required)',
-            body: `Carrier proposed replacement vehicle ${vehicleLabel} and driver ${driverName} for "${row.job.title ?? 'your shipment'}". Open the job to approve or reject.`,
+            titleKey: 'exception.replacementProposed.title',
+            bodyKey: 'exception.replacementProposed.body',
+            vars: {
+              vehicle: vehicleLabel,
+              driver: driverName,
+              jobTitle: row.job.title ?? 'your shipment',
+            },
             href: `/jobs/${row.job.id}`,
             entityType: 'TripException',
             entityId: id,
@@ -1151,11 +1188,16 @@ export class ExceptionsService {
         ];
 
         if (carrierUserIds.length > 0) {
-          await this.inbox.notifyUsers({
+          await this.inbox.notifyUsersLocalized({
             userIds: carrierUserIds,
             type: NotificationType.TRIP_EXCEPTION,
-            title: 'Sender approved replacement driver & vehicle',
-            body: `Sender approved replacement vehicle ${vehicleLabel} and driver ${driverName} for "${notify.jobTitle || 'job'}". Crew swap is now active.`,
+            titleKey: 'exception.replacementApproved.title',
+            bodyKey: 'exception.replacementApproved.body',
+            vars: {
+              vehicle: vehicleLabel,
+              driver: driverName,
+              jobTitle: notify.jobTitle || 'job',
+            },
             href: `/carrier/exceptions/${id}`,
             entityType: 'TripException',
             entityId: id,
@@ -1167,11 +1209,15 @@ export class ExceptionsService {
             ? await this.inbox.userIdForDriver(row.proposedDriverId)
             : null;
         if (newDriverUserId) {
-          await this.inbox.notifyUsers({
+          await this.inbox.notifyUsersLocalized({
             userIds: [newDriverUserId],
             type: NotificationType.TRIP_EXCEPTION,
-            title: 'Assigned to rescue trip',
-            body: `You have been assigned with vehicle ${vehicleLabel} to continue "${notify.jobTitle || 'job'}" after sender approval.`,
+            titleKey: 'exception.assignedRescue.title',
+            bodyKey: 'exception.assignedRescue.body',
+            vars: {
+              vehicle: vehicleLabel,
+              jobTitle: notify.jobTitle || 'job',
+            },
             href: '/driver/trips',
             entityType: 'TripException',
             entityId: id,
@@ -1289,11 +1335,15 @@ export class ExceptionsService {
         ];
 
         if (carrierUserIds.length > 0) {
-          await this.inbox.notifyUsers({
+          await this.inbox.notifyUsersLocalized({
             userIds: carrierUserIds,
             type: NotificationType.TRIP_EXCEPTION,
-            title: 'Sender rejected replacement crew — Job cancelled',
-            body: `Sender rejected the proposed replacement for "${notify.jobTitle || 'job'}" (${note}). The trip and assignment have been cancelled.`,
+            titleKey: 'exception.replacementRejected.title',
+            bodyKey: 'exception.replacementRejected.body',
+            vars: {
+              jobTitle: notify.jobTitle || 'job',
+              note,
+            },
             href: `/carrier/exceptions/${id}`,
             entityType: 'TripException',
             entityId: id,
@@ -1301,11 +1351,14 @@ export class ExceptionsService {
         }
 
         if (row.reportedByUserId) {
-          await this.inbox.notifyUsers({
+          await this.inbox.notifyUsersLocalized({
             userIds: [row.reportedByUserId],
             type: NotificationType.TRIP_EXCEPTION,
-            title: 'Trip cancelled after breakdown',
-            body: `Sender rejected the proposed replacement for "${notify.jobTitle || 'job'}". Your trip has been cancelled.`,
+            titleKey: 'exception.tripCancelled.title',
+            bodyKey: 'exception.tripCancelled.body',
+            vars: {
+              jobTitle: notify.jobTitle || 'job',
+            },
             href: '/driver/trips',
             entityType: 'TripException',
             entityId: id,
@@ -1442,12 +1495,17 @@ export class ExceptionsService {
           ),
         ];
 
+        const continueDetail = etaNote ? `${note} · ETA: ${etaNote}` : note;
         if (senderUserIds.length > 0) {
-          await this.inbox.notifyUsers({
+          await this.inbox.notifyUsersLocalized({
             userIds: senderUserIds,
             type: NotificationType.TRIP_EXCEPTION,
-            title: 'Trip exception resolved — Trip continuing',
-            body: `Carrier cleared the exception for "${notify.jobTitle || 'your shipment'}" (${etaNote ? `${note} · ETA: ${etaNote}` : note}).`,
+            titleKey: 'exception.continued.title',
+            bodyKey: 'exception.continued.body',
+            vars: {
+              jobTitle: notify.jobTitle || 'your shipment',
+              detail: continueDetail,
+            },
             href: `/jobs/${notify.jobId}`,
             entityType: 'TripException',
             entityId: id,
@@ -1455,11 +1513,15 @@ export class ExceptionsService {
         }
 
         if (row.reportedByUserId) {
-          await this.inbox.notifyUsers({
+          await this.inbox.notifyUsersLocalized({
             userIds: [row.reportedByUserId],
             type: NotificationType.TRIP_EXCEPTION,
-            title: 'Exception resolved — Continue trip',
-            body: `Your carrier cleared the exception for "${notify.jobTitle || 'job'}" (${etaNote ? `${note} · ETA: ${etaNote}` : note}).`,
+            titleKey: 'exception.continuedDriver.title',
+            bodyKey: 'exception.continuedDriver.body',
+            vars: {
+              jobTitle: notify.jobTitle || 'job',
+              detail: continueDetail,
+            },
             href: '/driver/trips',
             entityType: 'TripException',
             entityId: id,
@@ -1680,11 +1742,15 @@ export class ExceptionsService {
         ];
 
         if (senderUserIds.length > 0) {
-          await this.inbox.notifyUsers({
+          await this.inbox.notifyUsersLocalized({
             userIds: senderUserIds,
             type: NotificationType.TRIP_EXCEPTION,
-            title: 'Job re-listed to marketplace with priority',
-            body: `"${notify.jobTitle || 'Your shipment'}" was released back to the marketplace with priority after an exception (${note}). Your price estimate is unchanged.`,
+            titleKey: 'exception.relisted.title',
+            bodyKey: 'exception.relisted.body',
+            vars: {
+              jobTitle: notify.jobTitle || 'Your shipment',
+              note,
+            },
             href: `/jobs/${notify.jobId}`,
             entityType: 'TripException',
             entityId: id,
@@ -1707,11 +1773,15 @@ export class ExceptionsService {
         ];
 
         if (carrierUserIds.length > 0) {
-          await this.inbox.notifyUsers({
+          await this.inbox.notifyUsersLocalized({
             userIds: carrierUserIds,
             type: NotificationType.TRIP_EXCEPTION,
-            title: 'Exception released to marketplace',
-            body: `"${notify.jobTitle || 'Job'}" was released back to the marketplace (${note}).`,
+            titleKey: 'exception.released.title',
+            bodyKey: 'exception.released.body',
+            vars: {
+              jobTitle: notify.jobTitle || 'Job',
+              note,
+            },
             href: `/carrier/exceptions/${id}`,
             entityType: 'TripException',
             entityId: id,

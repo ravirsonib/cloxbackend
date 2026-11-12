@@ -38,6 +38,10 @@ import { RevenueSplitService } from '../settlements/revenue-split.service';
 import { TripsService } from '../trips/trips.service';
 import { splitIncGst } from '../trips/geofence.util';
 import {
+  isAssignmentPaidAndConfirmed,
+  isAssignmentPendingPayment,
+} from '../jobs/assignment-status.util';
+import {
   isMockStripeCustomerId,
   isMockStripePaymentMethodId,
 } from './stripe-mock-ids.util';
@@ -151,7 +155,7 @@ export class PaymentsService {
     let replayPiStatus: string | null = null;
     if (existing) {
       const assignmentStatus = existing.job?.assignment?.status;
-      const locked = assignmentStatus === AssignmentStatus.LOCKED;
+      const locked = isAssignmentPaidAndConfirmed(assignmentStatus);
       const ageMs = Date.now() - new Date(existing.createdAt).getTime();
       const scaTimedOut =
         !locked &&
@@ -1345,7 +1349,7 @@ export class PaymentsService {
       assignmentId: assignment?.id ?? null,
       assignmentStatus: assignment?.status ?? null,
       lockedAt: assignment?.lockedAt ?? null,
-      paidAndConfirmed: assignment?.status === AssignmentStatus.LOCKED,
+      paidAndConfirmed: isAssignmentPaidAndConfirmed(assignment?.status),
       idempotentReplay,
     };
   }
@@ -1364,8 +1368,10 @@ export class PaymentsService {
       const assignment = await this.prisma.assignment.findUnique({
         where: { jobId: pe.jobId },
       });
-      if (assignment?.status === AssignmentStatus.LOCKED) {
-        await this.trips.ensureTripForAssignment(assignment.id);
+      if (isAssignmentPaidAndConfirmed(assignment?.status)) {
+        if (assignment?.status === AssignmentStatus.LOCKED) {
+          await this.trips.ensureTripForAssignment(assignment.id);
+        }
         return { skipped: true as const, alreadyPaid: true as const };
       }
     }
@@ -2010,7 +2016,7 @@ export class PaymentsService {
             id: job.assignment.id,
             status: job.assignment.status,
             lockedAt: job.assignment.lockedAt,
-            paidAndConfirmed: job.assignment.status === AssignmentStatus.LOCKED,
+            paidAndConfirmed: isAssignmentPaidAndConfirmed(job.assignment.status),
           }
         : null,
       payment: charge
@@ -2096,7 +2102,7 @@ export class PaymentsService {
         id: a.id,
         status: a.status,
         lockedAt: a.lockedAt,
-        paidAndConfirmed: a.status === AssignmentStatus.LOCKED,
+        paidAndConfirmed: isAssignmentPaidAndConfirmed(a.status),
         job: a.job,
         vehicle: a.vehicle,
         driver: a.driver,
@@ -2105,7 +2111,7 @@ export class PaymentsService {
           : null,
         amountIncGstCents: a.proposal.amountIncGstCents,
         etaMinutes: a.proposal.etaMinutes,
-        tripBlockedUntilPaid: a.status !== AssignmentStatus.LOCKED,
+        tripBlockedUntilPaid: isAssignmentPendingPayment(a.status),
         /** Direct assign-board reassign; blocked while a trip exception needs Exceptions → sender approve. */
         canReassign:
           a.status === AssignmentStatus.LOCKED && tripActive && !openTripException,

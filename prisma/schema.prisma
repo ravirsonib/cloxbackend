@@ -54,6 +54,8 @@ model AdminUser {
   email            String          @unique
   role             AdminRole       @default(SUPER_ADMIN)
   name             String?
+  /// UI / notification locale: en | hi | pa
+  locale           String          @default("en")
   /// Source of truth for ops eligibility; keep `active` synced (ACTIVE only).
   status           AdminUserStatus @default(ACTIVE)
   active           Boolean         @default(true)
@@ -312,6 +314,8 @@ model User {
   role      PlatformRole
   status    UserStatus   @default(PENDING)
   name      String?
+  /// UI / notification locale: en | hi | pa
+  locale    String       @default("en")
   companyId String?
   company   Company?     @relation(fields: [companyId], references: [id], onDelete: SetNull)
   createdAt DateTime     @default(now())
@@ -328,6 +332,20 @@ model User {
   @@index([companyId])
   @@index([role, status])
   @@index([phone])
+}
+
+/// Cache for optional on-read UGC translation (never overwrites source columns).
+model ContentTranslation {
+  id           String   @id @default(uuid())
+  sourceHash   String
+  sourceLocale String?
+  targetLocale String
+  text         String
+  provider     String   @default("stub")
+  createdAt    DateTime @default(now())
+
+  @@unique([sourceHash, targetLocale])
+  @@index([targetLocale, createdAt])
 }
 
 enum NotificationType {

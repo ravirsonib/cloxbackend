@@ -60,6 +60,7 @@ describe('ExceptionsService propose / approve / reject replacement', () => {
     userIdsForCompanies: jest.fn().mockResolvedValue([]),
     userIdForDriver: jest.fn().mockResolvedValue('user-drv-2'),
     notifyUsers: jest.fn().mockResolvedValue(1),
+    notifyUsersLocalized: jest.fn().mockResolvedValue(1),
   };
 
   function makeService(prisma: Record<string, unknown>) {
@@ -138,6 +139,7 @@ describe('ExceptionsService propose / approve / reject replacement', () => {
       isConnected: () => true,
       user: {
         findUnique: jest.fn().mockResolvedValue({ id: 'user-carrier', companyId: 'co-c' }),
+        findMany: jest.fn().mockResolvedValue([]),
       },
       tripException: {
         findUnique: jest.fn().mockResolvedValue({
@@ -184,12 +186,13 @@ describe('ExceptionsService propose / approve / reject replacement', () => {
     expect(result.proposal.status).toBe('AWAITING_SENDER_APPROVAL');
     expect(carrier.reassignAssignment).not.toHaveBeenCalled();
     expect(notifications.notifyTripExceptionReplacementProposed).toHaveBeenCalled();
-    expect(inbox.notifyUsers).toHaveBeenCalledWith(
+    expect(inbox.notifyUsersLocalized).toHaveBeenCalledWith(
       expect.objectContaining({
         userIds: ['user-sender'],
         href: '/jobs/job-1',
         entityType: 'TripException',
         entityId: 'ex-1',
+        titleKey: 'exception.replacementProposed.title',
       }),
     );
     expect(update).toHaveBeenCalledWith(
@@ -223,6 +226,7 @@ describe('ExceptionsService propose / approve / reject replacement', () => {
       isConnected: () => true,
       user: {
         findUnique: jest.fn().mockResolvedValue({ id: 'user-carrier', companyId: 'co-c' }),
+        findMany: jest.fn().mockResolvedValue([]),
       },
       tripException: {
         findUnique: jest.fn().mockResolvedValue(baseFind),
@@ -421,12 +425,13 @@ describe('ExceptionsService propose / approve / reject replacement', () => {
       { allowExceptionResolution: true },
     );
     expect(notifications.notifyTripExceptionReassigned).toHaveBeenCalled();
-    expect(inbox.notifyUsers).toHaveBeenCalledWith(
+    expect(inbox.notifyUsersLocalized).toHaveBeenCalledWith(
       expect.objectContaining({
         userIds: ['user-carrier'],
         href: '/carrier/exceptions/ex-1',
         entityType: 'TripException',
         entityId: 'ex-1',
+        titleKey: 'exception.replacementApproved.title',
       }),
     );
   });
@@ -490,12 +495,13 @@ describe('ExceptionsService propose / approve / reject replacement', () => {
     expect(result.cancelled).toBe(true);
     expect(payments.refundStub).toHaveBeenCalledWith(senderPrincipal, 'job-1');
     expect(notifications.notifyTripExceptionReplacementRejected).toHaveBeenCalled();
-    expect(inbox.notifyUsers).toHaveBeenCalledWith(
+    expect(inbox.notifyUsersLocalized).toHaveBeenCalledWith(
       expect.objectContaining({
         userIds: ['user-carrier'],
         href: '/carrier/exceptions/ex-1',
         entityType: 'TripException',
         entityId: 'ex-1',
+        titleKey: 'exception.replacementRejected.title',
       }),
     );
   });

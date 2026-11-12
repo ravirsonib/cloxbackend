@@ -188,12 +188,14 @@ describe('JobsService leftover list/get/publish/bidding paths', () => {
       paidAndConfirmed: true,
     });
     expect(result.payment).toMatchObject({ id: 'pe-1', stripePaymentIntentId: 'pi_1' });
-    expect(result.proposals?.[0]).toMatchObject({
+    const prop1 = result.proposals?.find((p: { id: string }) => p.id === 'prop-1');
+    const prop2 = result.proposals?.find((p: { id: string }) => p.id === 'prop-2');
+    expect(prop1).toMatchObject({
       id: 'prop-1',
       carrierLabel: expect.stringMatching(/^Carrier /),
       carrierCompanyIdMasked: true,
     });
-    expect(result.proposals?.[1]).toMatchObject({
+    expect(prop2).toMatchObject({
       id: 'prop-2',
       carrierLabel: 'Acme Haulage',
       carrierCompanyIdMasked: false,

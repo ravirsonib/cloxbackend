@@ -70,6 +70,11 @@ export function isAdminRole(role: string): role is AdminRole {
   return (ADMIN_ROLES as string[]).includes(role);
 }
 
+/** Logged-in product + lead locales (api + admin). */
+export const SUPPORTED_LOCALES = ['en', 'hi', 'pa'] as const;
+export type AppLocale = (typeof SUPPORTED_LOCALES)[number];
+export const DEFAULT_LOCALE: AppLocale = 'en';
+
 export const Locale = {
   en: 'en',
   hi: 'hi',
@@ -77,6 +82,16 @@ export const Locale = {
 } as const;
 
 export type Locale = (typeof Locale)[keyof typeof Locale];
+
+export function isAppLocale(value: string | null | undefined): value is AppLocale {
+  return !!value && (SUPPORTED_LOCALES as readonly string[]).includes(value);
+}
+
+export function normalizeAppLocale(value: string | null | undefined): AppLocale {
+  if (value?.startsWith('hi')) return 'hi';
+  if (value?.startsWith('pa')) return 'pa';
+  return DEFAULT_LOCALE;
+}
 
 export const AuditAction = {
   LEAD_CREATED: 'lead.created',
@@ -225,7 +240,19 @@ export const AuditAction = {
 export type AuditAction = (typeof AuditAction)[keyof typeof AuditAction];
 
 const honeypotField = z.string().max(200).optional();
-const localeField = z.enum(['en', 'hi', 'pa', 'ru']).default('en');
+const localeField = z.enum(SUPPORTED_LOCALES).default(DEFAULT_LOCALE);
+
+export const updateLocaleSchema = z.object({
+  locale: z.enum(SUPPORTED_LOCALES),
+});
+export type UpdateLocaleInput = z.infer<typeof updateLocaleSchema>;
+
+export const translationPreviewSchema = z.object({
+  text: z.string().trim().min(1).max(20_000),
+  targetLocale: z.enum(SUPPORTED_LOCALES),
+  sourceLocale: z.enum(SUPPORTED_LOCALES).optional(),
+});
+export type TranslationPreviewInput = z.infer<typeof translationPreviewSchema>;
 const abnField = z
   .string()
   .trim()

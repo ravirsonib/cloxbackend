@@ -7,6 +7,7 @@ import {
 } from '@nestjs/common';
 import { AdminRole, AdminUserStatus, NotificationType, PlatformRole } from '@prisma/client';
 import type { AuthenticatedPrincipal } from '../../common/guards/jwt-auth.guard';
+import { tNotify } from '../../i18n/notify.util';
 import { PrismaService } from '../../prisma/prisma.service';
 
 export type NotifyUsersInput = {
@@ -19,11 +20,34 @@ export type NotifyUsersInput = {
   entityId?: string | null;
 };
 
+export type NotifyUsersLocalizedInput = {
+  userIds: string[];
+  type: NotificationType;
+  titleKey: string;
+  bodyKey?: string;
+  vars?: Record<string, string | number | null | undefined>;
+  href?: string | null;
+  entityType?: string | null;
+  entityId?: string | null;
+};
+
 export type NotifyAdminsInput = {
   adminUserIds: string[];
   type: NotificationType;
   title: string;
   body?: string | null;
+  href?: string | null;
+  entityType?: string | null;
+  entityId?: string | null;
+  regionId?: string | null;
+};
+
+export type NotifyAdminsLocalizedInput = {
+  adminUserIds: string[];
+  type: NotificationType;
+  titleKey: string;
+  bodyKey?: string;
+  vars?: Record<string, string | number | null | undefined>;
   href?: string | null;
   entityType?: string | null;
   entityId?: string | null;
@@ -171,6 +195,51 @@ export class InAppNotificationsService {
     }
   }
 
+  /**
+   * Fan-out with title/body expanded per recipient User.locale.
+   * UGC interpolated via vars stays verbatim.
+   */
+  async notifyUsersLocalized(input: NotifyUsersLocalizedInput): Promise<number> {
+    const userIds = [...new Set(input.userIds.filter(Boolean))];
+    if (userIds.length === 0) return 0;
+    if (!this.prisma.isConnected()) {
+      this.logger.warn('Skipped in-app notify — database unavailable');
+      return 0;
+    }
+    try {
+      const users = await this.prisma.user.findMany({
+        where: { id: { in: userIds } },
+        select: { id: true, locale: true },
+      });
+      const localeById = new Map(users.map((u) => [u.id, u.locale]));
+      const result = await this.prisma.notification.createMany({
+        data: userIds.map((userId) => {
+          const locale = localeById.get(userId);
+          return {
+            userId,
+            adminUserId: null,
+            type: input.type,
+            title: tNotify(locale, input.titleKey, input.vars),
+            body: input.bodyKey
+              ? tNotify(locale, input.bodyKey, input.vars)
+              : null,
+            href: input.href ?? null,
+            entityType: input.entityType ?? null,
+            entityId: input.entityId ?? null,
+          };
+        }),
+      });
+      return result.count;
+    } catch (error: unknown) {
+      this.logger.warn(
+        `In-app localized notify failed (${input.type}): ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      return 0;
+    }
+  }
+
   /** Fan-out create for Ops AdminUsers — never throws to callers. */
   async notifyAdmins(input: NotifyAdminsInput): Promise<number> {
     const adminUserIds = [...new Set(input.adminUserIds.filter(Boolean))];
@@ -197,6 +266,51 @@ export class InAppNotificationsService {
     } catch (error: unknown) {
       this.logger.warn(
         `Admin in-app notify failed (${input.type}): ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      return 0;
+    }
+  }
+
+  /** Fan-out with title/body expanded per AdminUser.locale. */
+  async notifyAdminsLocalized(
+    input: NotifyAdminsLocalizedInput,
+  ): Promise<number> {
+    const adminUserIds = [...new Set(input.adminUserIds.filter(Boolean))];
+    if (adminUserIds.length === 0) return 0;
+    if (!this.prisma.isConnected()) {
+      this.logger.warn('Skipped admin in-app notify — database unavailable');
+      return 0;
+    }
+    try {
+      const admins = await this.prisma.adminUser.findMany({
+        where: { id: { in: adminUserIds } },
+        select: { id: true, locale: true },
+      });
+      const localeById = new Map(admins.map((a) => [a.id, a.locale]));
+      const result = await this.prisma.notification.createMany({
+        data: adminUserIds.map((adminUserId) => {
+          const locale = localeById.get(adminUserId);
+          return {
+            adminUserId,
+            userId: null,
+            type: input.type,
+            title: tNotify(locale, input.titleKey, input.vars),
+            body: input.bodyKey
+              ? tNotify(locale, input.bodyKey, input.vars)
+              : null,
+            href: input.href ?? null,
+            entityType: input.entityType ?? null,
+            entityId: input.entityId ?? null,
+            regionId: input.regionId ?? null,
+          };
+        }),
+      });
+      return result.count;
+    } catch (error: unknown) {
+      this.logger.warn(
+        `Admin localized notify failed (${input.type}): ${
           error instanceof Error ? error.message : String(error)
         }`,
       );

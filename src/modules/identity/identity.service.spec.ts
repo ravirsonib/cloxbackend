@@ -27,6 +27,8 @@ describe('IdentityService.getMe paths', () => {
           name: 'State',
           role: 'STATE_MASTER',
           active: true,
+          status: 'ACTIVE',
+          locale: 'en',
           scopes: [
             {
               scopeType: 'STATE',
@@ -65,6 +67,7 @@ describe('IdentityService.getMe paths', () => {
           name: 'Sender',
           role: 'SENDER',
           status: 'ACTIVE',
+          locale: 'hi',
           company: {
             id: 'co1',
             type: 'SENDER',
@@ -91,6 +94,7 @@ describe('IdentityService.getMe paths', () => {
     });
     expect(me).toMatchObject({
       kind: 'user',
+      locale: 'hi',
       company: { id: 'co1', legalName: 'Acme', reliabilityScore: 100 },
       driver: { id: 'dr1', status: 'ACTIVE', reliabilityScore: 95 },
     });
@@ -106,6 +110,8 @@ describe('IdentityService.getMe paths', () => {
           name: 'Ops',
           role: 'SUPER_ADMIN',
           active: true,
+          status: 'ACTIVE',
+          locale: 'en',
           scopes: [
             {
               scopeType: 'LOCAL',
@@ -126,6 +132,7 @@ describe('IdentityService.getMe paths', () => {
     });
     expect(adminMe).toMatchObject({
       kind: 'admin',
+      locale: 'en',
       scopes: [{ regionCode: null, territoryCode: 'MEL' }],
     });
 
@@ -139,6 +146,7 @@ describe('IdentityService.getMe paths', () => {
           name: 'Solo',
           role: 'SENDER',
           status: 'ACTIVE',
+          locale: 'pa',
           company: null,
         }),
       },

@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import nodemailer from 'nodemailer';
 import type { Transporter } from 'nodemailer';
 import type { AppEnv } from '../../config/env.validation';
+import { tNotify } from '../../i18n/notify.util';
 import {
   accountTypeLabel,
   EMAIL_BRAND,
@@ -177,22 +178,25 @@ export class NotificationsService {
     ttlMinutes: number;
     /** Platform or admin role for account-type line. */
     accountType?: string;
+    locale?: string | null;
   }) {
+    const locale = params.locale;
     const typeLabel = params.accountType
       ? accountTypeLabel(params.accountType)
       : undefined;
-    const subject = 'CLOX sign-in code';
+    const subject = tNotify(locale, 'otp.subject');
+    const accountTypeLabelText = tNotify(locale, 'otp.accountType');
     const text = [
-      'Your CLOX sign-in code',
+      tNotify(locale, 'otp.title'),
       '',
       `Code: ${params.code}`,
       `Expires in ${params.ttlMinutes} minutes.`,
-      typeLabel ? `Account type: ${typeLabel}` : undefined,
+      typeLabel ? `${accountTypeLabelText}: ${typeLabel}` : undefined,
       `Email: ${params.to}`,
       '',
       `Sign in: ${this.loginCta().href}`,
       '',
-      'If you did not request this code, you can ignore this email.',
+      tNotify(locale, 'otp.ignore'),
     ]
       .filter((line) => line !== undefined)
       .join('\n');
@@ -201,12 +205,12 @@ export class NotificationsService {
       to: params.to,
       subject,
       text,
-      eyebrow: 'Sign-in code',
-      title: 'Your CLOX login code',
-      intro: `Use this one-time code to sign in. It expires in ${params.ttlMinutes} minutes.`,
+      eyebrow: tNotify(locale, 'otp.eyebrow'),
+      title: tNotify(locale, 'otp.title'),
+      intro: tNotify(locale, 'otp.intro', { ttlMinutes: params.ttlMinutes }),
       details: [
         { label: 'Code', value: params.code },
-        ...(typeLabel ? [{ label: 'Account type', value: typeLabel }] : []),
+        ...(typeLabel ? [{ label: accountTypeLabelText, value: typeLabel }] : []),
         { label: 'Email', value: params.to },
         { label: 'Expires', value: `${params.ttlMinutes} minutes` },
       ],
@@ -219,6 +223,7 @@ export class NotificationsService {
     leadId: string;
     email: string;
     companyName?: string | null;
+    locale?: string | null;
   }) {
     const investNotify = this.config.get('INVEST_NOTIFY_EMAIL', { infer: true });
     const submitter = params.email.trim().toLowerCase();
@@ -229,16 +234,18 @@ export class NotificationsService {
         ? investNotify
         : undefined;
 
+    const locale = params.locale;
     const typeLabel = accountTypeLabel(params.type);
-    const subject = `CLOX — we received your ${typeLabel} submission`;
+    const accountTypeLabelText = tNotify(locale, 'lead.welcome.accountType');
+    const subject = tNotify(locale, 'lead.welcome.subject', { type: typeLabel });
     const text = [
-      'Thanks — we received your CLOX submission.',
-      `Account type: ${typeLabel}`,
+      tNotify(locale, 'lead.welcome.thanks'),
+      `${accountTypeLabelText}: ${typeLabel}`,
       `Reference: ${params.leadId}`,
       `Email: ${params.email}`,
       params.companyName ? `Company / Name: ${params.companyName}` : undefined,
       '',
-      'Our team will review your details and follow up if needed.',
+      tNotify(locale, 'lead.welcome.nextReview'),
       this.publicSiteUrl() ? `Explore CLOX: ${this.publicSiteUrl()}` : undefined,
     ]
       .filter((line) => line !== undefined)
@@ -249,12 +256,11 @@ export class NotificationsService {
       cc,
       subject,
       text,
-      eyebrow: 'Submission received',
-      title: 'Welcome to CLOX!',
-      intro:
-        'Thank you for getting in touch. Your details have been received and our team will review them.',
+      eyebrow: tNotify(locale, 'lead.welcome.eyebrow'),
+      title: tNotify(locale, 'lead.welcome.title'),
+      intro: tNotify(locale, 'lead.welcome.body'),
       details: [
-        { label: 'Account type', value: typeLabel },
+        { label: accountTypeLabelText, value: typeLabel },
         { label: 'Reference', value: params.leadId },
         ...(params.companyName
           ? [{ label: 'Company / Name', value: params.companyName }]
@@ -264,7 +270,7 @@ export class NotificationsService {
       nextSteps: [
         {
           title: 'Team review',
-          body: 'Our team will review your details and get back to you shortly.',
+          body: tNotify(locale, 'lead.welcome.nextReview'),
         },
         {
           title: 'Be ready',
@@ -1492,6 +1498,8 @@ export class NotificationsService {
     driverName: string;
     exceptionId: string;
     note: string | null;
+    /** Recipient email → locale (UGC note stays verbatim). */
+    localeByEmail?: Record<string, string | null | undefined>;
   }) {
     const details: EmailDetailRow[] = [
       { label: 'Job', value: params.jobTitle || params.jobId.slice(0, 8) },
@@ -1508,18 +1516,33 @@ export class NotificationsService {
     const results = [];
     for (const to of targets) {
       const isSender = to === params.senderEmail;
+      const locale = params.localeByEmail?.[to.toLowerCase()] ?? null;
+      const subject = tNotify(
+        locale,
+        isSender
+          ? 'exception.replacementProposed.email.sender.subject'
+          : 'exception.replacementProposed.email.carrier.subject',
+      );
+      const title = tNotify(
+        locale,
+        isSender
+          ? 'exception.replacementProposed.email.sender.title'
+          : 'exception.replacementProposed.email.carrier.title',
+      );
+      const intro = tNotify(
+        locale,
+        isSender
+          ? 'exception.replacementProposed.email.sender.intro'
+          : 'exception.replacementProposed.email.carrier.intro',
+      );
       results.push(
         await this.sendBranded({
           to,
-          subject: isSender
-            ? 'CLOX — approve replacement crew for your job'
-            : 'CLOX — replacement proposed (awaiting sender)',
+          subject,
           text: `Job ${params.jobTitle || params.jobId}: proposed ${params.driverName} / ${params.vehicleLabel}. Sender must approve.`,
           eyebrow: 'Exception',
-          title: isSender ? 'Approve replacement?' : 'Replacement proposed',
-          intro: isSender
-            ? 'Your carrier proposed a replacement vehicle/driver. Open CLOX to Approve (continue) or Reject (cancel + refund).'
-            : 'Replacement crew proposed. Waiting for the sender to Approve or Reject.',
+          title,
+          intro,
           details,
           cta: {
             label: 'Open CLOX →',
