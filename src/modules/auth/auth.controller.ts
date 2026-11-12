@@ -37,6 +37,7 @@ export class AuthController {
 
   @Post('otp/request')
   @UseGuards(ThrottlerGuard)
+  @ApiTags('auth', 'driver-app')
   @ApiOperation({ summary: 'Request OTP (any of 6 roles — email or phone)' })
   @ApiBody({
     description: 'Provide email and/or phone (at least one required).',
@@ -74,6 +75,7 @@ export class AuthController {
 
   @Post('otp/verify')
   @UseGuards(ThrottlerGuard)
+  @ApiTags('auth', 'driver-app')
   @ApiOperation({ summary: 'Verify OTP and receive JWT + session' })
   @ApiBody({
     description: 'Same email/phone used for request, plus the OTP code.',
@@ -109,6 +111,7 @@ export class AuthController {
 
   @Post('refresh')
   @UseGuards(ThrottlerGuard)
+  @ApiTags('auth', 'driver-app')
   @ApiOperation({ summary: 'Rotate refresh token' })
   @ApiBody({
     schema: {
@@ -127,6 +130,7 @@ export class AuthController {
   @Post('logout')
   @ApiBearerAuth()
   @UseGuards(JwtAuthGuard)
+  @ApiTags('auth', 'driver-app')
   @ApiOperation({ summary: 'Revoke current (or all) sessions' })
   logout(
     @CurrentPrincipal() principal: AuthenticatedPrincipal,
@@ -138,6 +142,7 @@ export class AuthController {
   @Get('sessions')
   @ApiBearerAuth()
   @UseGuards(JwtAuthGuard)
+  @ApiTags('auth', 'driver-app')
   @ApiOperation({ summary: 'List active sessions (SHR-PROF-01)' })
   listSessions(@CurrentPrincipal() principal: AuthenticatedPrincipal) {
     return this.authService.listSessions(principal);
@@ -146,6 +151,7 @@ export class AuthController {
   @Delete('sessions/:id')
   @ApiBearerAuth()
   @UseGuards(JwtAuthGuard)
+  @ApiTags('auth', 'driver-app')
   @ApiOperation({ summary: 'Revoke a session by id' })
   revokeSession(
     @CurrentPrincipal() principal: AuthenticatedPrincipal,

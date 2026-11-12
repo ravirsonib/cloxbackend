@@ -53,6 +53,7 @@ export class TripsController {
   @ApiBearerAuth()
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(AppRole.DRIVER)
+  @ApiTags('trips', 'driver-app')
   @ApiOperation({ summary: 'Driver today / assigned trips' })
   mine(@CurrentPrincipal() principal: AuthenticatedPrincipal) {
     return this.trips.listDriverTrips(principal);
@@ -74,6 +75,7 @@ export class TripsController {
   @ApiBearerAuth()
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(AppRole.DRIVER, AppRole.TRANSPORT_COMPANY)
+  @ApiTags('trips', 'driver-app')
   @ApiOperation({ summary: 'Start by jobId (driver only succeeds)' })
   startByJob(
     @CurrentPrincipal() principal: AuthenticatedPrincipal,
@@ -87,6 +89,7 @@ export class TripsController {
   @ApiBearerAuth()
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(AppRole.DRIVER, AppRole.SENDER, AppRole.TRANSPORT_COMPANY)
+  @ApiTags('trips', 'driver-app')
   @ApiOperation({ summary: 'M10 — POD status + document keys (scoped)' })
   getPod(
     @CurrentPrincipal() principal: AuthenticatedPrincipal,
@@ -99,6 +102,7 @@ export class TripsController {
   @ApiBearerAuth()
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(AppRole.DRIVER, AppRole.SENDER, AppRole.TRANSPORT_COMPANY)
+  @ApiTags('trips', 'driver-app')
   @ApiOperation({
     summary: 'M10 — download stop POD package / signature PDF (party ACL)',
   })
@@ -127,6 +131,7 @@ export class TripsController {
   @ApiBearerAuth()
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(AppRole.DRIVER, AppRole.SENDER, AppRole.TRANSPORT_COMPANY)
+  @ApiTags('trips', 'driver-app')
   @ApiOperation({
     summary: 'M10 — download trip POD / tax invoice / run sheet PDF (party ACL)',
   })
@@ -149,6 +154,7 @@ export class TripsController {
   @ApiBearerAuth()
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(AppRole.DRIVER)
+  @ApiTags('trips', 'driver-app')
   @ApiOperation({ summary: 'Driver trip detail + site access preview' })
   get(
     @CurrentPrincipal() principal: AuthenticatedPrincipal,
@@ -161,6 +167,7 @@ export class TripsController {
   @ApiBearerAuth()
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(AppRole.DRIVER)
+  @ApiTags('trips', 'driver-app')
   @ApiOperation({ summary: 'Pre-trip safety checklist (fail locks vehicle)' })
   safety(
     @CurrentPrincipal() principal: AuthenticatedPrincipal,
@@ -174,6 +181,7 @@ export class TripsController {
   @ApiBearerAuth()
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(AppRole.DRIVER)
+  @ApiTags('trips', 'driver-app')
   @ApiOperation({ summary: 'Mass check — over declared blocks start (M9 surcharge)' })
   mass(
     @CurrentPrincipal() principal: AuthenticatedPrincipal,
@@ -187,6 +195,7 @@ export class TripsController {
   @ApiBearerAuth()
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(AppRole.DRIVER)
+  @ApiTags('trips', 'driver-app')
   @ApiOperation({ summary: 'Start trip — paid + safety + mass; online-only' })
   start(
     @CurrentPrincipal() principal: AuthenticatedPrincipal,
@@ -200,6 +209,7 @@ export class TripsController {
   @ApiBearerAuth()
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(AppRole.DRIVER)
+  @ApiTags('trips', 'driver-app')
   @ApiOperation({ summary: 'Taking break — pauses sender ETA/telemetry' })
   breakToggle(
     @CurrentPrincipal() principal: AuthenticatedPrincipal,
@@ -213,6 +223,7 @@ export class TripsController {
   @ApiBearerAuth()
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(AppRole.DRIVER)
+  @ApiTags('trips', 'driver-app')
   @ApiOperation({ summary: 'Post location sample (after start)' })
   location(
     @CurrentPrincipal() principal: AuthenticatedPrincipal,
@@ -226,6 +237,7 @@ export class TripsController {
   @ApiBearerAuth()
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(AppRole.DRIVER)
+  @ApiTags('trips', 'driver-app')
   @ApiOperation({ summary: 'M10 — driver early notify (sender + receiver email)' })
   notifyApproaching(
     @CurrentPrincipal() principal: AuthenticatedPrincipal,
@@ -239,6 +251,7 @@ export class TripsController {
   @ApiBearerAuth()
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(AppRole.DRIVER)
+  @ApiTags('trips', 'driver-app')
   @ApiOperation({ summary: 'M10 — download POD signature image for preview' })
   async podSignatureArtifact(
     @CurrentPrincipal() principal: AuthenticatedPrincipal,
@@ -256,6 +269,7 @@ export class TripsController {
   @ApiBearerAuth()
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(AppRole.DRIVER)
+  @ApiTags('trips', 'driver-app')
   @ApiOperation({ summary: 'M10 — download POD goods photo for preview' })
   async podPhotoArtifact(
     @CurrentPrincipal() principal: AuthenticatedPrincipal,
@@ -274,6 +288,7 @@ export class TripsController {
   @ApiBearerAuth()
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(AppRole.DRIVER)
+  @ApiTags('trips', 'driver-app')
   @ApiOperation({ summary: 'M10 — receiver signs on driver SOG' })
   podSignature(
     @CurrentPrincipal() principal: AuthenticatedPrincipal,
@@ -287,6 +302,7 @@ export class TripsController {
   @ApiBearerAuth()
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(AppRole.DRIVER)
+  @ApiTags('trips', 'driver-app')
   @ApiOperation({ summary: 'M10 — attach goods photo for POD' })
   podPhoto(
     @CurrentPrincipal() principal: AuthenticatedPrincipal,
@@ -300,6 +316,7 @@ export class TripsController {
   @ApiBearerAuth()
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(AppRole.DRIVER)
+  @ApiTags('trips', 'driver-app')
   @ApiOperation({ summary: 'M10 — finalize POD after SOG signature + photos' })
   podFinalize(
     @CurrentPrincipal() principal: AuthenticatedPrincipal,

@@ -32,6 +32,7 @@ export class ExceptionsController {
   @ApiBearerAuth()
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(AppRole.DRIVER)
+  @ApiTags('exceptions', 'driver-app')
   @ApiOperation({ summary: 'Driver opens sick-call / breakdown exception on a trip' })
   open(
     @CurrentPrincipal() principal: AuthenticatedPrincipal,
@@ -82,6 +83,7 @@ export class ExceptionsController {
     AdminRole.SUPER_ADMIN,
     AdminRole.STATE_MASTER,
   )
+  @ApiTags('exceptions', 'driver-app')
   @ApiOperation({ summary: 'Exception detail' })
   get(
     @CurrentPrincipal() principal: AuthenticatedPrincipal,

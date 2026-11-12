@@ -19,11 +19,14 @@ const configGet = jest.fn((key: string) => {
   return map[key];
 });
 
+const useBodyParser = jest.fn();
+
 const mockApp = {
   get: jest
     .fn()
     .mockReturnValueOnce({ get: configGet })
     .mockReturnValueOnce({ log }),
+  useBodyParser,
   useLogger,
   setGlobalPrefix,
   useGlobalPipes,

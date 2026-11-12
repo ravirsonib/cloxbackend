@@ -22,7 +22,7 @@ import { RolesGuard } from '../../common/guards/roles.guard';
 import { ZodValidationPipe } from '../../common/pipes/zod-validation.pipe';
 import { DriverScheduleService } from './driver-schedule.service';
 
-@ApiTags('driver-schedule')
+@ApiTags('driver-schedule', 'driver-app')
 @Controller('driver/schedule')
 @ApiBearerAuth()
 @UseGuards(JwtAuthGuard, RolesGuard)

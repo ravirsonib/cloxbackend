@@ -42,6 +42,7 @@ export class DocumentsController {
   }
 
   @Get()
+  @ApiTags('documents', 'driver-app')
   @ApiOperation({
     summary: 'List uploaded documents for a company (drivers: own docs; carrier: driver docs)',
   })
@@ -53,6 +54,7 @@ export class DocumentsController {
   }
 
   @Post('upload-intent')
+  @ApiTags('documents', 'driver-app')
   @ApiOperation({ summary: 'Create upload intent (mime/size validated; no malware scan)' })
   createIntent(
     @CurrentPrincipal() principal: AuthenticatedPrincipal,
@@ -76,6 +78,7 @@ export class DocumentsController {
       required: ['file'],
     },
   })
+  @ApiTags('documents', 'driver-app')
   @ApiOperation({ summary: 'Upload document bytes (multipart field "file")' })
   putContent(
     @CurrentPrincipal() principal: AuthenticatedPrincipal,
@@ -87,6 +90,7 @@ export class DocumentsController {
   }
 
   @Post(':id/confirm')
+  @ApiTags('documents', 'driver-app')
   @ApiOperation({ summary: 'Confirm uploaded document content hash' })
   confirm(
     @CurrentPrincipal() principal: AuthenticatedPrincipal,
@@ -97,6 +101,7 @@ export class DocumentsController {
   }
 
   @Get(':id/content')
+  @ApiTags('documents', 'driver-app')
   @ApiOperation({ summary: 'Download/view document bytes (Ops visual review)' })
   async getContent(
     @CurrentPrincipal() principal: AuthenticatedPrincipal,
@@ -112,6 +117,7 @@ export class DocumentsController {
   }
 
   @Get(':id')
+  @ApiTags('documents', 'driver-app')
   @ApiOperation({ summary: 'Document metadata (no binary)' })
   getOne(
     @CurrentPrincipal() principal: AuthenticatedPrincipal,

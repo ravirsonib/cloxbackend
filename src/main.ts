@@ -56,6 +56,10 @@ async function bootstrap() {
         )
         .setVersion('0.2.0')
         .addBearerAuth()
+        .addTag(
+          'driver-app',
+          'APIs consumed by the DRIVER mobile app (role + shared auth/identity/docs)',
+        )
         .addTag('health')
         .addTag('leads')
         .addTag('auth')
@@ -63,6 +67,8 @@ async function bootstrap() {
         .addTag('identity')
         .addTag('compliance')
         .addTag('documents')
+        .addTag('driver')
+        .addTag('driver-schedule')
         .addTag('jobs')
         .addTag('matching')
         .addTag('trips')
@@ -70,6 +76,7 @@ async function bootstrap() {
         .addTag('settlements')
         .addTag('geolocation')
         .addTag('notifications')
+        .addTag('exceptions')
         .addTag('ops')
         .addTag('audit')
         .addTag('sender')

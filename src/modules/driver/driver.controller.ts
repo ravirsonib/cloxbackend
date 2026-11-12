@@ -15,7 +15,7 @@ import { RolesGuard } from '../../common/guards/roles.guard';
 import { ZodValidationPipe } from '../../common/pipes/zod-validation.pipe';
 import { DriverService } from './driver.service';
 
-@ApiTags('driver')
+@ApiTags('driver', 'driver-app')
 @Controller('driver')
 export class DriverController {
   constructor(private readonly driverService: DriverService) {}

@@ -23,6 +23,7 @@ export class IdentityController {
   @Get('me')
   @ApiBearerAuth()
   @UseGuards(JwtAuthGuard)
+  @ApiTags('identity', 'driver-app')
   @ApiOperation({ summary: 'Current principal profile (SHR-PROF-01)' })
   me(@CurrentPrincipal() principal: AuthenticatedPrincipal) {
     return this.identityService.getMe(principal);
@@ -31,6 +32,7 @@ export class IdentityController {
   @Patch('me/locale')
   @ApiBearerAuth()
   @UseGuards(JwtAuthGuard)
+  @ApiTags('identity', 'driver-app')
   @ApiOperation({ summary: 'Update preferred UI / notification locale' })
   updateLocale(
     @CurrentPrincipal() principal: AuthenticatedPrincipal,

@@ -15,7 +15,7 @@ import { RolesGuard } from '../../common/guards/roles.guard';
 import { AppRole } from '../../shared/types';
 import { InAppNotificationsService } from './in-app-notifications.service';
 
-@ApiTags('notifications')
+@ApiTags('notifications', 'driver-app')
 @ApiBearerAuth()
 @Controller('notifications')
 export class NotificationsController {
