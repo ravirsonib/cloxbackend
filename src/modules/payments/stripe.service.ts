@@ -247,21 +247,35 @@ export class StripeService {
   }
 
   /**
-   * Model A fare charge on platform (separate charges + transfers later for payout).
-   * Mock always returns succeeded. Real mode confirms off-session when PM provided.
+   * Model A fare / surcharge charge on platform (Connect transfer later for payout).
+   * - `confirmOffSession: true` (default): silent charge when PM provided (surcharges).
+   * - `confirmOffSession: false`: unconfirmed PI for client Payment Element
+   *   (accept & pay — show saved/default card or collect a new one).
+   * Mock: off-session path returns succeeded; on-session returns requires_payment_method.
    */
   async createPaymentIntent(params: {
     amountCents: number;
     currency?: string;
     customerId: string;
     paymentMethodId?: string | null;
+    /** When false, never confirm server-side — caller completes via Stripe.js. Default true. */
+    confirmOffSession?: boolean;
     idempotencyKey: string;
     metadata: Record<string, string>;
   }) {
     const currency = params.currency ?? 'aud';
+    const confirmOffSession = params.confirmOffSession !== false;
     if (this.isMockMode()) {
       const id = `pi_mock_${params.idempotencyKey.replace(/[^a-z0-9]/gi, '').slice(-20)}_${Date.now()}`;
       this.logger.warn(`STRIPE_MOCK: PaymentIntent ${id} amount=${params.amountCents}`);
+      if (!confirmOffSession) {
+        return {
+          id,
+          clientSecret: `${id}_secret_mock`,
+          status: 'requires_payment_method' as const,
+          mock: true as const,
+        };
+      }
       return {
         id,
         clientSecret: `${id}_secret_mock`,
@@ -278,11 +292,12 @@ export class StripeService {
       metadata: params.metadata,
       automatic_payment_methods: { enabled: true, allow_redirects: 'never' },
     };
-    if (params.paymentMethodId) {
+    if (confirmOffSession && params.paymentMethodId) {
       createParams.payment_method = params.paymentMethodId;
       createParams.confirm = true;
       createParams.off_session = true;
     } else {
+      // On-session accept (or no PM): Payment Element shows customer's saved cards + new card.
       createParams.setup_future_usage = 'off_session';
     }
 

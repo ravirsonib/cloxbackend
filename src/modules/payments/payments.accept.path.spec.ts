@@ -241,7 +241,7 @@ describe('PaymentsService acceptProposal + webhook paths', () => {
       }
     });
 
-    it('happy path: creates PI succeeded and locks via markPaidAndLock', async () => {
+    it('happy path: creates on-session PI so sender must confirm in payment UI', async () => {
       const assignment = {
         id: 'asg-1',
         status: AssignmentStatus.PENDING,
@@ -264,23 +264,14 @@ describe('PaymentsService acceptProposal + webhook paths', () => {
       const peAfterPi = {
         ...pePending,
         stripePaymentIntentId: 'pi_ok',
-        status: PaymentEventStatus.SUCCEEDED,
-      };
-      const peForLock = {
-        ...peAfterPi,
-        metadata: pePending.metadata,
-      };
-      const lockedAssignment = {
-        id: 'asg-1',
-        status: AssignmentStatus.LOCKED,
-        lockedAt: new Date('2026-01-01T12:00:00Z'),
+        status: PaymentEventStatus.PENDING,
       };
 
       stripe.createPaymentIntent.mockResolvedValue({
         id: 'pi_ok',
-        status: 'succeeded',
+        status: 'requires_payment_method',
         clientSecret: 'cs_ok',
-        mock: true,
+        mock: false,
       });
 
       const prisma = {
@@ -298,12 +289,7 @@ describe('PaymentsService acceptProposal + webhook paths', () => {
           }),
         },
         paymentEvent: {
-          findUnique: jest
-            .fn()
-            // accept: no existing
-            .mockResolvedValueOnce(null)
-            // markPaidAndLock lookup
-            .mockResolvedValueOnce(peForLock),
+          findUnique: jest.fn().mockResolvedValue(null),
           update: jest.fn().mockResolvedValue(peAfterPi),
         },
         job: {
@@ -327,11 +313,10 @@ describe('PaymentsService acceptProposal + webhook paths', () => {
           update: jest.fn(),
         },
         assignment: {
-          findUnique: jest.fn().mockResolvedValue(lockedAssignment),
+          findUnique: jest.fn().mockResolvedValue(assignment),
         },
         $transaction: jest.fn().mockImplementation(async (fn: (tx: unknown) => unknown) => {
           if (typeof fn !== 'function') {
-            // markPaidAndLock may pass array — not used here
             return fn;
           }
           const tx = {
@@ -362,15 +347,22 @@ describe('PaymentsService acceptProposal + webhook paths', () => {
       const service = makeService(prisma);
       const result = await service.acceptProposal(senderPrincipal, 'job-1', 'prop-1');
 
-      expect(stripe.createPaymentIntent).toHaveBeenCalled();
-      expect(trips.ensureTripForAssignment).toHaveBeenCalledWith('asg-1');
+      expect(stripe.createPaymentIntent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          confirmOffSession: false,
+          paymentMethodId: null,
+          customerId: 'cus_1',
+        }),
+      );
+      expect(trips.ensureTripForAssignment).not.toHaveBeenCalled();
       expect(result).toMatchObject({
         paymentEventId: 'pe-1',
-        paidAndConfirmed: true,
-        assignmentStatus: AssignmentStatus.LOCKED,
-        stripeStatus: 'succeeded',
-        mock: true,
+        paidAndConfirmed: false,
+        assignmentStatus: AssignmentStatus.PENDING,
+        stripeStatus: 'requires_payment_method',
+        mock: false,
         clientSecret: 'cs_ok',
+        publishableKey: 'pk_test',
       });
     });
   });

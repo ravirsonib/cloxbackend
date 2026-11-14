@@ -94,8 +94,9 @@ export class PaymentsService {
   }
 
   /**
-   * Model A accept: create Assignment PENDING + PaymentIntent once (idempotent).
-   * Mock path auto-locks on success. Real path awaits webhook unless PI already succeeded.
+   * Model A accept: create Assignment PENDING + on-session PaymentIntent (idempotent).
+   * Sender always confirms in UI (saved/default card or new card); lock after confirm/webhook.
+   * Marketplace rescue re-accept may reuse a prior succeeded charge (no new PI).
    */
   async acceptProposal(
     principal: AuthenticatedPrincipal,
@@ -121,10 +122,6 @@ export class PaymentsService {
       isLive && isMockStripeCustomerId(user.company.stripeCustomerId)
         ? null
         : user.company.stripeCustomerId;
-    const defaultPaymentMethodId =
-      isLive && isMockStripePaymentMethodId(user.company.stripeDefaultPaymentMethodId)
-        ? null
-        : user.company.stripeDefaultPaymentMethodId;
 
     if (!stripeCustomerId) {
       const customer = await this.stripe.createCustomer({
@@ -381,10 +378,13 @@ export class PaymentsService {
 
     let pi;
     try {
+      // Always collect confirmation in the sender UI (saved/default card or new card).
+      // Do not silent off-session charge on accept — even when a default PM exists.
       pi = await this.stripe.createPaymentIntent({
         amountCents: amountInc,
         customerId: stripeCustomerId,
-        paymentMethodId: defaultPaymentMethodId,
+        paymentMethodId: null,
+        confirmOffSession: false,
         // PE-scoped key so retries after unwind never hit a stale Stripe idempotency cache.
         idempotencyKey: `${key}:pe:${created.paymentEvent.id}`,
         metadata: {
