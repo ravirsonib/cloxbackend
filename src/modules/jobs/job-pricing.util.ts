@@ -17,7 +17,18 @@ export {
   isChargeableOverLimit,
 } from '../../shared/job-cargo.limits';
 
-export interface VehicleClassSpec {
+export interface VehicleClassRateFields {
+  perKmRateCents?: number | null;
+  hourlyRateCents?: number | null;
+  perKmMinBaseCents?: number | null;
+  hourlyMinBaseCents?: number | null;
+  perKmGuidanceMinCents?: number | null;
+  perKmGuidanceMaxCents?: number | null;
+  hourlyGuidanceMinCents?: number | null;
+  hourlyGuidanceMaxCents?: number | null;
+}
+
+export interface VehicleClassSpec extends VehicleClassRateFields {
   code: string;
   name?: string;
   rank: number;
@@ -31,6 +42,7 @@ export interface VehicleClassSpec {
   isActive?: boolean;
 }
 
+/** Seed midpoints from docs/product/vehicle-type-average-pricing.md (AUD ex-GST → cents). */
 export const DEFAULT_VEHICLE_CLASSES: VehicleClassSpec[] = [
   {
     code: 'UTE',
@@ -44,6 +56,14 @@ export const DEFAULT_VEHICLE_CLASSES: VehicleClassSpec[] = [
     suggestedGvmKg: 3500,
     suggestedTareKg: 2000,
     isActive: true,
+    perKmRateCents: 250,
+    hourlyRateCents: 8500,
+    perKmMinBaseCents: 5000,
+    hourlyMinBaseCents: 34000,
+    perKmGuidanceMinCents: 200,
+    perKmGuidanceMaxCents: 300,
+    hourlyGuidanceMinCents: 7000,
+    hourlyGuidanceMaxCents: 10000,
   },
   {
     code: 'VAN',
@@ -57,6 +77,14 @@ export const DEFAULT_VEHICLE_CLASSES: VehicleClassSpec[] = [
     suggestedGvmKg: 4500,
     suggestedTareKg: 2500,
     isActive: true,
+    perKmRateCents: 300,
+    hourlyRateCents: 10500,
+    perKmMinBaseCents: 6000,
+    hourlyMinBaseCents: 42000,
+    perKmGuidanceMinCents: 250,
+    perKmGuidanceMaxCents: 350,
+    hourlyGuidanceMinCents: 8500,
+    hourlyGuidanceMaxCents: 12000,
   },
   {
     code: 'RIGID_1_2T',
@@ -70,6 +98,14 @@ export const DEFAULT_VEHICLE_CLASSES: VehicleClassSpec[] = [
     suggestedGvmKg: 8000,
     suggestedTareKg: 3500,
     isActive: true,
+    perKmRateCents: 415,
+    hourlyRateCents: 13000,
+    perKmMinBaseCents: 8000,
+    hourlyMinBaseCents: 52000,
+    perKmGuidanceMinCents: 350,
+    perKmGuidanceMaxCents: 480,
+    hourlyGuidanceMinCents: 11000,
+    hourlyGuidanceMaxCents: 15000,
   },
   {
     code: 'RIGID_3_4T',
@@ -83,6 +119,14 @@ export const DEFAULT_VEHICLE_CLASSES: VehicleClassSpec[] = [
     suggestedGvmKg: 15000,
     suggestedTareKg: 7000,
     isActive: true,
+    perKmRateCents: 500,
+    hourlyRateCents: 15500,
+    perKmMinBaseCents: 10000,
+    hourlyMinBaseCents: 62000,
+    perKmGuidanceMinCents: 400,
+    perKmGuidanceMaxCents: 550,
+    hourlyGuidanceMinCents: 12000,
+    hourlyGuidanceMaxCents: 17000,
   },
   {
     code: 'SEMI',
@@ -96,6 +140,14 @@ export const DEFAULT_VEHICLE_CLASSES: VehicleClassSpec[] = [
     suggestedGvmKg: 42500,
     suggestedTareKg: 15000,
     isActive: true,
+    perKmRateCents: 775,
+    hourlyRateCents: 22000,
+    perKmMinBaseCents: 15000,
+    hourlyMinBaseCents: 88000,
+    perKmGuidanceMinCents: 650,
+    perKmGuidanceMaxCents: 900,
+    hourlyGuidanceMinCents: 18000,
+    hourlyGuidanceMaxCents: 26000,
   },
   {
     code: 'BDOUBLE',
@@ -109,6 +161,14 @@ export const DEFAULT_VEHICLE_CLASSES: VehicleClassSpec[] = [
     suggestedGvmKg: 62500,
     suggestedTareKg: 20000,
     isActive: true,
+    perKmRateCents: 900,
+    hourlyRateCents: 28000,
+    perKmMinBaseCents: 20000,
+    hourlyMinBaseCents: 112000,
+    perKmGuidanceMinCents: 750,
+    perKmGuidanceMaxCents: 1100,
+    hourlyGuidanceMinCents: 22000,
+    hourlyGuidanceMaxCents: 32000,
   },
 ];
 

@@ -260,16 +260,23 @@ export class MatchingService {
         code: 'VEHICLE_NOT_ACTIVE',
       });
     }
+    if (!vehicle.vehicleClass) {
+      throw new BadRequestException({
+        message: 'Vehicle class required for bidding',
+        code: 'VEHICLE_CLASS_REQUIRED',
+      });
+    }
+    const vehicleClass = vehicle.vehicleClass;
     if (
       !isVehicleAdequateForJob(
-        vehicle.vehicleClass,
+        vehicleClass,
         job.minVehicleClass,
         job.chargeableWeightKg,
         vehicleClasses,
       )
     ) {
       throw new BadRequestException({
-        message: `Vehicle class ${vehicle.vehicleClass} undersized for min ${job.minVehicleClass}`,
+        message: `Vehicle class ${vehicleClass} undersized for min ${job.minVehicleClass}`,
         code: 'VEHICLE_CLASS_UNDERSIZE',
       });
     }
@@ -376,11 +383,16 @@ export class MatchingService {
       });
     }
 
-    const policyMin = await this.jobsService.getMinBaseCents(
-      job.pricingModel === 'HOURLY' ? 'HOURLY' : 'PER_KM',
-    );
+    const pricingModel = job.pricingModel === 'HOURLY' ? 'HOURLY' : 'PER_KM';
+    const globalFloor = await this.jobsService.getMinBaseCents(pricingModel);
+    const classQuote = await this.jobsService.quoteForVehicleClass({
+      pricingModel,
+      vehicleClass,
+      distanceKm: job.routeDistanceKm ?? 0,
+      billableHours: job.billableHours,
+    });
+    let minBase = Math.max(globalFloor, classQuote.estimateIncGstCents);
     const discount = job.rescueDiscountPercent ?? 0;
-    let minBase = policyMin;
     if (discount > 0 && job.estimateIncGstCents != null) {
       // Rescue listing: carrier may bid down to discounted sender estimate.
       minBase = Math.round((job.estimateIncGstCents * (100 - discount)) / 100);

@@ -108,6 +108,15 @@ export class SenderController {
     return this.senderService.submitVerification(principal, body);
   }
 
+  @Get('payment/method')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(AppRole.SENDER)
+  @ApiOperation({ summary: 'Saved default card summary (brand / last4; no PAN)' })
+  paymentMethod(@CurrentPrincipal() principal: AuthenticatedPrincipal) {
+    return this.senderService.getPaymentMethod(principal);
+  }
+
   @Post('payment/setup')
   @ApiBearerAuth()
   @UseGuards(JwtAuthGuard, RolesGuard)

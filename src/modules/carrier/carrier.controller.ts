@@ -154,6 +154,18 @@ export class CarrierController {
     return this.carrierService.listVehicles(principal);
   }
 
+  @Get('vehicles/:id')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(AppRole.TRANSPORT_COMPANY)
+  @ApiOperation({ summary: 'Get one fleet vehicle with compliance summary' })
+  getVehicle(
+    @CurrentPrincipal() principal: AuthenticatedPrincipal,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.carrierService.getVehicle(principal, id);
+  }
+
   @Post('vehicles')
   @ApiBearerAuth()
   @UseGuards(JwtAuthGuard, RolesGuard)
@@ -164,6 +176,22 @@ export class CarrierController {
     @Body(new ZodValidationPipe(carrierVehicleSchema)) body: CarrierVehicleInput,
   ) {
     return this.carrierService.addVehicle(principal, body);
+  }
+
+  @Patch('vehicles/:id')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(AppRole.TRANSPORT_COMPANY)
+  @ApiOperation({
+    summary:
+      'Update fleet vehicle fields (capacity changes blocked while on an active trip)',
+  })
+  updateVehicle(
+    @CurrentPrincipal() principal: AuthenticatedPrincipal,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body(new ZodValidationPipe(carrierVehicleSchema)) body: CarrierVehicleInput,
+  ) {
+    return this.carrierService.updateVehicle(principal, id, body);
   }
 
   @Post('vehicles/:id/disable')

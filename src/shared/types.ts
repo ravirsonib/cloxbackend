@@ -146,6 +146,7 @@ export const AuditAction = {
   CARRIER_CONNECT_SETUP: 'carrier.connect_setup',
   CARRIER_CONNECT_READY: 'carrier.connect_ready',
   CARRIER_VEHICLE_ADDED: 'carrier.vehicle_added',
+  CARRIER_VEHICLE_UPDATED: 'carrier.vehicle_updated',
   CARRIER_VEHICLE_DISABLED: 'carrier.vehicle_disabled',
   CARRIER_VEHICLE_RETIRED: 'carrier.vehicle_retired',
   CARRIER_VEHICLE_REACTIVATED: 'carrier.vehicle_reactivated',
@@ -713,6 +714,7 @@ export type FinanceQuery = z.infer<typeof financeQuerySchema>;
 export const adminCompanyListQuerySchema = z.object({
   page: z.coerce.number().int().positive().default(1),
   pageSize: z.coerce.number().int().min(1).max(100).default(20),
+  /** Marketplace customer kind; omit → service defaults to CARRIER. */
   type: companyTypeSchema.optional(),
   status: companyStatusSchema.optional(),
   regionCode: z.string().trim().max(16).optional(),
@@ -1139,6 +1141,7 @@ export const carrierVehicleSchema = z
     tareKg: z.number().int().positive().max(100_000).optional(),
     /** Gross Vehicle Mass (kg) — required from compliance plate. */
     gvmKg: z.number().int().positive().max(200_000),
+    /** Gross Combination Mass (kg) — optional; must be ≥ GVM when set. */
     gcmKg: z.number().int().positive().max(300_000).optional(),
   })
   .superRefine((value, ctx) => {
@@ -1147,6 +1150,13 @@ export const carrierVehicleSchema = z
         code: z.ZodIssueCode.custom,
         path: ['tareKg'],
         message: 'Tare must be less than GVM',
+      });
+    }
+    if (value.gcmKg != null && value.gcmKg < value.gvmKg) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['gcmKg'],
+        message: 'GCM must be greater than or equal to GVM',
       });
     }
   });
@@ -1522,6 +1532,43 @@ export const CLOX_LOAD_TYPE_CODES = [
 ] as const;
 export type CloxLoadTypeCode = (typeof CLOX_LOAD_TYPE_CODES)[number];
 
+/** Sub-menu codes: PARENT:SUBTYPE (catalog may grow without API enum churn). */
+const LOAD_TYPE_SUBTYPE_RE = /^[A-Z][A-Z0-9_]*:[A-Z][A-Z0-9_]*$/;
+
+function refineJobLoadTypes(
+  val: { loadTypes: string[]; loadTypeSubtypes?: string[] },
+  ctx: z.RefinementCtx,
+) {
+  const nonDg = val.loadTypes.filter((c) => c !== 'DG');
+  if (nonDg.length > 1) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'Select at most one non-DG load type (DG may be combined with it)',
+      path: ['loadTypes'],
+    });
+  }
+  const parents = new Set(val.loadTypes);
+  for (let i = 0; i < (val.loadTypeSubtypes?.length ?? 0); i++) {
+    const code = val.loadTypeSubtypes![i]!;
+    if (!LOAD_TYPE_SUBTYPE_RE.test(code)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `Invalid load type subtype: ${code}`,
+        path: ['loadTypeSubtypes', i],
+      });
+      continue;
+    }
+    const parent = code.split(':')[0]!;
+    if (!parents.has(parent)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `Subtype ${code} requires parent ${parent} to be selected`,
+        path: ['loadTypeSubtypes', i],
+      });
+    }
+  }
+}
+
 export const jobCreateSchema = z
   .object({
     title: z.string().trim().min(2).max(160).optional(),
@@ -1545,8 +1592,10 @@ export const jobCreateSchema = z
     loadTypes: z
       .array(z.enum(CLOX_LOAD_TYPE_CODES))
       .min(1)
-      .max(12)
+      .max(2)
       .default(['GENERAL']),
+    /** Optional sub-menu picks under selected parents (e.g. GENERAL:CARTONS). */
+    loadTypeSubtypes: z.array(z.string().trim().min(3).max(64)).max(64).optional(),
     /** Required when loadTypes includes DG (dangerous goods manifest / SDS document). */
     dgDocumentId: z.string().uuid().optional().nullable(),
     /** Optional override; otherwise recommended from chargeable weight */
@@ -1583,6 +1632,7 @@ export const jobCreateSchema = z
         path: ['distanceKm'],
       });
     }
+    refineJobLoadTypes(val, ctx);
     refineJobStops(val, ctx, {
       requireHourlyPattern: true,
       hourlyPattern: val.hourlyPattern,
@@ -1641,6 +1691,8 @@ export const jobRouteEstimateSchema = z
   .object({
     pricingModel: z.enum(['PER_KM', 'HOURLY']),
     stops: z.array(jobStopSchema).min(2).max(50),
+    /** Optional class for class-based estimate preview (defaults to lowest-rank active class). */
+    vehicleClass: vehicleClassField.optional(),
   })
   .superRefine((val, ctx) => {
     refineJobStops(val, ctx);
@@ -1760,32 +1812,47 @@ export const vehicleClassCodeSchema = z
   .regex(/^[A-Za-z0-9_]+$/, 'Code must be alphanumeric with underscores only')
   .transform((v) => v.toUpperCase());
 
-export const vehicleClassCreateSchema = z.object({
-  code: vehicleClassCodeSchema,
-  name: z.string().trim().min(1).max(64),
-  rank: z.number().int().min(1).max(999),
-  maxChargeableWeightKg: z.number().positive().max(100_000),
-  maxLengthCm: z.number().positive().max(10_000),
-  maxWidthCm: z.number().positive().max(1_000),
-  maxHeightCm: z.number().positive().max(1_000),
-  minLicenceClass: z.string().trim().min(1).max(10),
-  suggestedGvmKg: z.number().int().positive().max(200_000),
-  suggestedTareKg: z.number().int().positive().max(200_000),
-  isActive: z.boolean().default(true),
+const vehicleClassRateFieldsSchema = z.object({
+  perKmRateCents: z.number().int().positive().max(100_000).optional().nullable(),
+  hourlyRateCents: z.number().int().positive().max(1_000_000).optional().nullable(),
+  perKmMinBaseCents: z.number().int().positive().max(10_000_000).optional().nullable(),
+  hourlyMinBaseCents: z.number().int().positive().max(10_000_000).optional().nullable(),
+  perKmGuidanceMinCents: z.number().int().positive().max(100_000).optional().nullable(),
+  perKmGuidanceMaxCents: z.number().int().positive().max(100_000).optional().nullable(),
+  hourlyGuidanceMinCents: z.number().int().positive().max(1_000_000).optional().nullable(),
+  hourlyGuidanceMaxCents: z.number().int().positive().max(1_000_000).optional().nullable(),
 });
 
-export const vehicleClassUpdateSchema = z.object({
-  name: z.string().trim().min(1).max(64).optional(),
-  rank: z.number().int().min(1).max(999).optional(),
-  maxChargeableWeightKg: z.number().positive().max(100_000).optional(),
-  maxLengthCm: z.number().positive().max(10_000).optional(),
-  maxWidthCm: z.number().positive().max(1_000).optional(),
-  maxHeightCm: z.number().positive().max(1_000).optional(),
-  minLicenceClass: z.string().trim().min(1).max(10).optional(),
-  suggestedGvmKg: z.number().int().positive().max(200_000).optional(),
-  suggestedTareKg: z.number().int().positive().max(200_000).optional(),
-  isActive: z.boolean().optional(),
-});
+export const vehicleClassCreateSchema = z
+  .object({
+    code: vehicleClassCodeSchema,
+    name: z.string().trim().min(1).max(64),
+    rank: z.number().int().min(1).max(999),
+    maxChargeableWeightKg: z.number().positive().max(100_000),
+    maxLengthCm: z.number().positive().max(10_000),
+    maxWidthCm: z.number().positive().max(1_000),
+    maxHeightCm: z.number().positive().max(1_000),
+    minLicenceClass: z.string().trim().min(1).max(10),
+    suggestedGvmKg: z.number().int().positive().max(200_000),
+    suggestedTareKg: z.number().int().positive().max(200_000),
+    isActive: z.boolean().default(true),
+  })
+  .merge(vehicleClassRateFieldsSchema);
+
+export const vehicleClassUpdateSchema = z
+  .object({
+    name: z.string().trim().min(1).max(64).optional(),
+    rank: z.number().int().min(1).max(999).optional(),
+    maxChargeableWeightKg: z.number().positive().max(100_000).optional(),
+    maxLengthCm: z.number().positive().max(10_000).optional(),
+    maxWidthCm: z.number().positive().max(1_000).optional(),
+    maxHeightCm: z.number().positive().max(1_000).optional(),
+    minLicenceClass: z.string().trim().min(1).max(10).optional(),
+    suggestedGvmKg: z.number().int().positive().max(200_000).optional(),
+    suggestedTareKg: z.number().int().positive().max(200_000).optional(),
+    isActive: z.boolean().optional(),
+  })
+  .merge(vehicleClassRateFieldsSchema.partial());
 
 export type VehicleClassCreateInput = z.infer<typeof vehicleClassCreateSchema>;
 export type VehicleClassUpdateInput = z.infer<typeof vehicleClassUpdateSchema>;
@@ -1803,6 +1870,14 @@ export type VehicleClassDto = {
   suggestedGvmKg: number;
   suggestedTareKg: number;
   isActive: boolean;
+  perKmRateCents: number | null;
+  hourlyRateCents: number | null;
+  perKmMinBaseCents: number | null;
+  hourlyMinBaseCents: number | null;
+  perKmGuidanceMinCents: number | null;
+  perKmGuidanceMaxCents: number | null;
+  hourlyGuidanceMinCents: number | null;
+  hourlyGuidanceMaxCents: number | null;
   createdAt: string;
   updatedAt: string;
 };

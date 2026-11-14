@@ -363,6 +363,55 @@ export class StripeService {
       : intent.payment_method.id;
   }
 
+  /** Safe card summary for sender Account UI (never returns full PAN). */
+  async retrievePaymentMethodSummary(paymentMethodId: string): Promise<{
+    id: string;
+    brand: string | null;
+    last4: string | null;
+    expMonth: number | null;
+    expYear: number | null;
+    mock: boolean;
+  } | null> {
+    if (this.isMockMode() || paymentMethodId.startsWith('pm_mock_')) {
+      return {
+        id: paymentMethodId || 'pm_mock_default',
+        brand: 'visa',
+        last4: '4242',
+        expMonth: 12,
+        expYear: 2030,
+        mock: true,
+      };
+    }
+    try {
+      const pm = await this.getClient().paymentMethods.retrieve(paymentMethodId);
+      if (pm.type !== 'card' || !pm.card) {
+        return {
+          id: pm.id,
+          brand: pm.type ?? null,
+          last4: null,
+          expMonth: null,
+          expYear: null,
+          mock: false,
+        };
+      }
+      return {
+        id: pm.id,
+        brand: pm.card.brand ?? null,
+        last4: pm.card.last4 ?? null,
+        expMonth: pm.card.exp_month ?? null,
+        expYear: pm.card.exp_year ?? null,
+        mock: false,
+      };
+    } catch (err) {
+      this.logger.warn(
+        `retrievePaymentMethodSummary ${paymentMethodId}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+      return null;
+    }
+  }
+
   /** Best-effort cancel so waived/failed accepts do not leave live Stripe intents. */
   async cancelPaymentIntent(paymentIntentId: string): Promise<void> {
     if (this.isMockMode() || paymentIntentId.startsWith('pi_mock_')) {

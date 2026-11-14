@@ -1101,9 +1101,16 @@ export class ExceptionsService {
     });
 
     if (row.phase === TripExceptionPhase.MID_TRIP && row.tripId && reassigned.safetyReset) {
+      // Keep in sync with carrier.reassignAssignment: PENDING_GATES must clear
+      // startedAt or the driver cab hides Gate A/B behind !startedAt.
       await this.prisma.trip.update({
         where: { id: row.tripId },
-        data: { status: TripStatus.PENDING_GATES },
+        data: {
+          status: TripStatus.PENDING_GATES,
+          safetyPassedAt: null,
+          safetyFailedAt: null,
+          startedAt: null,
+        },
       });
     } else if (
       row.phase === TripExceptionPhase.MID_TRIP &&

@@ -43,6 +43,7 @@ describe('SenderService payment paths', () => {
     createCustomer: jest.fn(),
     createSetupIntent: jest.fn(),
     attachPaymentMethod: jest.fn(),
+    retrievePaymentMethodSummary: jest.fn(),
     isMockMode: jest.fn().mockReturnValue(true),
   };
   const config = { get: jest.fn().mockReturnValue('pk_test') };
@@ -103,7 +104,11 @@ describe('SenderService payment paths', () => {
     expect(stripe.createCustomer).toHaveBeenCalled();
     expect(prisma.company.update).toHaveBeenCalledWith({
       where: { id: 'co-s' },
-      data: { stripeCustomerId: 'cus_new' },
+      data: {
+        stripeCustomerId: 'cus_new',
+        stripeDefaultPaymentMethodId: null,
+        paymentReady: false,
+      },
     });
     expect(result).toMatchObject({
       customerId: 'cus_new',
@@ -118,7 +123,7 @@ describe('SenderService payment paths', () => {
       paymentMethodId: 'pm_mock_default',
       mock: true,
     });
-    const company = senderCompany({ stripeCustomerId: 'cus_1' });
+    const company = senderCompany({ stripeCustomerId: 'cus_mock_sender' });
     const prisma = {
       isConnected: () => true,
       user: {
@@ -149,6 +154,83 @@ describe('SenderService payment paths', () => {
     });
     expect(result.goNoGo.canBook).toBe(true);
     expect(audit.recordPlatform).toHaveBeenCalled();
+  });
+
+  it('confirmPayment replaces default PM for ACTIVE sender in mock mode', async () => {
+    stripe.attachPaymentMethod.mockResolvedValue({
+      paymentMethodId: 'pm_mock_replaced',
+      mock: true,
+    });
+    const company = senderCompany({
+      status: CompanyStatus.ACTIVE,
+      paymentReady: true,
+      stripeCustomerId: 'cus_mock_sender',
+      stripeDefaultPaymentMethodId: 'pm_mock_old',
+    });
+    const prisma = {
+      isConnected: () => true,
+      user: {
+        findUnique: jest.fn().mockResolvedValue({
+          id: 'user-sender',
+          email: 'sender@yopmail.com',
+          name: 'Sender',
+          phone: null,
+          company,
+        }),
+      },
+      company: {
+        update: jest.fn().mockImplementation(async ({ data }) => {
+          Object.assign(company, data);
+          return company;
+        }),
+      },
+    };
+    const service = makeService(prisma);
+    await service.confirmPayment(senderPrincipal, {});
+    expect(prisma.company.update).toHaveBeenCalledWith({
+      where: { id: 'co-s' },
+      data: {
+        stripeDefaultPaymentMethodId: 'pm_mock_replaced',
+        paymentReady: true,
+      },
+    });
+    expect(company.status).toBe(CompanyStatus.ACTIVE);
+  });
+
+  it('getPaymentMethod returns brand/last4 summary when payment ready', async () => {
+    stripe.retrievePaymentMethodSummary.mockResolvedValue({
+      id: 'pm_mock_default',
+      brand: 'visa',
+      last4: '4242',
+      expMonth: 12,
+      expYear: 2030,
+      mock: true,
+    });
+    const prisma = {
+      isConnected: () => true,
+      user: {
+        findUnique: jest.fn().mockResolvedValue({
+          id: 'user-sender',
+          email: 'sender@yopmail.com',
+          company: senderCompany({
+            status: CompanyStatus.ACTIVE,
+            paymentReady: true,
+            stripeCustomerId: 'cus_mock_sender',
+            stripeDefaultPaymentMethodId: 'pm_mock_default',
+          }),
+        }),
+      },
+    };
+    const service = makeService(prisma);
+    const result = await service.getPaymentMethod(senderPrincipal);
+    expect(result).toMatchObject({
+      paymentReady: true,
+      brand: 'visa',
+      last4: '4242',
+      expMonth: 12,
+      expYear: 2030,
+      mock: true,
+    });
   });
 
   it('confirmPayment requires paymentMethodId when Stripe live', async () => {

@@ -1187,6 +1187,75 @@ export class CarrierService {
     return this.getOnboarding(principal);
   }
 
+  async getVehicle(principal: AuthenticatedPrincipal, vehicleId: string) {
+    const { items } = await this.listVehicles(principal);
+    const item = items.find((v) => v.id === vehicleId);
+    if (!item) throw new NotFoundException('Vehicle not found');
+    return item;
+  }
+
+  async updateVehicle(
+    principal: AuthenticatedPrincipal,
+    vehicleId: string,
+    input: CarrierVehicleInput,
+  ) {
+    this.ensureDatabase();
+    const user = await this.requireCarrier(principal);
+    const company = user.company!;
+    this.assertCanManageFleet(company);
+
+    const vehicle = await this.prisma.vehicle.findFirst({
+      where: { id: vehicleId, companyId: company.id },
+    });
+    if (!vehicle) throw new NotFoundException('Vehicle not found');
+    if (vehicle.status === VehicleStatus.RETIRED) {
+      throw new BadRequestException('Retired vehicles cannot be edited');
+    }
+
+    if (this.capacityFieldsChanged(vehicle, input)) {
+      await this.assertCapacityEditable(company.id, vehicleId);
+    }
+
+    const updated = await this.prisma.vehicle.update({
+      where: { id: vehicleId },
+      data: {
+        label: input.label,
+        registration: input.registration.toUpperCase(),
+        vehicleClass: input.vehicleClass.toUpperCase(),
+        tareKg: input.tareKg ?? null,
+        gvmKg: input.gvmKg,
+        gcmKg: input.gcmKg ?? null,
+      },
+    });
+
+    await this.audit.recordPlatform({
+      action: AuditAction.CARRIER_VEHICLE_UPDATED,
+      actorUserId: user.id,
+      entityType: 'Vehicle',
+      entityId: vehicleId,
+      metadata: {
+        previous: {
+          label: vehicle.label,
+          registration: vehicle.registration,
+          vehicleClass: vehicle.vehicleClass,
+          tareKg: vehicle.tareKg,
+          gvmKg: vehicle.gvmKg,
+          gcmKg: vehicle.gcmKg,
+        },
+        next: {
+          label: updated.label,
+          registration: updated.registration,
+          vehicleClass: updated.vehicleClass,
+          tareKg: updated.tareKg,
+          gvmKg: updated.gvmKg,
+          gcmKg: updated.gcmKg,
+        },
+      },
+    });
+
+    return this.getVehicle(principal, vehicleId);
+  }
+
   private async assertNotLastActiveVehicle(companyId: string, vehicleId: string) {
     const activeCount = await this.prisma.vehicle.count({
       where: { companyId, status: VehicleStatus.ACTIVE },
@@ -1217,8 +1286,8 @@ export class CarrierService {
     }
   }
 
-  private async assertVehicleNotOnActiveTrip(companyId: string, vehicleId: string) {
-    const busy = await this.prisma.assignment.findFirst({
+  private async findVehicleActiveTripAssignment(companyId: string, vehicleId: string) {
+    return this.prisma.assignment.findFirst({
       where: {
         carrierCompanyId: companyId,
         vehicleId,
@@ -1227,11 +1296,45 @@ export class CarrierService {
       },
       select: { id: true },
     });
+  }
+
+  private async assertVehicleNotOnActiveTrip(companyId: string, vehicleId: string) {
+    const busy = await this.findVehicleActiveTripAssignment(companyId, vehicleId);
     if (busy) {
       throw new BadRequestException(
         'Vehicle is on an active trip — reassign the trip before disabling or retiring',
       );
     }
+  }
+
+  /** Block class / mass changes while the vehicle is on a LOCKED in-progress trip. */
+  private async assertCapacityEditable(companyId: string, vehicleId: string) {
+    const busy = await this.findVehicleActiveTripAssignment(companyId, vehicleId);
+    if (busy) {
+      throw new BadRequestException(
+        'Vehicle is on an active trip — reassign or complete the trip before changing class or mass ratings',
+      );
+    }
+  }
+
+  private capacityFieldsChanged(
+    vehicle: {
+      vehicleClass: string | null;
+      tareKg: number | null;
+      gvmKg: number | null;
+      gcmKg: number | null;
+    },
+    input: CarrierVehicleInput,
+  ) {
+    const nextClass = input.vehicleClass.toUpperCase();
+    const nextTare = input.tareKg ?? null;
+    const nextGcm = input.gcmKg ?? null;
+    return (
+      (vehicle.vehicleClass ?? '').toUpperCase() !== nextClass ||
+      vehicle.gvmKg !== input.gvmKg ||
+      vehicle.tareKg !== nextTare ||
+      vehicle.gcmKg !== nextGcm
+    );
   }
 
   private async assertDriverNotOnActiveTrip(companyId: string, driverId: string) {
@@ -1368,6 +1471,22 @@ export class CarrierService {
       vehicle.status !== VehicleStatus.RETIRED
     ) {
       throw new BadRequestException('Vehicle is not disabled or retired');
+    }
+
+    const rwcDoc = await this.prisma.complianceDocument.findFirst({
+      where: {
+        companyId: company.id,
+        vehicleId,
+        docType: ComplianceDocType.RWC,
+      },
+      orderBy: { updatedAt: 'desc' },
+      select: { id: true, status: true, expiresAt: true },
+    });
+    const rwc = this.summarizeRwcDoc(rwcDoc);
+    if (rwc.state === 'MISSING' || rwc.state === 'EXPIRED') {
+      throw new BadRequestException(
+        'Upload a valid roadworthy certificate (RWC) before reactivating this vehicle',
+      );
     }
 
     const updated = await this.prisma.vehicle.update({

@@ -278,6 +278,7 @@ describe('SenderService gate leftovers', () => {
       company,
     });
 
+    // ACTIVE is allowed for card replace, but still requires a Stripe Customer from setup.
     await expect(
       makeService({
         isConnected: () => true,
@@ -287,7 +288,7 @@ describe('SenderService gate leftovers', () => {
           ),
         },
       }).confirmPayment(senderPrincipal, {}),
-    ).rejects.toThrow('Company must be PENDING_PAYMENT to activate');
+    ).rejects.toThrow('Call payment setup first');
 
     await expect(
       makeService({
@@ -298,6 +299,23 @@ describe('SenderService gate leftovers', () => {
               senderCompany({
                 status: CompanyStatus.PENDING_PAYMENT,
                 stripeCustomerId: null,
+              }),
+            ),
+          ),
+        },
+      }).confirmPayment(senderPrincipal, {}),
+    ).rejects.toThrow('Call payment setup first');
+
+    // Live Stripe with leftover mock Customer: force setup again.
+    await expect(
+      makeService({
+        isConnected: () => true,
+        user: {
+          findUnique: jest.fn().mockResolvedValue(
+            baseUser(
+              senderCompany({
+                status: CompanyStatus.ACTIVE,
+                stripeCustomerId: 'cus_mock_leftover',
               }),
             ),
           ),

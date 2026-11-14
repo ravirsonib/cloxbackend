@@ -541,4 +541,181 @@ describe('CarrierService resend / vehicle / capabilities leftovers', () => {
       });
     }
   });
+
+  const vehiclePlate = {
+    label: 'Primary',
+    registration: 'ABC123',
+    vehicleClass: 'VAN',
+    tareKg: 1800,
+    gvmKg: 3500,
+    gcmKg: 6000,
+  };
+
+  it('updateVehicle patches plate fields and audits', async () => {
+    const prisma = {
+      isConnected: () => true,
+      user: {
+        findUnique: jest.fn().mockResolvedValue({
+          id: 'user-carrier',
+          company: carrierCompany({ status: CompanyStatus.BID_ELIGIBLE }),
+        }),
+      },
+      vehicle: {
+        findFirst: jest.fn().mockResolvedValue({
+          id: 'veh-1',
+          companyId: 'co-c',
+          status: VehicleStatus.ACTIVE,
+          ...vehiclePlate,
+        }),
+        update: jest.fn().mockResolvedValue({
+          id: 'veh-1',
+          ...vehiclePlate,
+          label: 'Unit 2',
+          registration: 'XYZ999',
+        }),
+      },
+      assignment: { findFirst: jest.fn().mockResolvedValue(null) },
+    };
+    const service = makeService(prisma);
+    jest.spyOn(service, 'listVehicles').mockResolvedValue({
+      items: [
+        {
+          id: 'veh-1',
+          status: VehicleStatus.ACTIVE,
+          label: 'Unit 2',
+          registration: 'XYZ999',
+          vehicleClass: 'VAN',
+          tareKg: 1800,
+          gvmKg: 3500,
+          gcmKg: 6000,
+        },
+      ],
+    } as never);
+
+    const result = await service.updateVehicle(carrier, 'veh-1', {
+      ...vehiclePlate,
+      label: 'Unit 2',
+      registration: 'xyz999',
+    });
+    expect(result).toMatchObject({ id: 'veh-1', label: 'Unit 2', registration: 'XYZ999' });
+    expect(prisma.vehicle.update).toHaveBeenCalledWith({
+      where: { id: 'veh-1' },
+      data: expect.objectContaining({
+        label: 'Unit 2',
+        registration: 'XYZ999',
+        gcmKg: 6000,
+      }),
+    });
+    expect(audit.recordPlatform).toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'carrier.vehicle_updated' }),
+    );
+  });
+
+  it('updateVehicle blocks capacity change on active trip but allows label-only', async () => {
+    const prisma = {
+      isConnected: () => true,
+      user: {
+        findUnique: jest.fn().mockResolvedValue({
+          id: 'user-carrier',
+          company: carrierCompany({ status: CompanyStatus.BID_ELIGIBLE }),
+        }),
+      },
+      vehicle: {
+        findFirst: jest.fn().mockResolvedValue({
+          id: 'veh-1',
+          companyId: 'co-c',
+          status: VehicleStatus.ACTIVE,
+          ...vehiclePlate,
+        }),
+        update: jest.fn().mockResolvedValue({
+          id: 'veh-1',
+          ...vehiclePlate,
+          label: 'Renamed',
+        }),
+      },
+      assignment: { findFirst: jest.fn().mockResolvedValue({ id: 'asg-1' }) },
+    };
+    const service = makeService(prisma);
+    jest.spyOn(service, 'listVehicles').mockResolvedValue({
+      items: [{ id: 'veh-1', ...vehiclePlate, label: 'Renamed' }],
+    } as never);
+
+    await expect(
+      service.updateVehicle(carrier, 'veh-1', {
+        ...vehiclePlate,
+        gvmKg: 4500,
+      }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+
+    await expect(
+      service.updateVehicle(carrier, 'veh-1', {
+        ...vehiclePlate,
+        label: 'Renamed',
+      }),
+    ).resolves.toMatchObject({ id: 'veh-1', label: 'Renamed' });
+    expect(prisma.assignment.findFirst).toHaveBeenCalledTimes(1);
+  });
+
+  it('updateVehicle rejects retired vehicles', async () => {
+    const prisma = {
+      isConnected: () => true,
+      user: {
+        findUnique: jest.fn().mockResolvedValue({
+          id: 'user-carrier',
+          company: carrierCompany({ status: CompanyStatus.BID_ELIGIBLE }),
+        }),
+      },
+      vehicle: {
+        findFirst: jest.fn().mockResolvedValue({
+          id: 'veh-1',
+          companyId: 'co-c',
+          status: VehicleStatus.RETIRED,
+          ...vehiclePlate,
+        }),
+      },
+    };
+    await expect(
+      makeService(prisma).updateVehicle(carrier, 'veh-1', vehiclePlate),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('reactivateVehicle requires a non-expired RWC', async () => {
+    const prisma = {
+      isConnected: () => true,
+      user: {
+        findUnique: jest.fn().mockResolvedValue({
+          id: 'user-carrier',
+          company: carrierCompany({ status: CompanyStatus.BID_ELIGIBLE }),
+        }),
+      },
+      vehicle: {
+        findFirst: jest.fn().mockResolvedValue({
+          id: 'veh-1',
+          companyId: 'co-c',
+          status: VehicleStatus.SUSPENDED,
+        }),
+        update: jest.fn(),
+      },
+      complianceDocument: {
+        findFirst: jest.fn().mockResolvedValue(null),
+      },
+    };
+    await expect(makeService(prisma).reactivateVehicle(carrier, 'veh-1')).rejects.toBeInstanceOf(
+      BadRequestException,
+    );
+    expect(prisma.vehicle.update).not.toHaveBeenCalled();
+
+    prisma.complianceDocument.findFirst.mockResolvedValue({
+      id: 'doc-1',
+      status: 'APPROVED',
+      expiresAt: new Date('2099-01-01'),
+    });
+    prisma.vehicle.update.mockResolvedValue({
+      id: 'veh-1',
+      status: VehicleStatus.ACTIVE,
+    });
+    await expect(makeService(prisma).reactivateVehicle(carrier, 'veh-1')).resolves.toMatchObject({
+      status: VehicleStatus.ACTIVE,
+    });
+  });
 });

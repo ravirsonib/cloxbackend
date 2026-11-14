@@ -780,10 +780,9 @@ export class AdminService {
     this.ensureDatabase();
 
     const where: Prisma.CompanyWhereInput = {};
-    // Marketplace companies only â€” admin partners live under Ops â†’ Admin partners.
-    where.type = query.type
-      ? query.type
-      : { in: [CompanyType.SENDER, CompanyType.CARRIER] };
+    // Marketplace customers only — admin partners live under Ops → Admin partners.
+    // Prefer explicit filter; default CARRIER (matches adminCompanyListQuerySchema).
+    where.type = query.type ?? CompanyType.CARRIER;
     if (query.status) where.status = query.status;
     if (query.regionCode) {
       where.homeRegion = { code: query.regionCode.toUpperCase() };
@@ -1918,6 +1917,14 @@ export class AdminService {
             suggestedGvmKg: c.suggestedGvmKg ?? 3500,
             suggestedTareKg: c.suggestedTareKg ?? 2000,
             isActive: true,
+            perKmRateCents: c.perKmRateCents ?? null,
+            hourlyRateCents: c.hourlyRateCents ?? null,
+            perKmMinBaseCents: c.perKmMinBaseCents ?? null,
+            hourlyMinBaseCents: c.hourlyMinBaseCents ?? null,
+            perKmGuidanceMinCents: c.perKmGuidanceMinCents ?? null,
+            perKmGuidanceMaxCents: c.perKmGuidanceMaxCents ?? null,
+            hourlyGuidanceMinCents: c.hourlyGuidanceMinCents ?? null,
+            hourlyGuidanceMaxCents: c.hourlyGuidanceMaxCents ?? null,
           },
         });
       }
@@ -1926,7 +1933,34 @@ export class AdminService {
       });
     }
 
-    return rows.map((r) => ({
+    return rows.map((r) => this.mapVehicleClassDto(r));
+  }
+
+  private mapVehicleClassDto(r: {
+    id: string;
+    code: string;
+    name: string;
+    rank: number;
+    maxChargeableWeightKg: number;
+    maxLengthCm: number;
+    maxWidthCm: number;
+    maxHeightCm: number;
+    minLicenceClass: string;
+    suggestedGvmKg: number;
+    suggestedTareKg: number;
+    isActive: boolean;
+    perKmRateCents?: number | null;
+    hourlyRateCents?: number | null;
+    perKmMinBaseCents?: number | null;
+    hourlyMinBaseCents?: number | null;
+    perKmGuidanceMinCents?: number | null;
+    perKmGuidanceMaxCents?: number | null;
+    hourlyGuidanceMinCents?: number | null;
+    hourlyGuidanceMaxCents?: number | null;
+    createdAt: Date;
+    updatedAt: Date;
+  }): VehicleClassDto {
+    return {
       id: r.id,
       code: r.code,
       name: r.name,
@@ -1939,9 +1973,17 @@ export class AdminService {
       suggestedGvmKg: r.suggestedGvmKg,
       suggestedTareKg: r.suggestedTareKg,
       isActive: r.isActive,
+      perKmRateCents: r.perKmRateCents ?? null,
+      hourlyRateCents: r.hourlyRateCents ?? null,
+      perKmMinBaseCents: r.perKmMinBaseCents ?? null,
+      hourlyMinBaseCents: r.hourlyMinBaseCents ?? null,
+      perKmGuidanceMinCents: r.perKmGuidanceMinCents ?? null,
+      perKmGuidanceMaxCents: r.perKmGuidanceMaxCents ?? null,
+      hourlyGuidanceMinCents: r.hourlyGuidanceMinCents ?? null,
+      hourlyGuidanceMaxCents: r.hourlyGuidanceMaxCents ?? null,
       createdAt: r.createdAt.toISOString(),
       updatedAt: r.updatedAt.toISOString(),
-    }));
+    };
   }
 
   async createVehicleClass(input: VehicleClassCreateInput, actorAdminId: string): Promise<VehicleClassDto> {
@@ -1966,6 +2008,14 @@ export class AdminService {
         suggestedGvmKg: input.suggestedGvmKg,
         suggestedTareKg: input.suggestedTareKg,
         isActive: input.isActive ?? true,
+        perKmRateCents: input.perKmRateCents ?? null,
+        hourlyRateCents: input.hourlyRateCents ?? null,
+        perKmMinBaseCents: input.perKmMinBaseCents ?? null,
+        hourlyMinBaseCents: input.hourlyMinBaseCents ?? null,
+        perKmGuidanceMinCents: input.perKmGuidanceMinCents ?? null,
+        perKmGuidanceMaxCents: input.perKmGuidanceMaxCents ?? null,
+        hourlyGuidanceMinCents: input.hourlyGuidanceMinCents ?? null,
+        hourlyGuidanceMaxCents: input.hourlyGuidanceMaxCents ?? null,
       },
     });
 
@@ -1977,22 +2027,7 @@ export class AdminService {
       metadata: input,
     });
 
-    return {
-      id: row.id,
-      code: row.code,
-      name: row.name,
-      rank: row.rank,
-      maxChargeableWeightKg: row.maxChargeableWeightKg,
-      maxLengthCm: row.maxLengthCm,
-      maxWidthCm: row.maxWidthCm,
-      maxHeightCm: row.maxHeightCm,
-      minLicenceClass: row.minLicenceClass,
-      suggestedGvmKg: row.suggestedGvmKg,
-      suggestedTareKg: row.suggestedTareKg,
-      isActive: row.isActive,
-      createdAt: row.createdAt.toISOString(),
-      updatedAt: row.updatedAt.toISOString(),
-    };
+    return this.mapVehicleClassDto(row);
   }
 
   async updateVehicleClass(
@@ -2023,6 +2058,26 @@ export class AdminService {
         ...(input.suggestedGvmKg !== undefined ? { suggestedGvmKg: input.suggestedGvmKg } : {}),
         ...(input.suggestedTareKg !== undefined ? { suggestedTareKg: input.suggestedTareKg } : {}),
         ...(input.isActive !== undefined ? { isActive: input.isActive } : {}),
+        ...(input.perKmRateCents !== undefined ? { perKmRateCents: input.perKmRateCents } : {}),
+        ...(input.hourlyRateCents !== undefined ? { hourlyRateCents: input.hourlyRateCents } : {}),
+        ...(input.perKmMinBaseCents !== undefined
+          ? { perKmMinBaseCents: input.perKmMinBaseCents }
+          : {}),
+        ...(input.hourlyMinBaseCents !== undefined
+          ? { hourlyMinBaseCents: input.hourlyMinBaseCents }
+          : {}),
+        ...(input.perKmGuidanceMinCents !== undefined
+          ? { perKmGuidanceMinCents: input.perKmGuidanceMinCents }
+          : {}),
+        ...(input.perKmGuidanceMaxCents !== undefined
+          ? { perKmGuidanceMaxCents: input.perKmGuidanceMaxCents }
+          : {}),
+        ...(input.hourlyGuidanceMinCents !== undefined
+          ? { hourlyGuidanceMinCents: input.hourlyGuidanceMinCents }
+          : {}),
+        ...(input.hourlyGuidanceMaxCents !== undefined
+          ? { hourlyGuidanceMaxCents: input.hourlyGuidanceMaxCents }
+          : {}),
       },
     });
 
@@ -2034,22 +2089,7 @@ export class AdminService {
       metadata: input,
     });
 
-    return {
-      id: row.id,
-      code: row.code,
-      name: row.name,
-      rank: row.rank,
-      maxChargeableWeightKg: row.maxChargeableWeightKg,
-      maxLengthCm: row.maxLengthCm,
-      maxWidthCm: row.maxWidthCm,
-      maxHeightCm: row.maxHeightCm,
-      minLicenceClass: row.minLicenceClass,
-      suggestedGvmKg: row.suggestedGvmKg,
-      suggestedTareKg: row.suggestedTareKg,
-      isActive: row.isActive,
-      createdAt: row.createdAt.toISOString(),
-      updatedAt: row.updatedAt.toISOString(),
-    };
+    return this.mapVehicleClassDto(row);
   }
 
   async deleteVehicleClass(

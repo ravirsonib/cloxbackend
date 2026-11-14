@@ -137,11 +137,12 @@ describe('AdminService export / updateLead leftovers', () => {
       }),
     );
 
+    // Omit type → service defaults to CARRIER (Customers list default).
     await makeService(prisma).listCompanies({ page: 1, pageSize: 20 });
     expect(prisma.company.findMany).toHaveBeenLastCalledWith(
       expect.objectContaining({
         where: expect.objectContaining({
-          type: { in: ['SENDER', 'CARRIER'] },
+          type: 'CARRIER',
         }),
       }),
     );

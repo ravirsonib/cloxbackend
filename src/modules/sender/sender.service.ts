@@ -572,6 +572,39 @@ export class SenderService {
     return this.getOnboarding(principal);
   }
 
+  /** Saved default card summary for Account → Payment method. */
+  async getPaymentMethod(principal: AuthenticatedPrincipal) {
+    this.ensureDatabase();
+    const user = await this.requireSender(principal);
+    let company = user.company!;
+    const cleared = await this.clearMockSenderPaymentIfLive(company);
+    if (cleared) company = { ...company, ...cleared };
+
+    const paymentMethodId = company.stripeDefaultPaymentMethodId;
+    if (!company.paymentReady || !paymentMethodId) {
+      return {
+        paymentReady: false,
+        paymentMethodId: null,
+        brand: null,
+        last4: null,
+        expMonth: null,
+        expYear: null,
+        mock: this.stripe.isMockMode(),
+      };
+    }
+
+    const summary = await this.stripe.retrievePaymentMethodSummary(paymentMethodId);
+    return {
+      paymentReady: true,
+      paymentMethodId,
+      brand: summary?.brand ?? null,
+      last4: summary?.last4 ?? null,
+      expMonth: summary?.expMonth ?? null,
+      expYear: summary?.expYear ?? null,
+      mock: summary?.mock ?? this.stripe.isMockMode(),
+    };
+  }
+
   async createPaymentSetup(principal: AuthenticatedPrincipal) {
     this.ensureDatabase();
     const user = await this.requireSender(principal);
@@ -646,7 +679,11 @@ export class SenderService {
         'Payment confirm available only after Ops approve (PENDING_PAYMENT or ACTIVE repair)',
       );
     }
-    if (!company.stripeCustomerId || companyHasMockSenderPayment(company)) {
+    if (!company.stripeCustomerId) {
+      throw new BadRequestException('Call payment setup first');
+    }
+    // Live Stripe with leftover mock Customer/PM: force setup again (creates real Customer).
+    if (!this.stripe.isMockMode() && companyHasMockSenderPayment(company)) {
       throw new BadRequestException('Call payment setup first');
     }
     if (!this.invoiceComplete(company)) {

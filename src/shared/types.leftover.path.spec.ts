@@ -254,5 +254,47 @@ describe('shared/types leftover schema paths', () => {
         ],
       }).success,
     ).toBe(false);
+
+    const validCargoBase = {
+      pricingModel: 'PER_KM' as const,
+      pickupAt: '2026-10-10T10:00:00+11:00',
+      receiverName: 'Recv',
+      receiverEmail: 'recv@yopmail.com',
+      deadWeightKg: 100,
+      lengthCm: 100,
+      widthCm: 100,
+      heightCm: 100,
+      distanceKm: 12,
+      siteManeuverability: 'EASY' as const,
+      siteFacility: 'DOCK' as const,
+      siteDisclaimerAccepted: true as const,
+      stops: [baseStop(0, 'PICKUP'), baseStop(1, 'DROPOFF')],
+    };
+
+    // at most one non-DG parent
+    expect(
+      jobCreateSchema.safeParse({
+        ...validCargoBase,
+        loadTypes: ['GENERAL', 'REEFER'],
+      }).success,
+    ).toBe(false);
+
+    // DG + one parent + matching subtypes OK
+    expect(
+      jobCreateSchema.safeParse({
+        ...validCargoBase,
+        loadTypes: ['GENERAL', 'DG'],
+        loadTypeSubtypes: ['GENERAL:CARTONS', 'DG:FLAMMABLE'],
+      }).success,
+    ).toBe(true);
+
+    // subtype without parent rejected
+    expect(
+      jobCreateSchema.safeParse({
+        ...validCargoBase,
+        loadTypes: ['GENERAL'],
+        loadTypeSubtypes: ['DG:FLAMMABLE'],
+      }).success,
+    ).toBe(false);
   });
 });

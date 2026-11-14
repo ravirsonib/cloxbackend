@@ -1170,7 +1170,7 @@ export class OpsService {
           kind: 'ONBOARDING_STUCK',
           title: `Assist ${c.legalName} (${c.type})`,
           description: `Stuck at ${c.status}. Assist with Australian compliance document upload.`,
-          href: `/companies/${c.id}`,
+          href: `/customers/${c.id}`,
           dueText: 'Follow Up',
         });
       });

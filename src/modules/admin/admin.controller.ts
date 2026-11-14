@@ -81,7 +81,7 @@ export class AdminController {
   }
 
   @Get('companies')
-  @ApiOperation({ summary: 'List marketplace companies (senders + carriers)' })
+  @ApiOperation({ summary: 'List marketplace customers (filter by sender or carrier; default carrier)' })
   listCompanies(
     @Query(new ZodValidationPipe(adminCompanyListQuerySchema)) query: AdminCompanyListQuery,
   ) {

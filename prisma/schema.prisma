@@ -629,7 +629,7 @@ model Vehicle {
   @@index([companyId, status])
 }
 
-/// Dynamic Vehicle Class configuration managed by Super Admin (auto-recommendation + fleet specs)
+/// Dynamic Vehicle Class configuration managed by Super Admin (auto-recommendation + fleet specs + freight rates)
 model VehicleClassConfig {
   id                    String   @id @default(uuid())
   code                  String   @unique
@@ -643,6 +643,20 @@ model VehicleClassConfig {
   suggestedGvmKg        Int
   suggestedTareKg       Int
   isActive              Boolean  @default(true)
+  /// Ops active PER_KM rate (ex-GST cents). Null → fall back to PlatformSettings globals.
+  perKmRateCents              Int?
+  /// Ops active HOURLY rate (ex-GST cents).
+  hourlyRateCents             Int?
+  /// Class trip minimum for PER_KM (cents).
+  perKmMinBaseCents           Int?
+  /// Class trip minimum for HOURLY (cents).
+  hourlyMinBaseCents          Int?
+  /// Sender guidance range (market averages) for PER_KM.
+  perKmGuidanceMinCents       Int?
+  perKmGuidanceMaxCents       Int?
+  /// Sender guidance range for HOURLY.
+  hourlyGuidanceMinCents      Int?
+  hourlyGuidanceMaxCents      Int?
   createdAt             DateTime @default(now())
   updatedAt             DateTime @updatedAt
 
@@ -874,8 +888,10 @@ model Job {
   widthCm              Float?
   heightCm             Float?
   chargeableWeightKg   Float?
-  /// e.g. GENERAL, DG, REEFER, OVERSIZE
+  /// e.g. GENERAL, DG, REEFER, OVERSIZE (max one non-DG + optional DG)
   loadTypes            String[]        @default([])
+  /// e.g. GENERAL:CARTONS, DG:FLAMMABLE — optional sub-menu picks under selected parents
+  loadTypeSubtypes     String[]        @default([])
   requiresDg           Boolean         @default(false)
   dgDocumentId         String?
   dgDocument           ComplianceDocument? @relation("JobDgDocument", fields: [dgDocumentId], references: [id], onDelete: SetNull)
@@ -883,6 +899,8 @@ model Job {
   requiresOversize     Boolean         @default(false)
   minVehicleClass      String?
   recommendedVehicleClass String?
+  /// Vehicle class whose rates produced estimate* (recommended or sender preferred if larger)
+  pricingVehicleClass  String?
   siteManeuverability  String?
   siteFacility         String?
   siteDisclaimerAcceptedAt DateTime?

@@ -35,6 +35,12 @@ import { NotificationType } from '@prisma/client';
 import { resolveJobEditMode } from './job-edit-mode';
 import { isAssignmentPaidAndConfirmed } from './assignment-status.util';
 import {
+  estimateRangeIncGstCents,
+  quoteForModel,
+  resolveClassRates,
+  type LegacyPlatformRateFallback,
+} from './class-pricing.util';
+import {
   DEFAULT_VEHICLE_CLASSES,
   VehicleClassSpec,
   carrierNetPayoutCents,
@@ -171,9 +177,94 @@ export class JobsService {
     }
   }
 
+  /** Global hard floor from PlatformSettings (policy). */
   async getMinBaseCents(pricingModel: 'PER_KM' | 'HOURLY'): Promise<number> {
     const config = await this.getPricingConfig();
     return pricingModel === 'HOURLY' ? config.hourlyMinBaseCents : config.perKmMinBaseCents;
+  }
+
+  private toLegacyFallback(config: Awaited<ReturnType<JobsService['getPricingConfig']>>): LegacyPlatformRateFallback {
+    return {
+      perKmRateCents: config.perKmRateCents,
+      hourlyRateCents: config.hourlyRateCents,
+      perKmMinBaseCents: config.perKmMinBaseCents,
+      hourlyMinBaseCents: config.hourlyMinBaseCents,
+      hourlyMinFloorHours: config.hourlyMinFloorHours,
+      gstPercent: config.gstPercent,
+    };
+  }
+
+  private mapVehicleClassRow(c: {
+    code: string;
+    name: string;
+    rank: number;
+    maxChargeableWeightKg: number;
+    maxLengthCm: number;
+    maxWidthCm: number;
+    maxHeightCm: number;
+    minLicenceClass: string;
+    suggestedGvmKg: number;
+    suggestedTareKg: number;
+    isActive: boolean;
+    perKmRateCents?: number | null;
+    hourlyRateCents?: number | null;
+    perKmMinBaseCents?: number | null;
+    hourlyMinBaseCents?: number | null;
+    perKmGuidanceMinCents?: number | null;
+    perKmGuidanceMaxCents?: number | null;
+    hourlyGuidanceMinCents?: number | null;
+    hourlyGuidanceMaxCents?: number | null;
+  }): VehicleClassSpec {
+    return {
+      code: c.code,
+      name: c.name,
+      rank: c.rank,
+      maxChargeableWeightKg: c.maxChargeableWeightKg,
+      maxLengthCm: c.maxLengthCm,
+      maxWidthCm: c.maxWidthCm,
+      maxHeightCm: c.maxHeightCm,
+      minLicenceClass: c.minLicenceClass,
+      suggestedGvmKg: c.suggestedGvmKg,
+      suggestedTareKg: c.suggestedTareKg,
+      isActive: c.isActive,
+      perKmRateCents: c.perKmRateCents ?? null,
+      hourlyRateCents: c.hourlyRateCents ?? null,
+      perKmMinBaseCents: c.perKmMinBaseCents ?? null,
+      hourlyMinBaseCents: c.hourlyMinBaseCents ?? null,
+      perKmGuidanceMinCents: c.perKmGuidanceMinCents ?? null,
+      perKmGuidanceMaxCents: c.perKmGuidanceMaxCents ?? null,
+      hourlyGuidanceMinCents: c.hourlyGuidanceMinCents ?? null,
+      hourlyGuidanceMaxCents: c.hourlyGuidanceMaxCents ?? null,
+    };
+  }
+
+  /** Class-aware quote for job estimate or bid floor. */
+  async quoteForVehicleClass(params: {
+    pricingModel: 'PER_KM' | 'HOURLY';
+    vehicleClass: string;
+    distanceKm: number;
+    billableHours?: number | null;
+  }): Promise<{ estimateIncGstCents: number; ratesClassCode: string; usedLegacyFallback: boolean }> {
+    const config = await this.getPricingConfig();
+    const legacy = this.toLegacyFallback(config);
+    const classes = await this.getActiveVehicleClasses();
+    const row = classes.find((c) => c.code === params.vehicleClass);
+    const rates = resolveClassRates(params.vehicleClass, row, legacy);
+    const globalFloor =
+      params.pricingModel === 'HOURLY' ? legacy.hourlyMinBaseCents : legacy.perKmMinBaseCents;
+    const estimateIncGstCents = quoteForModel({
+      pricingModel: params.pricingModel,
+      rates,
+      distanceKm: params.distanceKm,
+      billableHours: params.billableHours,
+      hourlyMinFloorHours: legacy.hourlyMinFloorHours,
+      globalHardFloorCents: globalFloor,
+    });
+    return {
+      estimateIncGstCents,
+      ratesClassCode: rates.classCode,
+      usedLegacyFallback: rates.usedLegacyFallback,
+    };
   }
 
   async getPlatformGstPercent(): Promise<number> {
@@ -195,19 +286,7 @@ export class JobsService {
         orderBy: { rank: 'asc' },
       });
       if (list.length > 0) {
-        return list.map((c) => ({
-          code: c.code,
-          name: c.name,
-          rank: c.rank,
-          maxChargeableWeightKg: c.maxChargeableWeightKg,
-          maxLengthCm: c.maxLengthCm,
-          maxWidthCm: c.maxWidthCm,
-          maxHeightCm: c.maxHeightCm,
-          minLicenceClass: c.minLicenceClass,
-          suggestedGvmKg: c.suggestedGvmKg,
-          suggestedTareKg: c.suggestedTareKg,
-          isActive: c.isActive,
-        }));
+        return list.map((c) => this.mapVehicleClassRow(c));
       }
       await this.seedDefaultVehicleClasses();
       return DEFAULT_VEHICLE_CLASSES;
@@ -236,6 +315,14 @@ export class JobsService {
             suggestedGvmKg: c.suggestedGvmKg ?? 3500,
             suggestedTareKg: c.suggestedTareKg ?? 2000,
             isActive: true,
+            perKmRateCents: c.perKmRateCents ?? null,
+            hourlyRateCents: c.hourlyRateCents ?? null,
+            perKmMinBaseCents: c.perKmMinBaseCents ?? null,
+            hourlyMinBaseCents: c.hourlyMinBaseCents ?? null,
+            perKmGuidanceMinCents: c.perKmGuidanceMinCents ?? null,
+            perKmGuidanceMaxCents: c.perKmGuidanceMaxCents ?? null,
+            hourlyGuidanceMinCents: c.hourlyGuidanceMinCents ?? null,
+            hourlyGuidanceMaxCents: c.hourlyGuidanceMaxCents ?? null,
           },
         });
       }
@@ -331,6 +418,7 @@ export class JobsService {
     heightCm: number | null;
     chargeableWeightKg: number | null;
     loadTypes: string[];
+    loadTypeSubtypes?: string[];
     requiresDg: boolean;
     dgDocumentId?: string | null;
     dgDocument?: { id: string; originalFilename: string | null } | null;
@@ -338,6 +426,7 @@ export class JobsService {
     requiresOversize: boolean;
     minVehicleClass: string | null;
     recommendedVehicleClass: string | null;
+    pricingVehicleClass?: string | null;
     siteManeuverability: string | null;
     siteFacility: string | null;
     siteDisclaimerAcceptedAt: Date | null;
@@ -420,6 +509,7 @@ export class JobsService {
       heightCm: job.heightCm,
       chargeableWeightKg: job.chargeableWeightKg,
       loadTypes: job.loadTypes,
+      loadTypeSubtypes: job.loadTypeSubtypes ?? [],
       requiresDg: job.requiresDg,
       dgDocumentId: job.dgDocumentId ?? null,
       dgDocumentFilename: job.dgDocument?.originalFilename ?? null,
@@ -427,6 +517,7 @@ export class JobsService {
       requiresOversize: job.requiresOversize,
       minVehicleClass: job.minVehicleClass,
       recommendedVehicleClass: job.recommendedVehicleClass,
+      pricingVehicleClass: job.pricingVehicleClass ?? job.minVehicleClass ?? job.recommendedVehicleClass,
       siteManeuverability: job.siteManeuverability,
       siteFacility: job.siteFacility,
       siteDisclaimerAcceptedAt: job.siteDisclaimerAcceptedAt,
@@ -716,6 +807,8 @@ export class JobsService {
    */
   async previewRoute(input: JobRouteEstimateInput) {
     const config = await this.getPricingConfig();
+    const legacy = this.toLegacyFallback(config);
+    const classes = await this.getActiveVehicleClasses();
     const sortedStops = input.stops.slice().sort((a, b) => a.sequence - b.sequence);
     const orderedStops =
       input.pricingModel === 'HOURLY' && sortedStops.length > 2
@@ -726,25 +819,42 @@ export class JobsService {
       pricingModel: input.pricingModel,
       hourlyFloorHours: config.hourlyMinFloorHours,
     });
-    const minBaseCents =
-      input.pricingModel === 'HOURLY' ? config.hourlyMinBaseCents : config.perKmMinBaseCents;
+
+    const pricingClass =
+      input.vehicleClass?.trim() ||
+      [...classes].sort((a, b) => a.rank - b.rank)[0]?.code ||
+      'UTE';
+    const classRow = classes.find((c) => c.code === pricingClass);
+    const rates = resolveClassRates(pricingClass, classRow, legacy);
+    const globalFloor =
+      input.pricingModel === 'HOURLY' ? legacy.hourlyMinBaseCents : legacy.perKmMinBaseCents;
+    const estimateIncGstCents = quoteForModel({
+      pricingModel: input.pricingModel,
+      rates,
+      distanceKm: route.distanceKm,
+      billableHours: route.billableHours,
+      hourlyMinFloorHours: config.hourlyMinFloorHours,
+      globalHardFloorCents: globalFloor,
+    });
+    const range = estimateRangeIncGstCents({
+      pricingModel: input.pricingModel,
+      pricingClass,
+      classes,
+      legacy,
+      distanceKm: route.distanceKm,
+      billableHours: route.billableHours,
+    });
     const minBillableHours =
       input.pricingModel === 'HOURLY' ? config.hourlyMinFloorHours : null;
-    const hourlyRateCents =
-      input.pricingModel === 'HOURLY' ? config.hourlyRateCents : null;
-    const perKmRateCents =
-      input.pricingModel === 'PER_KM' ? config.perKmRateCents : null;
     const minChargeIncGstCents =
       input.pricingModel === 'HOURLY'
-        ? Math.max(minBaseCents, Math.round(config.hourlyMinFloorHours * config.hourlyRateCents))
-        : minBaseCents;
-    const estimateIncGstCents =
-      input.pricingModel === 'PER_KM'
-        ? Math.max(minBaseCents, Math.round(route.distanceKm * config.perKmRateCents))
-        : Math.max(
-            minBaseCents,
-            Math.round((route.billableHours ?? config.hourlyMinFloorHours) * config.hourlyRateCents),
-          );
+        ? Math.max(
+            globalFloor,
+            rates.hourlyMinBaseCents,
+            Math.round(config.hourlyMinFloorHours * rates.hourlyRateCents),
+          )
+        : Math.max(globalFloor, rates.perKmMinBaseCents);
+
     return {
       distanceKm: route.distanceKm,
       durationMinutes: route.totalDurationMinutes,
@@ -752,11 +862,20 @@ export class JobsService {
       fatigueBreakMinutes: route.fatigueBreakMinutes,
       billableHours: route.billableHours,
       minBillableHours,
-      hourlyRateCents,
-      perKmRateCents,
-      minBaseCents,
+      hourlyRateCents: input.pricingModel === 'HOURLY' ? rates.hourlyRateCents : null,
+      perKmRateCents: input.pricingModel === 'PER_KM' ? rates.perKmRateCents : null,
+      minBaseCents: Math.max(
+        globalFloor,
+        input.pricingModel === 'HOURLY' ? rates.hourlyMinBaseCents : rates.perKmMinBaseCents,
+      ),
       minChargeIncGstCents,
       estimateIncGstCents,
+      pricingVehicleClass: pricingClass,
+      estimateRange: {
+        minIncGstCents: range.minIncGstCents,
+        maxIncGstCents: range.maxIncGstCents,
+        maxClassCode: range.maxClassCode,
+      },
       mock: route.mock,
     };
   }
@@ -844,6 +963,7 @@ export class JobsService {
         ? orderStopsTspObjects(sortedStops)
         : sortedStops;
     const config = await this.getPricingConfig();
+    const legacy = this.toLegacyFallback(config);
     // Sender-entered km is source of truth when provided; for HOURLY without manual km, derive from stops.
     const route =
       input.distanceKm != null && Number.isFinite(input.distanceKm) && input.distanceKm > 0
@@ -854,17 +974,19 @@ export class JobsService {
             hourlyFloorHours: config.hourlyMinFloorHours,
           });
 
-    const minBase =
-      input.pricingModel === 'HOURLY' ? config.hourlyMinBaseCents : config.perKmMinBaseCents;
-    let estimateInc = minBase;
-    if (input.pricingModel === 'PER_KM') {
-      estimateInc = Math.max(minBase, Math.round(route.distanceKm * config.perKmRateCents));
-    } else {
-      estimateInc = Math.max(
-        minBase,
-        Math.round((route.billableHours ?? config.hourlyMinFloorHours) * config.hourlyRateCents),
-      );
-    }
+    const pricingVehicleClass = minClass;
+    const pricingRow = vehicleClasses.find((c) => c.code === pricingVehicleClass);
+    const rates = resolveClassRates(pricingVehicleClass, pricingRow, legacy);
+    const globalFloor =
+      input.pricingModel === 'HOURLY' ? legacy.hourlyMinBaseCents : legacy.perKmMinBaseCents;
+    const estimateInc = quoteForModel({
+      pricingModel: input.pricingModel,
+      rates,
+      distanceKm: route.distanceKm,
+      billableHours: route.billableHours,
+      hourlyMinFloorHours: config.hourlyMinFloorHours,
+      globalHardFloorCents: globalFloor,
+    });
     const gstRatePercent = config.gstPercent;
     const estimate = gstSplitFromIncCents(estimateInc, gstRatePercent);
 
@@ -891,12 +1013,14 @@ export class JobsService {
         heightCm: input.heightCm,
         chargeableWeightKg: Math.round(chargeable * 10) / 10,
         loadTypes: input.loadTypes,
+        loadTypeSubtypes: input.loadTypeSubtypes ?? [],
         requiresDg,
         dgDocumentId,
         requiresReefer,
         requiresOversize,
         minVehicleClass: minClass,
         recommendedVehicleClass: recommended,
+        pricingVehicleClass,
         siteManeuverability: input.siteManeuverability,
         siteFacility: input.siteFacility,
         siteDisclaimerAcceptedAt: new Date(),
@@ -1055,6 +1179,7 @@ export class JobsService {
         ? orderStopsTspObjects(sortedStops)
         : sortedStops;
     const config = await this.getPricingConfig();
+    const legacy = this.toLegacyFallback(config);
     const route =
       input.distanceKm != null && Number.isFinite(input.distanceKm) && input.distanceKm > 0
         ? routeFromDistanceKm(input.distanceKm, input.pricingModel, config.hourlyMinFloorHours)
@@ -1064,17 +1189,19 @@ export class JobsService {
             hourlyFloorHours: config.hourlyMinFloorHours,
           });
 
-    const minBase =
-      input.pricingModel === 'HOURLY' ? config.hourlyMinBaseCents : config.perKmMinBaseCents;
-    let estimateInc = minBase;
-    if (input.pricingModel === 'PER_KM') {
-      estimateInc = Math.max(minBase, Math.round(route.distanceKm * config.perKmRateCents));
-    } else {
-      estimateInc = Math.max(
-        minBase,
-        Math.round((route.billableHours ?? config.hourlyMinFloorHours) * config.hourlyRateCents),
-      );
-    }
+    const pricingVehicleClass = minClass;
+    const pricingRow = vehicleClasses.find((c) => c.code === pricingVehicleClass);
+    const rates = resolveClassRates(pricingVehicleClass, pricingRow, legacy);
+    const globalFloor =
+      input.pricingModel === 'HOURLY' ? legacy.hourlyMinBaseCents : legacy.perKmMinBaseCents;
+    const estimateInc = quoteForModel({
+      pricingModel: input.pricingModel,
+      rates,
+      distanceKm: route.distanceKm,
+      billableHours: route.billableHours,
+      hourlyMinFloorHours: config.hourlyMinFloorHours,
+      globalHardFloorCents: globalFloor,
+    });
     const gstRatePercent = config.gstPercent;
     const estimate = gstSplitFromIncCents(estimateInc, gstRatePercent);
     const origin = await this.resolveJobOrigin(persistedStops, user.company.homeRegionId);
@@ -1099,12 +1226,14 @@ export class JobsService {
         heightCm: input.heightCm,
         chargeableWeightKg: Math.round(chargeable * 10) / 10,
         loadTypes: input.loadTypes,
+        loadTypeSubtypes: input.loadTypeSubtypes ?? [],
         requiresDg,
         ...(dgDocumentId !== undefined ? { dgDocumentId } : {}),
         requiresReefer,
         requiresOversize,
         minVehicleClass: minClass,
         recommendedVehicleClass: recommended,
+        pricingVehicleClass,
         siteManeuverability: input.siteManeuverability,
         siteFacility: input.siteFacility,
         siteDisclaimerAcceptedAt: new Date(),
