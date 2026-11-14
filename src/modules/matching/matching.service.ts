@@ -699,8 +699,8 @@ export class MatchingService {
         });
 
         let isEligible = check.isAvailable;
-        let code = check.code ?? null;
-        let reason = check.message ?? null;
+        let code: string | null = check.code ?? null;
+        let reason: string | null = check.message ?? null;
 
         // Same licence/NHVR gates as submitProposal — surface before bid API error.
         if (isEligible) {
