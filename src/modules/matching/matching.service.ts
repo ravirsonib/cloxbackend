@@ -29,7 +29,10 @@ import { CarrierService } from '../carrier/carrier.service';
 import { JobsService } from '../jobs/jobs.service';
 import { InAppNotificationsService } from '../notifications/in-app-notifications.service';
 import { NotificationsService } from '../notifications/notifications.service';
-import { assertAssignmentCompliance } from '../jobs/assignment-gates';
+import {
+  assertAssignmentCompliance,
+  evaluateDriverLicenceFields,
+} from '../jobs/assignment-gates';
 import {
   assertDriverAvailabilityForWindow,
   calculateJobExecutionWindow,
@@ -41,6 +44,7 @@ import {
   gstSplitFromIncCents,
   isVehicleAdequateForJob,
   isVehicleClassAdequate,
+  loadVehicleClassMaps,
   type VehicleClassSpec,
 } from '../jobs/job-pricing.util';
 import { carrierMatchesJob } from './matching.eligibility';
@@ -643,6 +647,7 @@ export class MatchingService {
   async checkFleetDriversAvailabilityForJob(
     principal: AuthenticatedPrincipal,
     jobId: string,
+    vehicleId?: string | null,
   ) {
     this.ensureDatabase();
     const user = await this.requireCarrierCompany(principal);
@@ -654,11 +659,24 @@ export class MatchingService {
         pickupAt: true,
         routeDurationMinutes: true,
         routeFatigueBreakMinutes: true,
+        minVehicleClass: true,
       },
     });
     if (!job) throw new NotFoundException('Job not found');
 
     const executionWindow = calculateJobExecutionWindow(job);
+
+    let vehicleClass: string | null = job.minVehicleClass ?? null;
+    if (vehicleId) {
+      const vehicle = await this.prisma.vehicle.findFirst({
+        where: { id: vehicleId, companyId: company.id },
+        select: { vehicleClass: true },
+      });
+      if (!vehicle) throw new NotFoundException('Vehicle not found');
+      vehicleClass = vehicle.vehicleClass;
+    }
+
+    const { minLicenceMap } = await loadVehicleClassMaps(this.prisma);
 
     const drivers = await this.prisma.driver.findMany({
       where: {
@@ -680,14 +698,40 @@ export class MatchingService {
           excludeJobId: job.id,
         });
 
+        let isEligible = check.isAvailable;
+        let code = check.code ?? null;
+        let reason = check.message ?? null;
+
+        // Same licence/NHVR gates as submitProposal — surface before bid API error.
+        if (isEligible) {
+          const licenceGate = evaluateDriverLicenceFields(
+            {
+              id: drv.id,
+              status: drv.status,
+              licenceClass: drv.licenceClass,
+              licenceExpiry: drv.licenceExpiry,
+              nhvrAcknowledgedAt: drv.nhvrAcknowledgedAt,
+            },
+            vehicleClass,
+            new Date(),
+            minLicenceMap,
+          );
+          if (!licenceGate.ok) {
+            isEligible = false;
+            code = licenceGate.code;
+            reason = licenceGate.message;
+          }
+        }
+
         return {
           id: drv.id,
           name: drv.user?.name ?? drv.user?.email ?? 'Unknown Driver',
           email: drv.user?.email ?? null,
           licenceClass: drv.licenceClass,
-          isEligible: check.isAvailable,
-          code: check.code ?? null,
-          reason: check.message ?? null,
+          vehicleClass,
+          isEligible,
+          code,
+          reason,
           conflictingWindow: check.conflictingWindow ?? null,
         };
       }),
@@ -695,6 +739,8 @@ export class MatchingService {
 
     return {
       jobId: job.id,
+      vehicleId: vehicleId ?? null,
+      vehicleClass,
       jobWindow: {
         startAt: executionWindow.windowStart,
         endAt: executionWindow.windowEnd,

@@ -634,6 +634,9 @@ export class JobsService {
       include: {
         stops: { orderBy: { sequence: 'asc' } },
         trip: { select: { id: true, status: true, completedAt: true } },
+        assignment: {
+          select: { id: true, status: true, lockedAt: true },
+        },
         _count: {
           select: {
             proposals: { where: { status: ProposalStatus.SUBMITTED } },
@@ -653,6 +656,15 @@ export class JobsService {
           }
         : null,
       completedAt: j.trip?.completedAt?.toISOString() ?? null,
+      // Lightweight assignment so sender list can show Pending payment vs Paid & locked.
+      assignment: j.assignment
+        ? {
+            id: j.assignment.id,
+            status: j.assignment.status,
+            lockedAt: j.assignment.lockedAt,
+            paidAndConfirmed: isAssignmentPaidAndConfirmed(j.assignment.status),
+          }
+        : null,
     }));
   }
 

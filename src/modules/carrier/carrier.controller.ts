@@ -356,12 +356,20 @@ export class CarrierController {
   @ApiBearerAuth()
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(AppRole.TRANSPORT_COMPANY)
-  @ApiOperation({ summary: 'Check fleet drivers availability for a scheduled job window' })
+  @ApiOperation({
+    summary:
+      'Check fleet drivers for a job window (schedule + optional vehicle licence/NHVR gates)',
+  })
   checkFleetDriversBid(
     @CurrentPrincipal() principal: AuthenticatedPrincipal,
     @Param('jobId', ParseUUIDPipe) jobId: string,
+    @Query('vehicleId') vehicleId?: string,
   ) {
-    return this.matchingService.checkFleetDriversAvailabilityForJob(principal, jobId);
+    return this.matchingService.checkFleetDriversAvailabilityForJob(
+      principal,
+      jobId,
+      vehicleId,
+    );
   }
 
   @Get('fleet/schedule')
