@@ -818,23 +818,35 @@ export const submitComplianceSchema = z.object({
 
 export type SubmitComplianceInput = z.infer<typeof submitComplianceSchema>;
 
+const complianceCaseTypeEnum = z.enum([
+  'SENDER_KYB',
+  'SENDER_KYC',
+  'CARRIER_KYB',
+  'CARRIER_FLEET_RWC',
+  'CARRIER_DRIVER_LICENCE',
+  'COMPANY_PROFILE_CHANGE',
+  'ADMIN_PARTNER_KYB',
+]);
+
 export const complianceCaseListQuerySchema = z.object({
   page: z.coerce.number().int().positive().default(1),
   pageSize: z.coerce.number().int().min(1).max(100).default(20),
   status: z
     .enum(['OPEN', 'INFO_REQUESTED', 'ESCALATED', 'APPROVED', 'REJECTED', 'CLOSED'])
     .optional(),
-  caseType: z
-    .enum([
-      'SENDER_KYB',
-      'SENDER_KYC',
-      'CARRIER_KYB',
-      'CARRIER_FLEET_RWC',
-      'CARRIER_DRIVER_LICENCE',
-      'COMPANY_PROFILE_CHANGE',
-      'ADMIN_PARTNER_KYB',
-    ])
-    .optional(),
+  caseType: complianceCaseTypeEnum.optional(),
+  /** Comma-separated or repeated query values — for queue tabs that span types (e.g. Sender). */
+  caseTypes: z.preprocess((val) => {
+    if (val == null || val === '') return undefined;
+    if (Array.isArray(val)) return val;
+    if (typeof val === 'string') {
+      return val
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean);
+    }
+    return val;
+  }, z.array(complianceCaseTypeEnum).min(1).max(10).optional()),
   regionCode: z.string().trim().toUpperCase().max(3).optional(),
   search: z.string().trim().max(100).optional(),
 });

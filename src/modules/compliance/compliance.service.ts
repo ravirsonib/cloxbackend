@@ -459,7 +459,9 @@ export class ComplianceService {
     if (query.status) {
       where.status = query.status;
     }
-    if (query.caseType) {
+    if (query.caseTypes && query.caseTypes.length > 0) {
+      where.caseType = { in: query.caseTypes };
+    } else if (query.caseType) {
       where.caseType = query.caseType;
     }
     if (query.search?.trim()) {
@@ -500,7 +502,15 @@ export class ComplianceService {
           company: { select: { id: true, legalName: true, type: true, abn: true, status: true } },
           region: { select: { code: true, name: true } },
           documents: {
-            select: { id: true, docType: true, status: true, expiresAt: true, originalFilename: true },
+            select: {
+              id: true,
+              docType: true,
+              status: true,
+              expiresAt: true,
+              originalFilename: true,
+              vehicleId: true,
+              driverId: true,
+            },
           },
         },
       }),
