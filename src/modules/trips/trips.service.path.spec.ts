@@ -224,6 +224,15 @@ prisma as never,
         online: true,
         passed: true,
         notes: 'ok',
+        checkedItemIds: [
+          'WHEELS_TYRES',
+          'BRAKES_AIR',
+          'LIGHTS',
+          'ENGINE_FLUIDS',
+          'CABIN_SAFETY',
+          'LOAD_COUPLINGS',
+          'FIT_FOR_DUTY',
+        ],
       });
 
       expect(prisma.vehicle.update).toHaveBeenCalledWith({

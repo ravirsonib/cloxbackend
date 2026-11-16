@@ -7,6 +7,20 @@ import {
   MAX_JOB_WIDTH_CM,
   chargeableWeightKg,
 } from './job-cargo.limits';
+import {
+  TRIP_SAFETY_CHECK_ITEM_IDS,
+  hasAllTripSafetyCheckItems,
+} from './trip-safety-checklist';
+
+export {
+  NHVR_FATIGUE_GUIDE_URL,
+  NHVR_VEHICLE_SAFETY_GUIDE_URL,
+  TRIP_SAFETY_CHECK_ITEM_IDS,
+  formatTripSafetyNotes,
+  hasAllTripSafetyCheckItems,
+  isTripSafetyCheckItemId,
+  type TripSafetyCheckItemId,
+} from './trip-safety-checklist';
 
 export const LeadType = {
   REGISTRY_SENDER: 'REGISTRY_SENDER',
@@ -151,6 +165,14 @@ export const AuditAction = {
   CARRIER_VEHICLE_RETIRED: 'carrier.vehicle_retired',
   CARRIER_VEHICLE_REACTIVATED: 'carrier.vehicle_reactivated',
   CARRIER_VEHICLE_DELETED: 'carrier.vehicle_deleted',
+  CARRIER_FLEET_PLUS_TRIAL_STARTED: 'carrier.fleet_plus.trial_started',
+  CARRIER_FLEET_PLUS_UPDATED: 'carrier.fleet_plus.updated',
+  CARRIER_VEHICLE_COST_PROFILE_UPDATED: 'carrier.vehicle.cost_profile_updated',
+  CARRIER_VEHICLE_FUEL_LOGGED: 'carrier.vehicle.fuel_logged',
+  CARRIER_VEHICLE_COST_LOGGED: 'carrier.vehicle.cost_logged',
+  CARRIER_VEHICLE_MAINTENANCE_OPENED: 'carrier.vehicle.maintenance_opened',
+  CARRIER_VEHICLE_MAINTENANCE_CLEARED: 'carrier.vehicle.maintenance_cleared',
+  CARRIER_VEHICLE_SERVICE_LOGGED: 'carrier.vehicle.service_logged',
   CARRIER_DRIVER_INVITED: 'carrier.driver_invited',
   CARRIER_DRIVER_INVITE_RESENT: 'carrier.driver_invite_resent',
   CARRIER_DRIVER_DISABLED: 'carrier.driver_disabled',
@@ -1182,6 +1204,50 @@ export const fleetDisableReasonSchema = z.object({
 });
 export type FleetDisableReasonInput = z.infer<typeof fleetDisableReasonSchema>;
 
+/** Fleet+ vehicle cost / service profile (progressive disclosure UI). */
+export const vehicleCostProfileSchema = z.object({
+  fuelType: z.string().trim().min(2).max(40).optional().nullable(),
+  serviceIntervalKm: z.number().int().positive().max(500_000).optional().nullable(),
+  lastServiceOdometerKm: z.number().int().min(0).max(10_000_000).optional().nullable(),
+  maintenanceRatePerKm: z.number().min(0).max(100).optional().nullable(),
+  costProfileUnit: z.enum(['PER_KM', 'PER_HR']).optional().nullable(),
+  costProfileRate: z.number().min(0).max(10_000).optional().nullable(),
+  purchasePriceAud: z.number().min(0).max(10_000_000).optional().nullable(),
+  residualValueAud: z.number().min(0).max(10_000_000).optional().nullable(),
+  lifecycleMonths: z.number().int().positive().max(600).optional().nullable(),
+});
+export type VehicleCostProfileInput = z.infer<typeof vehicleCostProfileSchema>;
+
+export const vehicleFuelLogSchema = z.object({
+  liters: z.number().positive().max(10_000),
+  amountAud: z.number().min(0).max(100_000),
+  odometerKm: z.number().int().min(0).max(10_000_000).optional(),
+  notes: z.string().trim().max(2000).optional(),
+  loggedAt: z.string().datetime().optional(),
+});
+export type VehicleFuelLogInput = z.infer<typeof vehicleFuelLogSchema>;
+
+export const vehicleCostEntrySchema = z.object({
+  kind: z.enum(['FUEL', 'WAGE', 'TOLL', 'MAINTENANCE', 'OTHER']),
+  amountAud: z.number().min(0).max(1_000_000),
+  tripId: z.string().uuid().optional(),
+  notes: z.string().trim().max(2000).optional(),
+  loggedAt: z.string().datetime().optional(),
+});
+export type VehicleCostEntryInput = z.infer<typeof vehicleCostEntrySchema>;
+
+export const vehicleServiceLogSchema = z.object({
+  odometerKm: z.number().int().min(0).max(10_000_000),
+  notes: z.string().trim().max(2000).optional(),
+  clearMaintenance: z.boolean().optional(),
+});
+export type VehicleServiceLogInput = z.infer<typeof vehicleServiceLogSchema>;
+
+export const fleetPlusUpgradeSchema = z.object({
+  tier: z.enum(['STARTER', 'GROWTH', 'ENTERPRISE']),
+});
+export type FleetPlusUpgradeInput = z.infer<typeof fleetPlusUpgradeSchema>;
+
 /** Carrier reassigns vehicle/driver on an active assignment (breakdown / continue). */
 export const assignmentReassignSchema = z.object({
   vehicleId: z.string().uuid(),
@@ -1723,12 +1789,31 @@ export const proposalSubmitSchema = z.object({
 
 export type ProposalSubmitInput = z.infer<typeof proposalSubmitSchema>;
 
-export const tripSafetyCheckSchema = z.object({
-  passed: z.boolean(),
-  notes: z.string().trim().max(500).optional(),
-  /** Client must be online — offline start/check rejected */
-  online: z.literal(true),
-});
+export const tripSafetyCheckItemIdSchema = z.enum(TRIP_SAFETY_CHECK_ITEM_IDS);
+
+export const tripSafetyCheckSchema = z
+  .object({
+    passed: z.boolean(),
+    notes: z.string().trim().max(500).optional(),
+    /** Client must be online — offline start/check rejected */
+    online: z.literal(true),
+    /**
+     * Required when passed=true — every NHVR Gate A item must be checked.
+     * Docs: UI-UX DRV-MOB-03 + technical-operational-specification pre-trip checklist.
+     */
+    checkedItemIds: z.array(tripSafetyCheckItemIdSchema).optional(),
+  })
+  .superRefine((val, ctx) => {
+    if (!val.passed) return;
+    if (!hasAllTripSafetyCheckItems(val.checkedItemIds)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['checkedItemIds'],
+        message:
+          'All pre-trip safety checklist items must be confirmed before passing Gate A',
+      });
+    }
+  });
 
 export type TripSafetyCheckInput = z.infer<typeof tripSafetyCheckSchema>;
 

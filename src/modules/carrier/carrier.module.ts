@@ -10,6 +10,9 @@ import { NotificationsModule } from '../notifications/notifications.module';
 import { PaymentsModule } from '../payments/payments.module';
 import { CarrierController } from './carrier.controller';
 import { CarrierService } from './carrier.service';
+import { FleetMaintenanceService } from './fleet-maintenance.service';
+import { FleetPlusService } from './fleet-plus.service';
+import { FleetProfitService } from './fleet-profit.service';
 
 @Module({
   imports: [
@@ -22,7 +25,14 @@ import { CarrierService } from './carrier.service';
     forwardRef(() => MatchingModule),
   ],
   controllers: [CarrierController],
-  providers: [CarrierService, JwtAuthGuard, RolesGuard],
-  exports: [CarrierService],
+  providers: [
+    CarrierService,
+    FleetPlusService,
+    FleetProfitService,
+    FleetMaintenanceService,
+    JwtAuthGuard,
+    RolesGuard,
+  ],
+  exports: [CarrierService, FleetPlusService, FleetProfitService, FleetMaintenanceService],
 })
 export class CarrierModule {}

@@ -470,12 +470,31 @@ model Company {
   prospects           Prospect[]
   disputes            Dispute[]            @relation("DisputeCompany")
   driverSchedules     DriverScheduleEntry[]
+  fleetPlus           CompanyFleetPlus?
+  vehicleFuelLogs     VehicleFuelLog[]
+  vehicleCostEntries  VehicleCostEntry[]
+  vehicleMaintenanceWorkOrders VehicleMaintenanceWorkOrder[]
 
   @@index([type, status])
   @@index([abn])
   @@index([homeRegionId])
   @@index([suspendedAt])
   @@index([referredByAdminUserId])
+}
+
+/// Fleet+ SaaS entitlement (G0-16 amended)
+model CompanyFleetPlus {
+  id                   String          @id @default(uuid())
+  companyId            String          @unique
+  company              Company         @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  tier                 FleetPlusTier   @default(FREE_TRIAL)
+  status               FleetPlusStatus @default(NONE)
+  trialEndsAt          DateTime?
+  currentPeriodEnd     DateTime?
+  stripeSubscriptionId String?
+  stripeCustomerId     String?
+  createdAt            DateTime        @default(now())
+  updatedAt            DateTime        @updatedAt
 }
 
 enum ProspectStage {
@@ -545,6 +564,49 @@ enum VehicleStatus {
   ACTIVE
   SUSPENDED
   RETIRED
+  /// Fleet+ AC5 / safety fail — blocked from bid until cleared
+  MAINTENANCE
+}
+
+enum FleetPlusTier {
+  FREE_TRIAL
+  STARTER
+  GROWTH
+  ENTERPRISE
+}
+
+enum FleetPlusStatus {
+  NONE
+  TRIALING
+  ACTIVE
+  PAST_DUE
+  CANCELED
+}
+
+enum VehicleCostProfileUnit {
+  PER_KM
+  PER_HR
+}
+
+enum VehicleCostKind {
+  FUEL
+  WAGE
+  TOLL
+  MAINTENANCE
+  OTHER
+}
+
+enum VehicleMaintenanceCause {
+  RWC_EXPIRED
+  SERVICE_INTERVAL
+  SAFETY_FAIL
+  MANUAL
+}
+
+enum VehicleFuelLogSource {
+  MANUAL
+  TRIP_ODOMETER
+  TELEMATICS_STUB
 }
 
 enum DriverStatus {
@@ -615,6 +677,18 @@ model Vehicle {
   tareKg       Int?
   gvmKg        Int?
   gcmKg        Int?
+  /// Fleet+ cost / service profile
+  fuelType               String?
+  serviceIntervalKm      Int?
+  lastServiceOdometerKm  Int?
+  maintenanceRatePerKm   Decimal?                @db.Decimal(12, 4)
+  costProfileUnit        VehicleCostProfileUnit?
+  costProfileRate        Decimal?                @db.Decimal(12, 4)
+  purchasePriceAud       Decimal?                @db.Decimal(14, 2)
+  residualValueAud       Decimal?                @db.Decimal(14, 2)
+  lifecycleMonths        Int?
+  maintenanceCause       VehicleMaintenanceCause?
+  maintenanceStartedAt   DateTime?
   disabledAt     DateTime?
   disabledReason String?
   disabledNote   String?
@@ -625,8 +699,66 @@ model Vehicle {
   proposals   Proposal[]
   complianceDocuments ComplianceDocument[]
   proposedOnExceptions TripException[] @relation("ExceptionProposedVehicle")
+  fuelLogs             VehicleFuelLog[]
+  costEntries          VehicleCostEntry[]
+  maintenanceWorkOrders VehicleMaintenanceWorkOrder[]
 
   @@index([companyId, status])
+}
+
+model VehicleFuelLog {
+  id          String               @id @default(uuid())
+  vehicleId   String
+  vehicle     Vehicle              @relation(fields: [vehicleId], references: [id], onDelete: Cascade)
+  companyId   String
+  company     Company              @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  liters      Decimal              @db.Decimal(12, 3)
+  amountAud   Decimal              @db.Decimal(14, 2)
+  odometerKm  Int?
+  loggedAt    DateTime             @default(now())
+  source      VehicleFuelLogSource @default(MANUAL)
+  notes       String?
+  createdAt   DateTime             @default(now())
+
+  @@index([vehicleId, loggedAt])
+  @@index([companyId, loggedAt])
+}
+
+model VehicleCostEntry {
+  id        String          @id @default(uuid())
+  vehicleId String
+  vehicle   Vehicle         @relation(fields: [vehicleId], references: [id], onDelete: Cascade)
+  companyId String
+  company   Company         @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  kind      VehicleCostKind
+  amountAud Decimal         @db.Decimal(14, 2)
+  tripId    String?
+  notes     String?
+  loggedAt  DateTime        @default(now())
+  createdAt DateTime        @default(now())
+
+  @@index([vehicleId, loggedAt])
+  @@index([companyId, loggedAt])
+  @@index([tripId])
+}
+
+model VehicleMaintenanceWorkOrder {
+  id          String                   @id @default(uuid())
+  vehicleId   String
+  vehicle     Vehicle                  @relation(fields: [vehicleId], references: [id], onDelete: Cascade)
+  companyId   String
+  company     Company                  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  cause       VehicleMaintenanceCause
+  notes       String?
+  tripId      String?
+  openedAt    DateTime                 @default(now())
+  clearedAt   DateTime?
+  clearedNote String?
+  createdAt   DateTime                 @default(now())
+  updatedAt   DateTime                 @updatedAt
+
+  @@index([vehicleId, openedAt])
+  @@index([companyId, clearedAt])
 }
 
 /// Dynamic Vehicle Class configuration managed by Super Admin (auto-recommendation + fleet specs + freight rates)

@@ -155,6 +155,32 @@ describe('Driver Schedule & Availability Collision Engine', () => {
       expect(result.code).toBe('DRIVER_UNAVAILABLE_SCHEDULED');
       expect(result.conflictingScheduleEntryId).toBe('sched-1');
       expect(result.message).toContain('annual leave');
+      expect(mockPrisma.driverScheduleEntry.findFirst).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            type: { not: DriverAvailabilityType.OVERTIME_AVAILABLE },
+          }),
+        }),
+      );
+    });
+
+    it('excludes OVERTIME_AVAILABLE from leave collision filter (extra capacity)', async () => {
+      const findFirst = jest.fn().mockResolvedValue(null);
+      const mockPrisma = {
+        driverScheduleEntry: { findFirst },
+        assignment: { findFirst: jest.fn().mockResolvedValue(null) },
+      } as any;
+
+      const result = await checkDriverAvailabilityForWindow(mockPrisma, {
+        driverId: 'drv-1',
+        windowStart,
+        windowEnd,
+      });
+
+      expect(result.isAvailable).toBe(true);
+      expect(findFirst.mock.calls[0][0].where.type).toEqual({
+        not: DriverAvailabilityType.OVERTIME_AVAILABLE,
+      });
     });
 
     it('returns isAvailable: false with DRIVER_BUSY_ASSIGNMENT_COLLISION if driver is committed to another overlapping job', async () => {

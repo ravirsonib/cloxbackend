@@ -25,7 +25,7 @@ describe('ComplianceService.runExpiryWatchdog leftover edges', () => {
     jest.clearAllMocks();
   });
 
-  it('suspends vehicle for expired per-vehicle RWC', async () => {
+  it('puts vehicle into MAINTENANCE for expired per-vehicle RWC', async () => {
     const prisma = {
       isConnected: () => true,
       complianceDocument: {
@@ -45,6 +45,9 @@ describe('ComplianceService.runExpiryWatchdog leftover edges', () => {
         update: jest.fn().mockResolvedValue({}),
         updateMany: jest.fn(),
       },
+      vehicleMaintenanceWorkOrder: {
+        create: jest.fn().mockResolvedValue({}),
+      },
       company: {
         findUnique: jest.fn().mockResolvedValue({
           id: 'co-1',
@@ -62,8 +65,9 @@ describe('ComplianceService.runExpiryWatchdog leftover edges', () => {
     });
     expect(prisma.vehicle.update).toHaveBeenCalledWith({
       where: { id: 'veh-1' },
-      data: { status: VehicleStatus.SUSPENDED },
+      data: expect.objectContaining({ status: VehicleStatus.MAINTENANCE }),
     });
+    expect(prisma.vehicleMaintenanceWorkOrder.create).toHaveBeenCalled();
     expect(prisma.vehicle.updateMany).not.toHaveBeenCalled();
   });
 

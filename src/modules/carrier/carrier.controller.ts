@@ -29,6 +29,11 @@ import {
   companyProfileChangeRequestSchema,
   companyProfileSelfSchema,
   fleetDisableReasonSchema,
+  fleetPlusUpgradeSchema,
+  vehicleCostEntrySchema,
+  vehicleCostProfileSchema,
+  vehicleFuelLogSchema,
+  vehicleServiceLogSchema,
   type AssignmentReassignInput,
   type CarrierScheduleCreateInput,
   type DriverScheduleReviewInput,
@@ -43,6 +48,11 @@ import {
   type CompanyProfileChangeRequestInput,
   type CompanyProfileSelfInput,
   type FleetDisableReasonInput,
+  type FleetPlusUpgradeInput,
+  type VehicleCostEntryInput,
+  type VehicleCostProfileInput,
+  type VehicleFuelLogInput,
+  type VehicleServiceLogInput,
 } from '../../shared/types';
 import { CurrentPrincipal } from '../../common/decorators/current-admin.decorator';
 import { Roles } from '../../common/decorators/roles.decorator';
@@ -53,6 +63,8 @@ import { CompanyProfileService } from '../../common/services/company-profile.ser
 import { DriverScheduleService } from '../driver/driver-schedule.service';
 import { MatchingService } from '../matching/matching.service';
 import { CarrierService } from './carrier.service';
+import { FleetPlusService } from './fleet-plus.service';
+import { FleetProfitService } from './fleet-profit.service';
 
 @ApiTags('carrier')
 @Controller('carrier')
@@ -62,6 +74,8 @@ export class CarrierController {
     private readonly matchingService: MatchingService,
     private readonly companyProfileService: CompanyProfileService,
     private readonly scheduleService: DriverScheduleService,
+    private readonly fleetPlusService: FleetPlusService,
+    private readonly fleetProfitService: FleetProfitService,
   ) {}
 
   @Post('register')
@@ -434,5 +448,127 @@ export class CarrierController {
     @Body(new ZodValidationPipe(assignmentReassignSchema)) body: AssignmentReassignInput,
   ) {
     return this.carrierService.reassignAssignment(principal, id, body);
+  }
+
+  @Get('fleet-plus')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(AppRole.TRANSPORT_COMPANY)
+  @ApiOperation({ summary: 'Fleet+ entitlement status (trial / subscription)' })
+  getFleetPlus(@CurrentPrincipal() principal: AuthenticatedPrincipal) {
+    return this.fleetPlusService.getFleetPlus(principal);
+  }
+
+  @Post('fleet-plus/start-trial')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(AppRole.TRANSPORT_COMPANY)
+  @ApiOperation({ summary: 'Start Fleet+ 14-day free trial' })
+  startFleetPlusTrial(@CurrentPrincipal() principal: AuthenticatedPrincipal) {
+    return this.fleetPlusService.startTrial(principal);
+  }
+
+  @Post('fleet-plus/upgrade')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(AppRole.TRANSPORT_COMPANY)
+  @ApiOperation({
+    summary:
+      'Activate Starter/Growth/Enterprise (mock subscription now; live Stripe Billing via webhook applyStripeSubscription)',
+  })
+  upgradeFleetPlus(
+    @CurrentPrincipal() principal: AuthenticatedPrincipal,
+    @Body(new ZodValidationPipe(fleetPlusUpgradeSchema)) body: FleetPlusUpgradeInput,
+  ) {
+    return this.fleetPlusService.upgradeTier(principal, body.tier);
+  }
+
+  @Get('fleet/analytics')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(AppRole.TRANSPORT_COMPANY)
+  @ApiOperation({ summary: 'Fleet+ profit / utilisation analytics (AC1–AC4)' })
+  getFleetAnalytics(
+    @CurrentPrincipal() principal: AuthenticatedPrincipal,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+  ) {
+    return this.fleetProfitService.getAnalytics(principal, { from, to });
+  }
+
+  @Get('fleet/suggest/:jobId')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(AppRole.TRANSPORT_COMPANY)
+  @ApiOperation({ summary: 'Smart allocation suggestions (closest / least idle / most profitable)' })
+  suggestFleetAssets(
+    @CurrentPrincipal() principal: AuthenticatedPrincipal,
+    @Param('jobId', ParseUUIDPipe) jobId: string,
+  ) {
+    return this.matchingService.suggestFleetAssetsForJob(principal, jobId);
+  }
+
+  @Patch('vehicles/:id/cost-profile')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(AppRole.TRANSPORT_COMPANY)
+  @ApiOperation({ summary: 'Update Fleet+ vehicle cost / service profile' })
+  updateVehicleCostProfile(
+    @CurrentPrincipal() principal: AuthenticatedPrincipal,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body(new ZodValidationPipe(vehicleCostProfileSchema)) body: VehicleCostProfileInput,
+  ) {
+    return this.fleetPlusService.updateCostProfile(principal, id, body);
+  }
+
+  @Post('vehicles/:id/fuel-logs')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(AppRole.TRANSPORT_COMPANY)
+  @ApiOperation({ summary: 'Log fuel purchase against a vehicle' })
+  addVehicleFuelLog(
+    @CurrentPrincipal() principal: AuthenticatedPrincipal,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body(new ZodValidationPipe(vehicleFuelLogSchema)) body: VehicleFuelLogInput,
+  ) {
+    return this.fleetPlusService.addFuelLog(principal, id, body);
+  }
+
+  @Post('vehicles/:id/cost-entries')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(AppRole.TRANSPORT_COMPANY)
+  @ApiOperation({ summary: 'Log wage / toll / maintenance / other cost' })
+  addVehicleCostEntry(
+    @CurrentPrincipal() principal: AuthenticatedPrincipal,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body(new ZodValidationPipe(vehicleCostEntrySchema)) body: VehicleCostEntryInput,
+  ) {
+    return this.fleetPlusService.addCostEntry(principal, id, body);
+  }
+
+  @Post('vehicles/:id/service-log')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(AppRole.TRANSPORT_COMPANY)
+  @ApiOperation({ summary: 'Log service odometer; optionally clear MAINTENANCE' })
+  logVehicleService(
+    @CurrentPrincipal() principal: AuthenticatedPrincipal,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body(new ZodValidationPipe(vehicleServiceLogSchema)) body: VehicleServiceLogInput,
+  ) {
+    return this.fleetPlusService.logService(principal, id, body);
+  }
+
+  @Get('vehicles/:id/maintenance-orders')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(AppRole.TRANSPORT_COMPANY)
+  @ApiOperation({ summary: 'List maintenance work orders for a vehicle' })
+  listVehicleMaintenanceOrders(
+    @CurrentPrincipal() principal: AuthenticatedPrincipal,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.fleetPlusService.listWorkOrders(principal, id);
   }
 }

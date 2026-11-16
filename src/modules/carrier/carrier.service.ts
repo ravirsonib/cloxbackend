@@ -55,6 +55,14 @@ import { NotificationsService } from '../notifications/notifications.service';
 import { companyHasMockCarrierConnect } from '../payments/stripe-mock-ids.util';
 import { StripeService } from '../payments/stripe.service';
 
+/** Prisma Decimal (or number/null) → plain number for JSON responses. */
+function toNumberOrNull(n: { toNumber?: () => number } | number | null | undefined): number | null {
+  if (n == null) return null;
+  if (typeof n === 'number') return n;
+  if (typeof n.toNumber === 'function') return n.toNumber();
+  return Number(n);
+}
+
 @Injectable()
 export class CarrierService {
   private readonly logger = new Logger(CarrierService.name);
@@ -821,6 +829,18 @@ export class CarrierService {
         disabledNote: true,
         createdAt: true,
         updatedAt: true,
+        // Fleet+ (Wave 2-4): maintenance watchdog cause + cost/service profile.
+        maintenanceCause: true,
+        maintenanceStartedAt: true,
+        fuelType: true,
+        serviceIntervalKm: true,
+        lastServiceOdometerKm: true,
+        maintenanceRatePerKm: true,
+        costProfileUnit: true,
+        costProfileRate: true,
+        purchasePriceAud: true,
+        residualValueAud: true,
+        lifecycleMonths: true,
       },
     });
 
@@ -971,6 +991,10 @@ export class CarrierService {
           (!hasPerVehicleDgDocs && company.capabilities.includes('DG') ? companyDgDoc : null);
         return {
           ...v,
+          maintenanceRatePerKm: toNumberOrNull(v.maintenanceRatePerKm),
+          costProfileRate: toNumberOrNull(v.costProfileRate),
+          purchasePriceAud: toNumberOrNull(v.purchasePriceAud),
+          residualValueAud: toNumberOrNull(v.residualValueAud),
           activityStatus,
           bidAvailable,
           hasDg: Boolean(vehicleDgDoc),
@@ -1468,9 +1492,10 @@ export class CarrierService {
     if (!vehicle) throw new NotFoundException('Vehicle not found');
     if (
       vehicle.status !== VehicleStatus.SUSPENDED &&
-      vehicle.status !== VehicleStatus.RETIRED
+      vehicle.status !== VehicleStatus.RETIRED &&
+      vehicle.status !== VehicleStatus.MAINTENANCE
     ) {
-      throw new BadRequestException('Vehicle is not disabled or retired');
+      throw new BadRequestException('Vehicle is not disabled, retired, or in maintenance');
     }
 
     const rwcDoc = await this.prisma.complianceDocument.findFirst({
@@ -1489,6 +1514,16 @@ export class CarrierService {
       );
     }
 
+    if (
+      vehicle.status === VehicleStatus.MAINTENANCE &&
+      vehicle.maintenanceCause === 'SERVICE_INTERVAL'
+    ) {
+      throw new BadRequestException({
+        message: 'Log a service (odometer) to clear service-interval maintenance before reactivating',
+        code: 'SERVICE_LOG_REQUIRED',
+      });
+    }
+
     const updated = await this.prisma.vehicle.update({
       where: { id: vehicleId },
       data: {
@@ -1496,8 +1531,17 @@ export class CarrierService {
         disabledAt: null,
         disabledReason: null,
         disabledNote: null,
+        maintenanceCause: null,
+        maintenanceStartedAt: null,
       },
     });
+
+    if (vehicle.status === VehicleStatus.MAINTENANCE) {
+      await this.prisma.vehicleMaintenanceWorkOrder.updateMany({
+        where: { vehicleId, clearedAt: null },
+        data: { clearedAt: new Date(), clearedNote: 'Carrier reactivated after valid RWC' },
+      });
+    }
 
     await this.audit.recordPlatform({
       action: AuditAction.CARRIER_VEHICLE_REACTIVATED,

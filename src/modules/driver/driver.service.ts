@@ -180,7 +180,7 @@ export class DriverService {
       active,
       // Personal details are mandatory on submitProfile; already-ACTIVE drivers stay assignable.
       canBeAssigned: linked && active && licenceOk && nhvrOk && licenceDocumentUploaded,
-      tripApisNote: 'Trip execution APIs return not-assigned until M8',
+      tripApisNote: 'Trip execution APIs are live — use GET /trips/mine and trip detail gates',
     };
   }
 

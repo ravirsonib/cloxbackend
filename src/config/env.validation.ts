@@ -51,6 +51,12 @@ export const envSchema = z.object({
   ABR_GUID: z.string().optional(),
   /** Expiry watchdog interval ms (default 1h). Set 0 to disable. */
   COMPLIANCE_WATCHDOG_MS: z.coerce.number().int().nonnegative().default(3_600_000),
+  /**
+   * Fleet+ SaaS billing kill-switch.
+   * false (default) = all carriers get Fleet+ free (no trial/paywall).
+   * true = trial + subscription entitlements enforced.
+   */
+  FLEET_PLUS_BILLING_ENABLED: booleanFromString.default(false),
   /** Settlement cycle automated watchdog interval ms (default 1h). Set 0 to disable. */
   SETTLEMENT_WATCHDOG_MS: z.coerce.number().int().nonnegative().default(3_600_000),
   /**

@@ -1,6 +1,7 @@
 import { BadRequestException, ConflictException } from '@nestjs/common';
 import {
   AssignmentStatus,
+  DriverAvailabilityType,
   DriverScheduleStatus,
   TripStatus,
   type PrismaClient,
@@ -99,12 +100,14 @@ export async function checkDriverAvailabilityForWindow(
 ): Promise<DriverAvailabilityCheckResult> {
   const { driverId, windowStart, windowEnd, excludeJobId } = params;
 
-  // 1. Check approved schedule entries (e.g. Annual Leave, Medical, Rostered Off)
+  // 1. Check approved leave/unavailable schedule entries.
+  // OVERTIME_AVAILABLE = extra capacity — must NOT block bidding.
   const conflictingSchedule = prisma.driverScheduleEntry?.findFirst
     ? await prisma.driverScheduleEntry.findFirst({
         where: {
           driverId,
           status: DriverScheduleStatus.APPROVED,
+          type: { not: DriverAvailabilityType.OVERTIME_AVAILABLE },
           startAt: { lt: windowEnd },
           endAt: { gt: windowStart },
         },

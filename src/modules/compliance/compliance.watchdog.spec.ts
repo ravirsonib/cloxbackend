@@ -20,7 +20,7 @@ describe('ComplianceService.runExpiryWatchdog paths', () => {
     });
   });
 
-  it('expires RWC without vehicleId and suspends ACTIVE fleet', async () => {
+  it('expires RWC without vehicleId and puts ACTIVE fleet into MAINTENANCE', async () => {
     const prisma = {
       isConnected: () => true,
       complianceDocument: {
@@ -36,7 +36,12 @@ describe('ComplianceService.runExpiryWatchdog paths', () => {
         update: jest.fn().mockResolvedValue({}),
       },
       vehicle: {
-        updateMany: jest.fn().mockResolvedValue({ count: 2 }),
+        findMany: jest.fn().mockResolvedValue([{ id: 'veh-1' }, { id: 'veh-2' }]),
+        update: jest.fn().mockResolvedValue({}),
+        updateMany: jest.fn(),
+      },
+      vehicleMaintenanceWorkOrder: {
+        create: jest.fn().mockResolvedValue({}),
       },
       company: {
         findUnique: jest.fn().mockResolvedValue({
@@ -60,10 +65,8 @@ describe('ComplianceService.runExpiryWatchdog paths', () => {
     const result = await service.runExpiryWatchdog();
     expect(result.expired).toBe(1);
     expect(result.suspendedVehicles).toBe(2);
-    expect(prisma.vehicle.updateMany).toHaveBeenCalledWith({
-      where: { companyId: 'co-1', status: VehicleStatus.ACTIVE },
-      data: { status: VehicleStatus.SUSPENDED },
-    });
+    expect(prisma.vehicle.update).toHaveBeenCalled();
+    expect(prisma.vehicleMaintenanceWorkOrder.create).toHaveBeenCalledTimes(2);
     expect(prisma.company.update).toHaveBeenCalledWith({
       where: { id: 'co-1' },
       data: { status: CompanyStatus.SUSPENDED },

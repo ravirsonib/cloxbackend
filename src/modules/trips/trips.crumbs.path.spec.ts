@@ -210,10 +210,21 @@ prisma as never,
     await makeService(prismaPass).safetyCheck(driver, 'trip-1', {
       online: true,
       passed: true,
+      checkedItemIds: [
+        'WHEELS_TYRES',
+        'BRAKES_AIR',
+        'LIGHTS',
+        'ENGINE_FLUIDS',
+        'CABIN_SAFETY',
+        'LOAD_COUPLINGS',
+        'FIT_FOR_DUTY',
+      ],
     });
     expect(prismaPass.trip.update).toHaveBeenCalledWith(
       expect.objectContaining({
-        data: expect.objectContaining({ safetyNotes: null }),
+        data: expect.objectContaining({
+          safetyNotes: expect.stringContaining('[CHECKLIST]'),
+        }),
       }),
     );
 

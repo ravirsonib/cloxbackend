@@ -20,6 +20,7 @@ import {
   NotificationType,
   PlatformRole,
   UserStatus,
+  VehicleMaintenanceCause,
   VehicleStatus,
   type Prisma,
 } from '@prisma/client';
@@ -1527,18 +1528,49 @@ export class ComplianceService {
       });
 
       if (doc.vehicleId && doc.docType === ComplianceDocType.RWC) {
+        // Fleet+ AC5: per-vehicle RWC expiry → MAINTENANCE (blocks bid) rather than SUSPENDED.
         await this.prisma.vehicle.update({
           where: { id: doc.vehicleId },
-          data: { status: VehicleStatus.SUSPENDED },
+          data: {
+            status: VehicleStatus.MAINTENANCE,
+            maintenanceCause: VehicleMaintenanceCause.RWC_EXPIRED,
+            maintenanceStartedAt: new Date(),
+          },
+        });
+        await this.prisma.vehicleMaintenanceWorkOrder.create({
+          data: {
+            vehicleId: doc.vehicleId,
+            companyId: doc.companyId!,
+            cause: VehicleMaintenanceCause.RWC_EXPIRED,
+            notes: `Compliance expiry watchdog — doc ${doc.id}`,
+          },
         });
         suspendedVehicles += 1;
       } else if (doc.companyId && doc.docType === ComplianceDocType.RWC) {
-        // Company-level RWC (no vehicleId) — suspend entire ACTIVE fleet.
-        const result = await this.prisma.vehicle.updateMany({
+        // Company-level RWC (no vehicleId) — put entire ACTIVE fleet into MAINTENANCE.
+        const actives = await this.prisma.vehicle.findMany({
           where: { companyId: doc.companyId, status: VehicleStatus.ACTIVE },
-          data: { status: VehicleStatus.SUSPENDED },
+          select: { id: true },
         });
-        suspendedVehicles += result.count;
+        for (const v of actives) {
+          await this.prisma.vehicle.update({
+            where: { id: v.id },
+            data: {
+              status: VehicleStatus.MAINTENANCE,
+              maintenanceCause: VehicleMaintenanceCause.RWC_EXPIRED,
+              maintenanceStartedAt: new Date(),
+            },
+          });
+          await this.prisma.vehicleMaintenanceWorkOrder.create({
+            data: {
+              vehicleId: v.id,
+              companyId: doc.companyId,
+              cause: VehicleMaintenanceCause.RWC_EXPIRED,
+              notes: `Company-level RWC expired — doc ${doc.id}`,
+            },
+          });
+        }
+        suspendedVehicles += actives.length;
       }
 
       if (

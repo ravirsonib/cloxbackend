@@ -20,6 +20,7 @@ import {
   SurchargeKind,
   SurchargeStatus,
   TripStatus,
+  VehicleMaintenanceCause,
   VehicleStatus,
 } from '@prisma/client';
 
@@ -34,6 +35,8 @@ import type { AuthenticatedPrincipal } from '../../common/guards/jwt-auth.guard'
 import type { AppEnv } from '../../config/env.validation';
 import {
   AuditAction,
+  formatTripSafetyNotes,
+  hasAllTripSafetyCheckItems,
   type TripBreakInput,
   type TripLocationInput,
   type TripMassCheckInput,
@@ -947,26 +950,41 @@ export class TripsService {
       if (trip.assignment.vehicleId) {
         const vehicle = await this.prisma.vehicle.findUnique({
           where: { id: trip.assignment.vehicleId },
-          select: { status: true },
+          select: { status: true, companyId: true },
         });
-        // Only suspend ACTIVE fleet — never overwrite an existing compliance suspension.
+        // ACTIVE → MAINTENANCE + durable work order (legal suite §4.1 / BR-18).
+        // Never overwrite an existing compliance suspension/retirement.
         if (vehicle?.status === VehicleStatus.ACTIVE) {
           await this.prisma.vehicle.update({
             where: { id: trip.assignment.vehicleId },
-            data: { status: VehicleStatus.SUSPENDED },
+            data: {
+              status: VehicleStatus.MAINTENANCE,
+              maintenanceCause: VehicleMaintenanceCause.SAFETY_FAIL,
+              maintenanceStartedAt: new Date(),
+            },
+          });
+          await this.prisma.vehicleMaintenanceWorkOrder.create({
+            data: {
+              vehicleId: trip.assignment.vehicleId,
+              companyId: vehicle.companyId,
+              cause: VehicleMaintenanceCause.SAFETY_FAIL,
+              tripId: trip.id,
+              notes: input.notes ?? 'Pre-trip safety checklist failed',
+            },
           });
           safetySuspendedVehicle = true;
         }
       }
-      const noteBase = input.notes ?? 'Pre-trip failed';
       const updated = await this.prisma.trip.update({
         where: { id: trip.id },
         data: {
           safetyFailedAt: new Date(),
           safetyPassedAt: null,
-          safetyNotes: safetySuspendedVehicle
-            ? `${noteBase}\n[SAFETY_SUSPEND]`
-            : noteBase,
+          safetyNotes: formatTripSafetyNotes({
+            checkedItemIds: input.checkedItemIds,
+            notes: input.notes ?? 'Pre-trip failed',
+            safetySuspend: safetySuspendedVehicle,
+          }),
           status: TripStatus.PENDING_GATES,
         },
         include: this.tripInclude(),
@@ -978,10 +996,20 @@ export class TripsService {
         entityId: trip.id,
         metadata: {
           notes: input.notes,
+          checkedItemIds: input.checkedItemIds ?? [],
           vehicleLocked: safetySuspendedVehicle,
+          maintenance: true,
         },
       });
       return this.mapTrip(updated);
+    }
+
+    if (!hasAllTripSafetyCheckItems(input.checkedItemIds)) {
+      throw new BadRequestException({
+        message:
+          'All pre-trip safety checklist items must be confirmed before passing Gate A',
+        code: 'SAFETY_CHECKLIST_INCOMPLETE',
+      });
     }
 
     const updated = await this.prisma.trip.update({
@@ -989,22 +1017,47 @@ export class TripsService {
       data: {
         safetyPassedAt: new Date(),
         safetyFailedAt: null,
-        safetyNotes: input.notes ?? null,
+        safetyNotes: formatTripSafetyNotes({
+          checkedItemIds: input.checkedItemIds,
+          notes: input.notes,
+        }),
         status: TripStatus.EN_ROUTE_PICKUP,
       },
       include: this.tripInclude(),
     });
-    // Only reverse a suspend this trip caused (marker) — never force ACTIVE over compliance.
+    // Only reverse a MAINTENANCE this trip caused (marker) — never force ACTIVE over compliance.
     const wasSafetySuspended = Boolean(
       trip.safetyFailedAt && trip.safetyNotes?.includes('[SAFETY_SUSPEND]'),
     );
     let vehicleUnsuspended = false;
     if (wasSafetySuspended && trip.assignment.vehicleId) {
-      await this.prisma.vehicle.update({
+      const vehicle = await this.prisma.vehicle.findUnique({
         where: { id: trip.assignment.vehicleId },
-        data: { status: VehicleStatus.ACTIVE },
+        select: { status: true, maintenanceCause: true },
       });
-      vehicleUnsuspended = true;
+      if (
+        vehicle?.status === VehicleStatus.MAINTENANCE &&
+        vehicle.maintenanceCause === VehicleMaintenanceCause.SAFETY_FAIL
+      ) {
+        await this.prisma.vehicle.update({
+          where: { id: trip.assignment.vehicleId },
+          data: {
+            status: VehicleStatus.ACTIVE,
+            maintenanceCause: null,
+            maintenanceStartedAt: null,
+          },
+        });
+        await this.prisma.vehicleMaintenanceWorkOrder.updateMany({
+          where: {
+            vehicleId: trip.assignment.vehicleId,
+            tripId: trip.id,
+            clearedAt: null,
+            cause: VehicleMaintenanceCause.SAFETY_FAIL,
+          },
+          data: { clearedAt: new Date(), clearedNote: 'Safety checklist re-passed' },
+        });
+        vehicleUnsuspended = true;
+      }
     }
     await this.audit.recordPlatform({
       action: AuditAction.TRIP_SAFETY_PASSED,

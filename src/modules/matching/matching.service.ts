@@ -751,4 +751,101 @@ export class MatchingService {
       drivers: driverChecks,
     };
   }
+
+  /**
+   * Rules-based smart allocation (Fleet+ AC / workflows PDF):
+   * Closest (heuristic: lowest class rank delta to min), Least Idle, Most Profitable (cost rate).
+   * Carrier still confirms — no silent auto-assign.
+   */
+  async suggestFleetAssetsForJob(principal: AuthenticatedPrincipal, jobId: string) {
+    this.ensureDatabase();
+    const user = await this.requireCarrierCompany(principal);
+    const company = user.company!;
+    const job = await this.prisma.job.findUnique({
+      where: { id: jobId },
+      select: {
+        id: true,
+        pickupAt: true,
+        routeDurationMinutes: true,
+        routeFatigueBreakMinutes: true,
+        minVehicleClass: true,
+      },
+    });
+    if (!job) throw new NotFoundException('Job not found');
+
+    const { rankMap } = await loadVehicleClassMaps(this.prisma);
+    const minRank = job.minVehicleClass ? (rankMap[job.minVehicleClass.toUpperCase()] ?? 0) : 0;
+
+    const activeVehicles = await this.prisma.vehicle.findMany({
+      where: { companyId: company.id, status: VehicleStatus.ACTIVE },
+      select: {
+        id: true,
+        registration: true,
+        label: true,
+        vehicleClass: true,
+        costProfileRate: true,
+      },
+    });
+
+    const windowStart = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+    const suggestions = await Promise.all(
+      activeVehicles.map(async (v) => {
+        const classRank = v.vehicleClass ? (rankMap[v.vehicleClass.toUpperCase()] ?? 999) : 999;
+        const classDelta = Math.max(0, classRank - minRank);
+        const undersized = classRank < minRank;
+
+        const busyCount = await this.prisma.assignment.count({
+          where: {
+            vehicleId: v.id,
+            status: AssignmentStatus.LOCKED,
+            trip: { status: { notIn: [TripStatus.COMPLETED, TripStatus.CANCELLED] } },
+          },
+        });
+        const completedRecent = await this.prisma.assignment.count({
+          where: {
+            vehicleId: v.id,
+            status: AssignmentStatus.COMPLETED,
+            updatedAt: { gte: windowStart },
+          },
+        });
+        const idleScore = busyCount > 0 ? 0 : 100 - Math.min(90, completedRecent * 5);
+        const costRate = v.costProfileRate != null ? Number(v.costProfileRate) : Number.POSITIVE_INFINITY;
+        const profitScore = Number.isFinite(costRate) ? 1000 / (1 + costRate) : 0;
+
+        return {
+          vehicleId: v.id,
+          registration: v.registration,
+          label: v.label,
+          vehicleClass: v.vehicleClass,
+          undersized,
+          classDelta,
+          idleScore,
+          profitScore,
+          busy: busyCount > 0,
+        };
+      }),
+    );
+
+    const eligible = suggestions.filter((s) => !s.undersized && !s.busy);
+    const closest = [...eligible].sort((a, b) => a.classDelta - b.classDelta)[0] ?? null;
+    const leastIdle = [...eligible].sort((a, b) => b.idleScore - a.idleScore)[0] ?? null;
+    const mostProfitable = [...eligible].sort((a, b) => b.profitScore - a.profitScore)[0] ?? null;
+
+    return {
+      jobId: job.id,
+      minVehicleClass: job.minVehicleClass,
+      suggestions: {
+        closest: closest
+          ? { ...closest, reason: 'Closest class fit to job requirement' }
+          : null,
+        leastIdle: leastIdle
+          ? { ...leastIdle, reason: 'Least idle / most available' }
+          : null,
+        mostProfitable: mostProfitable
+          ? { ...mostProfitable, reason: 'Most profitable (lowest cost profile rate)' }
+          : null,
+      },
+      eligibleCount: eligible.length,
+    };
+  }
 }
