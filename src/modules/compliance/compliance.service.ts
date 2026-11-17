@@ -16,6 +16,7 @@ import {
   ComplianceDocStatus,
   ComplianceDocType,
   DriverStatus,
+  JobStatus,
   LeadStatus,
   NotificationType,
   PlatformRole,
@@ -1018,10 +1019,42 @@ export class ComplianceService {
     });
 
     if (this.inbox && users.length > 0) {
-      const onboardingHref =
+      let href =
         params.companyType === CompanyType.CARRIER
           ? '/carrier/onboarding'
           : '/sender/onboarding';
+      let body =
+        params.decisionNote?.trim() ||
+        (params.kind === 'approved'
+          ? 'Ops approved your compliance case.'
+          : params.kind === 'rejected'
+            ? 'Ops could not approve your compliance case.'
+            : 'Ops requested more information on your compliance case.');
+      if (
+        params.kind === 'approved' &&
+        params.companyType === CompanyType.SENDER
+      ) {
+        const pendingPublish = await this.prisma.job.findFirst({
+          where: {
+            senderCompanyId: params.companyId,
+            status: JobStatus.DRAFT,
+            publishRequestedAt: { not: null },
+          },
+          orderBy: { publishRequestedAt: 'asc' },
+          select: { id: true },
+        });
+        if (pendingPublish) {
+          href = `/jobs/${pendingPublish.id}`;
+          body =
+            params.decisionNote?.trim() ||
+            'Ops approved your verification. You can publish your draft job now — it is not live until you publish.';
+        } else {
+          href = '/jobs';
+          body =
+            params.decisionNote?.trim() ||
+            'Ops approved your verification. You can create and publish jobs on the marketplace.';
+        }
+      }
       const approved = params.kind === 'approved';
       void this.inbox.notifyUsers({
         userIds: users.map((u) => u.id),
@@ -1033,14 +1066,8 @@ export class ComplianceService {
           : params.kind === 'rejected'
             ? `Verification not approved: ${params.companyName}`
             : `More info needed: ${params.companyName}`,
-        body:
-          params.decisionNote?.trim() ||
-          (approved
-            ? 'Ops approved your compliance case.'
-            : params.kind === 'rejected'
-              ? 'Ops could not approve your compliance case.'
-              : 'Ops requested more information on your compliance case.'),
-        href: onboardingHref,
+        body,
+        href,
         entityType: 'ComplianceCase',
         entityId: params.caseId,
       });

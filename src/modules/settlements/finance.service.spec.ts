@@ -305,6 +305,7 @@ describe('FinanceService', () => {
           id: 'asg-1',
           createdAt: new Date(),
           job: { id: 'job-1', title: 'Express Freight', estimateIncGstCents: 100000, status: 'COMPLETED' },
+          proposal: { amountIncGstCents: 100000 },
           trip: { id: 'trip-1', status: TripStatus.COMPLETED, completedAt: new Date() },
         },
       ]);
@@ -312,6 +313,7 @@ describe('FinanceService', () => {
       prisma.settlementLine.findMany.mockResolvedValue([
         {
           id: 'line-c-1',
+          jobId: 'job-1',
           amountCents: 70000,
           status: SettlementLineStatus.PAID,
           job: { id: 'job-1', title: 'Express Freight' },
@@ -335,9 +337,58 @@ describe('FinanceService', () => {
       expect(result.summary.totalEarnedCents).toBe(70000);
       expect(result.summary.paidOutCents).toBe(70000);
       expect(result.tripLedger).toHaveLength(1);
+      expect(result.tripLedger[0].grossFareCents).toBe(100000);
       expect(result.tripLedger[0].carrierNetCents).toBe(70000);
       expect(result.tripLedger[0].status).toBe('PAID');
       expect(result.recentTransfers).toHaveLength(1);
+    });
+
+    it('uses accepted proposal + settlement net when estimate differs from bid', async () => {
+      prisma.user.findUnique.mockResolvedValue({
+        id: 'user-carrier-1',
+        companyId: 'comp-carrier-1',
+        company: {
+          id: 'comp-carrier-1',
+          legalName: 'Fastline',
+          tradingName: 'Fastline',
+          stripeConnectPayoutsEnabled: true,
+        },
+      });
+
+      // Estimate $27,500 vs accepted bid $28,000 — ledger must follow the bid/settlement.
+      prisma.assignment.findMany.mockResolvedValue([
+        {
+          id: 'asg-1',
+          createdAt: new Date(),
+          job: {
+            id: 'job-1',
+            title: 'Hourly Load',
+            estimateIncGstCents: 2_750_000,
+            status: 'COMPLETED',
+          },
+          proposal: { amountIncGstCents: 2_800_000 },
+          trip: { id: 'trip-1', status: TripStatus.COMPLETED, completedAt: new Date() },
+        },
+      ]);
+
+      prisma.settlementLine.findMany.mockResolvedValue([
+        {
+          id: 'line-c-1',
+          jobId: 'job-1',
+          amountCents: 1_960_000,
+          status: SettlementLineStatus.ACCRUED,
+          job: { id: 'job-1', title: 'Hourly Load' },
+        },
+      ]);
+      prisma.paymentEvent.findMany.mockResolvedValue([]);
+
+      const result = await service.getCarrierFinance(carrierPrincipal, { period: 'month' });
+
+      expect(result.summary.totalEarnedCents).toBe(1_960_000);
+      expect(result.summary.clearingCents).toBe(1_960_000);
+      expect(result.tripLedger[0].grossFareCents).toBe(2_800_000);
+      expect(result.tripLedger[0].carrierNetCents).toBe(1_960_000);
+      expect(result.tripLedger[0].status).toBe('ACCRUED');
     });
   });
 
@@ -360,13 +411,24 @@ describe('FinanceService', () => {
           createdAt: new Date(),
           status: 'COMPLETED',
           estimateIncGstCents: 110000,
-          paymentEvents: [{ id: 'pe-1', status: 'SUCCEEDED', amountIncGstCents: 110000, stripePaymentIntentId: 'pi_123' }],
+          paymentEvents: [
+            {
+              id: 'pe-1',
+              type: PaymentEventType.CHARGE,
+              status: PaymentEventStatus.SUCCEEDED,
+              amountIncGstCents: 110000,
+              stripePaymentIntentId: 'pi_123',
+              createdAt: new Date(),
+            },
+          ],
+          assignment: { status: 'COMPLETED', proposal: { amountIncGstCents: 110000 } },
         },
       ]);
 
       prisma.surcharge.findMany.mockResolvedValue([
         {
           id: 'sur-1',
+          jobId: 'job-1',
           kind: SurchargeKind.MASS,
           status: SurchargeStatus.PAID,
           amountIncGstCents: 5500,
@@ -381,7 +443,52 @@ describe('FinanceService', () => {
       expect(result.summary.totalGstCents).toBe(10000);
       expect(result.summary.surchargesSpendCents).toBe(5500);
       expect(result.jobSpendHistory).toHaveLength(1);
-      expect(result.jobSpendHistory[0].totalPaidCents).toBe(110000);
+      expect(result.jobSpendHistory[0].baseFareIncGstCents).toBe(110000);
+      expect(result.jobSpendHistory[0].surchargesIncGstCents).toBe(5500);
+      expect(result.jobSpendHistory[0].totalPaidCents).toBe(115500);
+    });
+
+    it('uses accepted bid / charge when estimate differs', async () => {
+      prisma.user.findUnique.mockResolvedValue({
+        id: 'user-sender-1',
+        companyId: 'comp-sender-1',
+        company: {
+          id: 'comp-sender-1',
+          legalName: 'Alpha',
+          tradingName: 'Alpha',
+        },
+      });
+
+      prisma.job.findMany.mockResolvedValue([
+        {
+          id: 'job-1',
+          title: 'Hourly',
+          createdAt: new Date(),
+          status: 'COMPLETED',
+          estimateIncGstCents: 2_750_000,
+          paymentEvents: [
+            {
+              id: 'pe-1',
+              type: PaymentEventType.CHARGE,
+              status: PaymentEventStatus.SUCCEEDED,
+              amountIncGstCents: 2_800_000,
+              stripePaymentIntentId: 'pi_abc',
+              createdAt: new Date(),
+            },
+          ],
+          assignment: {
+            status: 'COMPLETED',
+            proposal: { amountIncGstCents: 2_800_000 },
+          },
+        },
+      ]);
+      prisma.surcharge.findMany.mockResolvedValue([]);
+
+      const result = await service.getSenderFinance(senderPrincipal, { period: 'month' });
+
+      expect(result.summary.totalSpendIncGstCents).toBe(2_800_000);
+      expect(result.jobSpendHistory[0].baseFareIncGstCents).toBe(2_800_000);
+      expect(result.jobSpendHistory[0].totalPaidCents).toBe(2_800_000);
     });
   });
 });

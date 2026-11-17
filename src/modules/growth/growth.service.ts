@@ -65,7 +65,12 @@ export class GrowthService {
       '',
     );
     const path = companyType === CompanyType.SENDER ? 'register/sender' : 'register/carrier';
-    return `${base}/${path}?invite=${encodeURIComponent(rawToken)}`;
+    const qs = new URLSearchParams({ invite: rawToken });
+    // Sender invite: register-first, then optional deep-link to post a job after OTP.
+    if (companyType === CompanyType.SENDER) {
+      qs.set('next', '/jobs/new');
+    }
+    return `${base}/${path}?${qs.toString()}`;
   }
 
   private requireActiveLocal(principal: AuthenticatedPrincipal) {

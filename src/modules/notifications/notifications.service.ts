@@ -425,10 +425,10 @@ export class NotificationsService {
     const isCarrier = params.companyType === 'CARRIER';
     const continueHref = this.signInContinueUrl(
       params.to,
-      isCarrier ? '/market' : '/sender/onboarding',
+      isCarrier ? '/market' : '/jobs',
     );
     const cta = {
-      label: isCarrier ? 'Open job board →' : 'Continue onboarding →',
+      label: isCarrier ? 'Open job board →' : 'Publish your job →',
       href: continueHref,
     };
     const subject = isCarrier
@@ -436,7 +436,7 @@ export class NotificationsService {
       : 'CLOX — your sender account is approved';
     const intro = isCarrier
       ? 'Good news — our team has approved your compliance documents. Your carrier company is now bid-eligible on CLOX.'
-      : 'Good news — our team has approved your compliance documents. Complete payment setup to unlock booking.';
+      : 'Good news — our team has approved your compliance documents. You can now publish jobs to the marketplace (add a payment card on /account before accepting a bid).';
 
     const details: EmailDetailRow[] = [
       { label: 'Account type', value: accountType },
@@ -470,12 +470,12 @@ export class NotificationsService {
             body: 'Sign in with a one-time code using this email.',
           },
           {
-            title: 'Payment setup',
-            body: 'Finish Stripe payment setup in sender onboarding to become booking-ready.',
+            title: 'Publish jobs',
+            body: 'Open Jobs and publish any draft waiting for verification — carriers only see jobs after you publish.',
           },
           {
-            title: 'Create jobs',
-            body: 'Once active, you can create and publish loads on the marketplace.',
+            title: 'Payment setup',
+            body: 'Add a card under Account before you accept a bid (Model A — pay on accept).',
           },
         ];
 

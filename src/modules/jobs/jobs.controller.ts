@@ -106,7 +106,7 @@ export class JobsController {
   @ApiBearerAuth()
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(AppRole.SENDER)
-  @ApiOperation({ summary: 'Create draft job (canBook required)' })
+  @ApiOperation({ summary: 'Create draft job (canDraft required)' })
   create(
     @CurrentPrincipal() principal: AuthenticatedPrincipal,
     @Body(new ZodValidationPipe(jobCreateSchema)) body: JobCreateInput,
@@ -119,7 +119,7 @@ export class JobsController {
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(AppRole.SENDER)
   @ApiOperation({
-    summary: 'Full job update before accept/payment (canBook required)',
+    summary: 'Full job update before accept/payment (canDraft required)',
   })
   update(
     @CurrentPrincipal() principal: AuthenticatedPrincipal,
@@ -144,11 +144,26 @@ export class JobsController {
     return this.jobsService.updateJobReceiver(principal, id, body);
   }
 
+  @Post(':id/request-publish')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(AppRole.SENDER)
+  @ApiOperation({
+    summary:
+      'Request live publish — publishes when canPublishLive, else stamps publishRequestedAt and returns onboarding next step',
+  })
+  requestPublish(
+    @CurrentPrincipal() principal: AuthenticatedPrincipal,
+    @Param('id') id: string,
+  ) {
+    return this.jobsService.requestPublishJob(principal, id);
+  }
+
   @Post(':id/publish')
   @ApiBearerAuth()
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(AppRole.SENDER)
-  @ApiOperation({ summary: 'Publish draft → BIDDING' })
+  @ApiOperation({ summary: 'Publish draft → BIDDING (canPublishLive / Ops + invoice required)' })
   publish(@CurrentPrincipal() principal: AuthenticatedPrincipal, @Param('id') id: string) {
     return this.jobsService.publishJob(principal, id);
   }

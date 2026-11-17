@@ -47,6 +47,7 @@ import {
 import {
   DEFAULT_VEHICLE_CLASSES,
   VehicleClassSpec,
+  vehicleClassConfigWriteData,
   carrierNetPayoutCents,
   chargeableWeightKg,
   gstSplitFromIncCents,
@@ -54,6 +55,9 @@ import {
   recommendVehicleClass,
 } from './job-pricing.util';
 import { estimateRoute, orderStopsTspObjects, routeFromDistanceKm } from './routing.mock';
+
+/** Soft cap so one unverified sender cannot flood DRAFT rows. */
+const MAX_OPEN_DRAFT_JOBS_PER_SENDER = 10;
 
 /** Soft cap so one publish cannot fan out unbounded SMTP work. */
 const MAX_JOB_PUBLISH_CARRIER_EMAILS = 200;
@@ -286,6 +290,7 @@ export class JobsService {
 
   async getActiveVehicleClasses(): Promise<VehicleClassSpec[]> {
     try {
+      await this.seedDefaultVehicleClasses();
       const list = await this.prisma.vehicleClassConfig.findMany({
         where: { isActive: true },
         orderBy: { rank: 'asc' },
@@ -293,42 +298,23 @@ export class JobsService {
       if (list.length > 0) {
         return list.map((c) => this.mapVehicleClassRow(c));
       }
-      await this.seedDefaultVehicleClasses();
-      return DEFAULT_VEHICLE_CLASSES;
+      return DEFAULT_VEHICLE_CLASSES.filter((c) => c.isActive !== false);
     } catch {
-      return DEFAULT_VEHICLE_CLASSES;
+      return DEFAULT_VEHICLE_CLASSES.filter((c) => c.isActive !== false);
     }
   }
 
   async seedDefaultVehicleClasses(): Promise<void> {
     try {
-      const count = await this.prisma.vehicleClassConfig.count();
-      if (count > 0) return;
+      const existing = await this.prisma.vehicleClassConfig.findMany({
+        select: { code: true },
+      });
+      const have = new Set(existing.map((r) => r.code));
       for (const c of DEFAULT_VEHICLE_CLASSES) {
-        await this.prisma.vehicleClassConfig.upsert({
-          where: { code: c.code },
-          update: {},
-          create: {
-            code: c.code,
-            name: c.name ?? c.code,
-            rank: c.rank,
-            maxChargeableWeightKg: c.maxChargeableWeightKg,
-            maxLengthCm: c.maxLengthCm,
-            maxWidthCm: c.maxWidthCm,
-            maxHeightCm: c.maxHeightCm,
-            minLicenceClass: c.minLicenceClass,
-            suggestedGvmKg: c.suggestedGvmKg ?? 3500,
-            suggestedTareKg: c.suggestedTareKg ?? 2000,
-            isActive: true,
-            perKmRateCents: c.perKmRateCents ?? null,
-            hourlyRateCents: c.hourlyRateCents ?? null,
-            perKmMinBaseCents: c.perKmMinBaseCents ?? null,
-            hourlyMinBaseCents: c.hourlyMinBaseCents ?? null,
-            perKmGuidanceMinCents: c.perKmGuidanceMinCents ?? null,
-            perKmGuidanceMaxCents: c.perKmGuidanceMaxCents ?? null,
-            hourlyGuidanceMinCents: c.hourlyGuidanceMinCents ?? null,
-            hourlyGuidanceMaxCents: c.hourlyGuidanceMaxCents ?? null,
-          },
+        if (have.has(c.code)) continue;
+        // Create missing catalog rows only; do not clobber Ops edits on existing rows.
+        await this.prisma.vehicleClassConfig.create({
+          data: vehicleClassConfigWriteData(c),
         });
       }
     } catch {
@@ -444,6 +430,7 @@ export class JobsService {
     estimateGstCents: number | null;
     estimateIncGstCents: number | null;
     publishedAt: Date | null;
+    publishRequestedAt?: Date | null;
     createdAt: Date;
     stops?: Array<{
       id: string;
@@ -540,6 +527,7 @@ export class JobsService {
         incGstCents: job.estimateIncGstCents,
       },
       publishedAt: job.publishedAt,
+      publishRequestedAt: job.publishRequestedAt ?? null,
       createdAt: job.createdAt,
       openProposalCount,
       stops: (job.stops ?? []).map((s) => ({
@@ -919,11 +907,11 @@ export class JobsService {
   async createJob(principal: AuthenticatedPrincipal, input: JobCreateInput) {
     this.ensureDatabase();
     const eligibility = await this.senderService.getBookingEligibility(principal);
-    if (!eligibility.canBook) {
+    if (!eligibility.canDraft) {
       throw new ForbiddenException({
         message:
-          'Sender cannot create jobs until Ops approve + invoice + payment ready. Open /sender/onboarding to add a live card if payment is missing.',
-        code: 'SENDER_NOT_BOOKING_READY',
+          'Sender cannot create draft jobs while the company is rejected or suspended. Open /sender/onboarding for status.',
+        code: 'SENDER_NOT_DRAFT_READY',
         goNoGo: eligibility.goNoGo,
         href: '/sender/onboarding',
       });
@@ -934,6 +922,17 @@ export class JobsService {
       include: { company: { include: { homeRegion: true } } },
     });
     if (!user?.company) throw new NotFoundException('Sender company not found');
+
+    const openDrafts = await this.prisma.job.count({
+      where: { senderCompanyId: user.company.id, status: JobStatus.DRAFT },
+    });
+    if (openDrafts >= MAX_OPEN_DRAFT_JOBS_PER_SENDER) {
+      throw new BadRequestException({
+        message: `You already have ${MAX_OPEN_DRAFT_JOBS_PER_SENDER} draft jobs. Publish or cancel one before creating another.`,
+        code: 'SENDER_DRAFT_LIMIT',
+        limit: MAX_OPEN_DRAFT_JOBS_PER_SENDER,
+      });
+    }
 
     if (!input.siteDisclaimerAccepted) {
       throw new BadRequestException('Site access disclaimer must be accepted');
@@ -1117,11 +1116,11 @@ export class JobsService {
   async updateJob(principal: AuthenticatedPrincipal, jobId: string, input: JobCreateInput) {
     this.ensureDatabase();
     const eligibility = await this.senderService.getBookingEligibility(principal);
-    if (!eligibility.canBook) {
+    if (!eligibility.canDraft) {
       throw new ForbiddenException({
         message:
-          'Sender cannot update jobs until Ops approve + invoice + payment ready. Open /sender/onboarding to add a live card if payment is missing.',
-        code: 'SENDER_NOT_BOOKING_READY',
+          'Sender cannot update jobs while the company is rejected or suspended. Open /sender/onboarding for status.',
+        code: 'SENDER_NOT_DRAFT_READY',
         goNoGo: eligibility.goNoGo,
         href: '/sender/onboarding',
       });
@@ -1327,11 +1326,11 @@ export class JobsService {
   ) {
     this.ensureDatabase();
     const eligibility = await this.senderService.getBookingEligibility(principal);
-    if (!eligibility.canBook) {
+    if (!eligibility.canDraft) {
       throw new ForbiddenException({
         message:
-          'Sender cannot update jobs until Ops approve + invoice + payment ready. Open /sender/onboarding to add a live card if payment is missing.',
-        code: 'SENDER_NOT_BOOKING_READY',
+          'Sender cannot update jobs while the company is rejected or suspended. Open /sender/onboarding for status.',
+        code: 'SENDER_NOT_DRAFT_READY',
         goNoGo: eligibility.goNoGo,
         href: '/sender/onboarding',
       });
@@ -1413,16 +1412,70 @@ export class JobsService {
     };
   }
 
+  async requestPublishJob(principal: AuthenticatedPrincipal, jobId: string) {
+    this.ensureDatabase();
+    const eligibility = await this.senderService.getBookingEligibility(principal);
+    if (!eligibility.canDraft) {
+      throw new ForbiddenException({
+        message:
+          'Sender cannot request publish while the company is rejected or suspended.',
+        code: 'SENDER_NOT_DRAFT_READY',
+        goNoGo: eligibility.goNoGo,
+        href: '/sender/onboarding',
+      });
+    }
+    if (eligibility.canPublishLive) {
+      return {
+        status: 'READY' as const,
+        next: 'publish' as const,
+        href: null as string | null,
+        goNoGo: eligibility.goNoGo,
+        job: await this.publishJob(principal, jobId),
+      };
+    }
+
+    const user = await this.prisma.user.findUnique({ where: { id: principal.id } });
+    if (!user?.companyId) throw new NotFoundException('Sender company not found');
+
+    const job = await this.prisma.job.findFirst({
+      where: { id: jobId, senderCompanyId: user.companyId },
+    });
+    if (!job) throw new NotFoundException('Job not found');
+    if (job.status !== JobStatus.DRAFT) {
+      throw new BadRequestException('Only DRAFT jobs can request publish');
+    }
+
+    const updated = await this.prisma.job.update({
+      where: { id: job.id },
+      data: { publishRequestedAt: job.publishRequestedAt ?? new Date() },
+      include: { stops: { orderBy: { sequence: 'asc' } } },
+    });
+
+    const waitingOps =
+      eligibility.companyStatus === CompanyStatus.PENDING_REVIEW ||
+      eligibility.companyStatus === CompanyStatus.PENDING_VERIFICATION;
+
+    return {
+      status: 'BLOCKED' as const,
+      next: waitingOps ? ('waiting_ops' as const) : ('onboarding' as const),
+      href: `/sender/onboarding?returnTo=${encodeURIComponent(`/jobs/${job.id}`)}`,
+      goNoGo: eligibility.goNoGo,
+      blockers: eligibility.blockers,
+      job: this.mapJob(updated),
+    };
+  }
+
   async publishJob(principal: AuthenticatedPrincipal, jobId: string) {
     this.ensureDatabase();
     const eligibility = await this.senderService.getBookingEligibility(principal);
-    if (!eligibility.canBook) {
+    if (!eligibility.canPublishLive) {
       throw new ForbiddenException({
         message:
-          'Sender cannot publish jobs until payment is ready. Open /sender/onboarding to add a live card if needed.',
+          'Sender cannot publish live until Ops approve verification and invoice details are complete. Open /sender/onboarding to finish.',
         code: 'SENDER_NOT_BOOKING_READY',
         goNoGo: eligibility.goNoGo,
-        href: '/sender/onboarding',
+        blockers: eligibility.blockers,
+        href: `/sender/onboarding?returnTo=${encodeURIComponent(`/jobs/${jobId}`)}`,
       });
     }
     const user = await this.prisma.user.findUnique({ where: { id: principal.id } });
@@ -1460,6 +1513,7 @@ export class JobsService {
       data: {
         status: JobStatus.PUBLISHED,
         publishedAt: new Date(),
+        publishRequestedAt: null,
       },
     });
 

@@ -104,17 +104,26 @@ export class SenderService {
     status: CompanyStatus;
     paymentReady: boolean;
   } & CompanyInvoiceShape) {
+    const blocked =
+      company.status === CompanyStatus.REJECTED ||
+      company.status === CompanyStatus.SUSPENDED;
     const opsApproved =
       company.status === CompanyStatus.PENDING_PAYMENT ||
       company.status === CompanyStatus.ACTIVE;
     const invoiceOk = this.invoiceComplete(company);
     const active = company.status === CompanyStatus.ACTIVE;
+    /** Live marketplace publish — Ops approved + invoice (payment is accept-time). */
+    const canPublishLive = opsApproved && invoiceOk;
     return {
       opsApproved,
       invoiceComplete: invoiceOk,
       paymentReady: company.paymentReady,
       accountActive: active,
-      canBook: (active || company.status === CompanyStatus.PENDING_PAYMENT) && invoiceOk,
+      /** Create/update DRAFT jobs before KYB/KYC completes. */
+      canDraft: !blocked,
+      canPublishLive,
+      /** Alias of canPublishLive (legacy clients / error payloads). */
+      canBook: canPublishLive,
     };
   }
 
@@ -737,9 +746,16 @@ export class SenderService {
     this.ensureDatabase();
     const user = await this.requireSender(principal);
     const goNoGo = this.goNoGo(user.company!);
+    const blockers: string[] = [];
+    if (!goNoGo.canDraft) blockers.push('COMPANY_BLOCKED');
+    if (!goNoGo.opsApproved) blockers.push('OPS_APPROVAL_REQUIRED');
+    if (!goNoGo.invoiceComplete) blockers.push('INVOICE_INCOMPLETE');
     return {
-      canBook: goNoGo.canBook,
+      canDraft: goNoGo.canDraft,
+      canPublishLive: goNoGo.canPublishLive,
+      canBook: goNoGo.canPublishLive,
       goNoGo,
+      blockers,
       companyStatus: user.company!.status,
     };
   }

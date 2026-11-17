@@ -591,9 +591,48 @@ async function seedPilotJobAndTrip(vicRegionId: string, carrierCompanyId: string
   console.log(`Seeded Victorian live pilot job (${jobId}) and trip (${tripId})`);
 }
 
+async function seedVehicleClasses() {
+  const { DEFAULT_VEHICLE_CLASSES, vehicleClassConfigWriteData } = await import(
+    '../src/modules/jobs/job-pricing.util'
+  );
+
+  for (const c of DEFAULT_VEHICLE_CLASSES) {
+    const data = vehicleClassConfigWriteData(c);
+    await prisma.vehicleClassConfig.upsert({
+      where: { code: c.code },
+      // Seed is authoritative for default catalog rows (rates/dims/rank/active).
+      update: {
+        name: data.name,
+        rank: data.rank,
+        maxChargeableWeightKg: data.maxChargeableWeightKg,
+        maxLengthCm: data.maxLengthCm,
+        maxWidthCm: data.maxWidthCm,
+        maxHeightCm: data.maxHeightCm,
+        minLicenceClass: data.minLicenceClass,
+        suggestedGvmKg: data.suggestedGvmKg,
+        suggestedTareKg: data.suggestedTareKg,
+        isActive: data.isActive,
+        perKmRateCents: data.perKmRateCents,
+        hourlyRateCents: data.hourlyRateCents,
+        perKmMinBaseCents: data.perKmMinBaseCents,
+        hourlyMinBaseCents: data.hourlyMinBaseCents,
+        perKmGuidanceMinCents: data.perKmGuidanceMinCents,
+        perKmGuidanceMaxCents: data.perKmGuidanceMaxCents,
+        hourlyGuidanceMinCents: data.hourlyGuidanceMinCents,
+        hourlyGuidanceMaxCents: data.hourlyGuidanceMaxCents,
+      },
+      create: data,
+    });
+  }
+
+  // eslint-disable-next-line no-console
+  console.log(`Seeded ${DEFAULT_VEHICLE_CLASSES.length} vehicle classes (docs catalog)`);
+}
+
 async function main() {
   await seedSuperAdmin();
   const vic = await seedRegions();
+  await seedVehicleClasses();
   await seedScopedAdmins(vic.id);
   const { senderCompanyId, carrierCompanyId } = await seedMarketplaceUsers(vic.id);
   await seedPolicy();

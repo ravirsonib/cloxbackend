@@ -21,6 +21,7 @@ import {
 } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
+import { pickPrimaryFarePaymentEvent } from '../jobs/assignment-status.util';
 import { RevenueSplitService } from './revenue-split.service';
 import type { AuthenticatedPrincipal } from '../../common/guards/jwt-auth.guard';
 import { AppRole, type FinanceQuery } from '../../shared/types';
@@ -181,7 +182,13 @@ export class FinanceService {
           originTerritoryId: true,
           senderCompanyId: true,
           createdAt: true,
-          assignment: { select: { carrierCompanyId: true, status: true } },
+          assignment: {
+            select: {
+              carrierCompanyId: true,
+              status: true,
+              proposal: { select: { amountIncGstCents: true } },
+            },
+          },
           trip: { select: { status: true, completedAt: true } },
         },
       }),
@@ -207,10 +214,14 @@ export class FinanceService {
       companies.map((c) => [c.id, c.tradingName || c.legalName]),
     );
 
+    const jobGrossCents = (j: (typeof jobs)[number]) =>
+      j.assignment?.proposal?.amountIncGstCents || j.estimateIncGstCents || 0;
+
     // ─── Calculate Summary Totals ───
     let gmvCents = 0;
     for (const j of jobs) {
-      if (j.estimateIncGstCents) gmvCents += j.estimateIncGstCents;
+      const gross = jobGrossCents(j);
+      if (gross > 0) gmvCents += gross;
     }
 
     let hqShareCents = 0;
@@ -305,7 +316,7 @@ export class FinanceService {
       if (j.senderCompanyId) {
         const entry = senderSpendMap.get(j.senderCompanyId) || { spendCents: 0, jobsCount: 0, surchargesCents: 0 };
         entry.jobsCount++;
-        entry.spendCents += j.estimateIncGstCents || 0;
+        entry.spendCents += jobGrossCents(j);
         senderSpendMap.set(j.senderCompanyId, entry);
       }
       if (j.assignment?.carrierCompanyId && j.trip?.status === TripStatus.COMPLETED) {
@@ -378,7 +389,7 @@ export class FinanceService {
       if (j.originRegionId && regionStatsMap.has(j.originRegionId)) {
         const rStats = regionStatsMap.get(j.originRegionId)!;
         rStats.jobsCount++;
-        rStats.gmvCents += j.estimateIncGstCents || 0;
+        rStats.gmvCents += jobGrossCents(j);
       }
     }
 
@@ -434,7 +445,7 @@ export class FinanceService {
       let bGmv = 0;
       for (const j of jobs) {
         if (j.createdAt >= bStart && j.createdAt < bEnd) {
-          bGmv += j.estimateIncGstCents || 0;
+          bGmv += jobGrossCents(j);
         }
       }
 
@@ -550,7 +561,19 @@ export class FinanceService {
         ],
       },
       include: {
-        job: { select: { id: true, title: true, status: true, estimateIncGstCents: true } },
+        job: {
+          select: {
+            id: true,
+            title: true,
+            status: true,
+            estimateIncGstCents: true,
+            assignment: {
+              select: {
+                proposal: { select: { amountIncGstCents: true } },
+              },
+            },
+          },
+        },
       },
       orderBy: { createdAt: 'desc' },
       take: 200,
@@ -560,10 +583,25 @@ export class FinanceService {
     let grossCommissionCents = 0;
     let accruedCents = 0;
     let settledCents = 0;
+    const gmvCountedJobIds = new Set<string>();
 
     for (const l of lines) {
       grossCommissionCents += l.amountCents;
-      if (l.job?.estimateIncGstCents) attributedGmvCents += l.job.estimateIncGstCents;
+      const jobId = l.jobId ?? l.job?.id;
+      if (jobId && !gmvCountedJobIds.has(jobId)) {
+        gmvCountedJobIds.add(jobId);
+        const share = l.sharePercent && l.sharePercent > 0 ? l.sharePercent : null;
+        const fromShare =
+          share && l.amountCents > 0
+            ? Math.round((l.amountCents * 100) / share)
+            : 0;
+        const agreed =
+          l.job?.assignment?.proposal?.amountIncGstCents ||
+          l.job?.estimateIncGstCents ||
+          0;
+        // Prefer reconstructing gross from commission share; fall back to agreed bid / estimate.
+        attributedGmvCents += fromShare > 0 ? fromShare : agreed;
+      }
       if (l.status === SettlementLineStatus.PAID) {
         settledCents += l.amountCents;
       } else {
@@ -661,6 +699,11 @@ export class FinanceService {
               status: true,
             },
           },
+          proposal: {
+            select: {
+              amountIncGstCents: true,
+            },
+          },
           trip: {
             select: {
               id: true,
@@ -720,21 +763,55 @@ export class FinanceService {
     const revenueSettings = this.revenueSplit ? await this.revenueSplit.getSettings() : null;
     const carrierPercent = revenueSettings?.effective.percents.carrierPercent ?? 70;
 
-    const tripLedger = assignments.map((a) => {
-      const gross = a.job.estimateIncGstCents || 0;
-      const net = Math.round((gross * carrierPercent) / 100);
-      const isPaid = a.trip?.status === TripStatus.COMPLETED;
-      return {
-        tripId: a.trip?.id || a.id,
-        jobId: a.job.id,
-        jobTitle: a.job.title || 'Shipment',
-        completedAt: a.trip?.completedAt ? a.trip.completedAt.toISOString() : null,
-        grossFareCents: gross,
-        carrierNetCents: net,
-        surchargesCents: 0,
-        status: isPaid ? ('PAID' as const) : ('ACCRUED' as const),
-      };
-    });
+    /** Prefer settlement/agreed bid — never recompute ledger from sender estimate alone. */
+    const carrierLinesByJobId = new Map<
+      string,
+      Array<(typeof settlementLines)[number]>
+    >();
+    for (const line of settlementLines) {
+      if (!line.jobId) continue;
+      const list = carrierLinesByJobId.get(line.jobId) ?? [];
+      list.push(line);
+      carrierLinesByJobId.set(line.jobId, list);
+    }
+
+    const tripLedger = assignments
+      .filter(
+        (a) =>
+          a.trip?.status === TripStatus.COMPLETED ||
+          carrierLinesByJobId.has(a.job.id),
+      )
+      .map((a) => {
+        const lines = carrierLinesByJobId.get(a.job.id) ?? [];
+        const netFromSettlement = lines.reduce((sum, l) => sum + l.amountCents, 0);
+        const agreedGross =
+          a.proposal?.amountIncGstCents ?? a.job.estimateIncGstCents ?? 0;
+        const gross =
+          agreedGross > 0
+            ? agreedGross
+            : carrierPercent > 0 && netFromSettlement > 0
+              ? Math.round((netFromSettlement * 100) / carrierPercent)
+              : 0;
+        const net =
+          netFromSettlement > 0
+            ? netFromSettlement
+            : Math.round((gross * carrierPercent) / 100);
+        const allPaid =
+          lines.length > 0 &&
+          lines.every((l) => l.status === SettlementLineStatus.PAID);
+        return {
+          tripId: a.trip?.id || a.id,
+          jobId: a.job.id,
+          jobTitle: a.job.title || 'Shipment',
+          completedAt: a.trip?.completedAt
+            ? a.trip.completedAt.toISOString()
+            : null,
+          grossFareCents: gross,
+          carrierNetCents: net,
+          surchargesCents: 0,
+          status: allPaid ? ('PAID' as const) : ('ACCRUED' as const),
+        };
+      });
 
     return {
       companyName: user?.company?.tradingName || user?.company?.legalName || 'Carrier',
@@ -797,7 +874,21 @@ export class FinanceService {
         include: {
           paymentEvents: {
             where: { type: PaymentEventType.CHARGE },
-            select: { id: true, status: true, amountIncGstCents: true, stripePaymentIntentId: true },
+            select: {
+              id: true,
+              type: true,
+              status: true,
+              amountIncGstCents: true,
+              stripePaymentIntentId: true,
+              createdAt: true,
+            },
+            orderBy: { createdAt: 'desc' },
+          },
+          assignment: {
+            select: {
+              status: true,
+              proposal: { select: { amountIncGstCents: true } },
+            },
           },
         },
         orderBy: { createdAt: 'desc' },
@@ -809,21 +900,18 @@ export class FinanceService {
           job: { senderCompanyId: companyId },
           createdAt: dateFilter,
         },
+        select: {
+          id: true,
+          jobId: true,
+          kind: true,
+          status: true,
+          amountIncGstCents: true,
+        },
       }),
     ]);
 
-    let totalSpendIncGstCents = 0;
+    const paidSurchargeByJobId = new Map<string, number>();
     let surchargesSpendCents = 0;
-    let inEscrowCents = 0;
-
-    for (const j of jobs) {
-      const inc = j.estimateIncGstCents || 0;
-      totalSpendIncGstCents += inc;
-      if (j.status !== 'COMPLETED' && j.status !== 'CANCELLED') {
-        inEscrowCents += inc;
-      }
-    }
-
     let massCents = 0;
     let waitingCents = 0;
     let pendingSurchargesCents = 0;
@@ -833,8 +921,52 @@ export class FinanceService {
         surchargesSpendCents += s.amountIncGstCents;
         if (s.kind === SurchargeKind.MASS) massCents += s.amountIncGstCents;
         else waitingCents += s.amountIncGstCents;
+        if (s.jobId) {
+          paidSurchargeByJobId.set(
+            s.jobId,
+            (paidSurchargeByJobId.get(s.jobId) ?? 0) + s.amountIncGstCents,
+          );
+        }
       } else if (s.status === SurchargeStatus.PENDING_PAYMENT) {
         pendingSurchargesCents += s.amountIncGstCents;
+      }
+    }
+
+    let totalSpendIncGstCents = 0;
+    let inEscrowCents = 0;
+
+    const resolveSenderJobFareCents = (j: (typeof jobs)[number]) => {
+      const fareCharge = pickPrimaryFarePaymentEvent(j.paymentEvents);
+      if (
+        fareCharge?.status === PaymentEventStatus.SUCCEEDED &&
+        fareCharge.amountIncGstCents > 0
+      ) {
+        return fareCharge.amountIncGstCents;
+      }
+      const agreed = j.assignment?.proposal?.amountIncGstCents;
+      if (agreed && agreed > 0) return agreed;
+      return j.estimateIncGstCents || 0;
+    };
+
+    for (const j of jobs) {
+      const inc = resolveSenderJobFareCents(j);
+      // Drafts / cancelled with no charge do not inflate Gross Spend.
+      const hasMoney =
+        Boolean(pickPrimaryFarePaymentEvent(j.paymentEvents)) ||
+        Boolean(j.assignment?.proposal?.amountIncGstCents);
+      if (!hasMoney && (j.status === 'DRAFT' || j.status === 'CANCELLED')) {
+        continue;
+      }
+      if (hasMoney || j.status === 'COMPLETED' || j.status === 'ASSIGNED' || j.status === 'IN_TRANSIT') {
+        totalSpendIncGstCents += inc;
+      }
+      if (
+        j.status !== 'COMPLETED' &&
+        j.status !== 'CANCELLED' &&
+        j.status !== 'DRAFT' &&
+        hasMoney
+      ) {
+        inEscrowCents += inc;
       }
     }
 
@@ -842,16 +974,22 @@ export class FinanceService {
     const totalGstCents = totalSpendIncGstCents - totalSpendExGstCents;
 
     const jobSpendHistory = jobs.map((j) => {
-      const charge = j.paymentEvents[0];
+      const fareCharge = pickPrimaryFarePaymentEvent(j.paymentEvents);
+      const baseFareIncGstCents = resolveSenderJobFareCents(j);
+      const surchargesIncGstCents = paidSurchargeByJobId.get(j.id) ?? 0;
+      const succeeded =
+        fareCharge?.status === PaymentEventStatus.SUCCEEDED
+          ? fareCharge.amountIncGstCents
+          : 0;
       return {
         jobId: j.id,
         jobTitle: j.title || 'Shipment',
         createdAt: j.createdAt.toISOString(),
         status: j.status,
-        baseFareIncGstCents: j.estimateIncGstCents || 0,
-        surchargesIncGstCents: 0,
-        totalPaidCents: charge?.amountIncGstCents || j.estimateIncGstCents || 0,
-        paymentStatus: charge?.status || 'PENDING',
+        baseFareIncGstCents,
+        surchargesIncGstCents,
+        totalPaidCents: succeeded > 0 ? succeeded + surchargesIncGstCents : baseFareIncGstCents + surchargesIncGstCents,
+        paymentStatus: fareCharge?.status || 'PENDING',
       };
     });
 

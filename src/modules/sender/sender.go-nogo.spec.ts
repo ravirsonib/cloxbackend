@@ -35,7 +35,15 @@ function makeService(company: Record<string, unknown>) {
     { isMockMode: () => true } as never,
     { get: () => undefined } as never,
     { sendRegistrationConfirmation: jest.fn().mockResolvedValue({ skipped: true }) } as never,
-      { resolveInviteForRegister: jest.fn().mockResolvedValue({ referredByAdminUserId: null, inviteId: null, prospectId: null, homeRegionId: null }), markInviteAccepted: jest.fn() } as never,
+    {
+      resolveInviteForRegister: jest.fn().mockResolvedValue({
+        referredByAdminUserId: null,
+        inviteId: null,
+        prospectId: null,
+        homeRegionId: null,
+      }),
+      markInviteAccepted: jest.fn(),
+    } as never,
   );
 }
 
@@ -48,7 +56,7 @@ const principal = {
   territoryCodes: [],
 };
 
-describe('SenderService go/no-go matrix (M3-31)', () => {
+describe('SenderService go/no-go matrix (draft-first)', () => {
   it.each([
     {
       name: 'DRAFT incomplete',
@@ -61,7 +69,8 @@ describe('SenderService go/no-go matrix (M3-31)', () => {
         invoiceState: null,
         invoicePostcode: null,
       },
-      canBook: false,
+      canDraft: true,
+      canPublishLive: false,
     },
     {
       name: 'PENDING_PAYMENT with invoice',
@@ -74,7 +83,8 @@ describe('SenderService go/no-go matrix (M3-31)', () => {
         invoiceState: 'VIC',
         invoicePostcode: '3000',
       },
-      canBook: false,
+      canDraft: true,
+      canPublishLive: true,
     },
     {
       name: 'ACTIVE missing invoice',
@@ -87,7 +97,8 @@ describe('SenderService go/no-go matrix (M3-31)', () => {
         invoiceState: null,
         invoicePostcode: null,
       },
-      canBook: false,
+      canDraft: true,
+      canPublishLive: false,
     },
     {
       name: 'ACTIVE complete',
@@ -100,11 +111,47 @@ describe('SenderService go/no-go matrix (M3-31)', () => {
         invoiceState: 'VIC',
         invoicePostcode: '3000',
       },
-      canBook: true,
+      canDraft: true,
+      canPublishLive: true,
     },
-  ])('$name → canBook=$canBook', async ({ company, canBook }) => {
-    const service = makeService(company);
-    const result = await service.getBookingEligibility(principal);
-    expect(result.canBook).toBe(canBook);
-  });
+    {
+      name: 'SUSPENDED',
+      company: {
+        status: CompanyStatus.SUSPENDED,
+        paymentReady: true,
+        invoiceLegalName: 'Co',
+        invoiceAddressLine1: '1 St',
+        invoiceSuburb: 'Melbourne',
+        invoiceState: 'VIC',
+        invoicePostcode: '3000',
+      },
+      canDraft: false,
+      canPublishLive: false,
+    },
+    {
+      name: 'REJECTED',
+      company: {
+        status: CompanyStatus.REJECTED,
+        paymentReady: false,
+        invoiceLegalName: null,
+        invoiceAddressLine1: null,
+        invoiceSuburb: null,
+        invoiceState: null,
+        invoicePostcode: null,
+      },
+      canDraft: false,
+      canPublishLive: false,
+    },
+  ])(
+    '$name → canDraft=$canDraft canPublishLive=$canPublishLive',
+    async ({ company, canDraft, canPublishLive }) => {
+      const service = makeService(company);
+      const result = await service.getBookingEligibility(principal);
+      expect(result.canDraft).toBe(canDraft);
+      expect(result.canPublishLive).toBe(canPublishLive);
+      expect(result.canBook).toBe(canPublishLive);
+      expect(result.goNoGo.canDraft).toBe(canDraft);
+      expect(result.goNoGo.canPublishLive).toBe(canPublishLive);
+    },
+  );
 });

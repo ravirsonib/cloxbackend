@@ -251,7 +251,7 @@ describe('SenderService payment paths', () => {
     );
   });
 
-  it('getBookingEligibility canBook when ACTIVE + invoice + paymentReady', async () => {
+  it('getBookingEligibility canPublishLive when ACTIVE + invoice (payment optional)', async () => {
     const prisma = {
       isConnected: () => true,
       user: {
@@ -266,6 +266,8 @@ describe('SenderService payment paths', () => {
     };
     const service = makeService(prisma);
     const result = await service.getBookingEligibility(senderPrincipal);
+    expect(result.canDraft).toBe(true);
+    expect(result.canPublishLive).toBe(true);
     expect(result.canBook).toBe(true);
   });
 

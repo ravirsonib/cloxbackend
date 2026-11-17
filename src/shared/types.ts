@@ -1173,8 +1173,10 @@ export const carrierVehicleSchema = z
     vehicleClass: z
       .string()
       .trim()
-      .toUpperCase()
-      .regex(/^(UTE|VAN|RIGID_1_2T|RIGID_3_4T|SEMI|BDOUBLE)$/),
+      .min(1)
+      .max(32)
+      .regex(/^[A-Za-z0-9_]+$/, 'Code must be alphanumeric with underscores only')
+      .transform((v) => v.toUpperCase()),
     /** Unladen mass (kg) — optional but recommended. */
     tareKg: z.number().int().positive().max(100_000).optional(),
     /** Gross Vehicle Mass (kg) — required from compliance plate. */
@@ -1510,8 +1512,10 @@ export type DriverProfileInput = z.infer<typeof driverProfileSchema>;
 const vehicleClassField = z
   .string()
   .trim()
-  .toUpperCase()
-  .regex(/^(UTE|VAN|RIGID_1_2T|RIGID_3_4T|SEMI|BDOUBLE)$/);
+  .min(1)
+  .max(32)
+  .regex(/^[A-Za-z0-9_]+$/, 'Code must be alphanumeric with underscores only')
+  .transform((v) => v.toUpperCase());
 
 const jobStopSchema = z
   .object({
@@ -1932,7 +1936,7 @@ export const vehicleClassCreateSchema = z
     code: vehicleClassCodeSchema,
     name: z.string().trim().min(1).max(64),
     rank: z.number().int().min(1).max(999),
-    maxChargeableWeightKg: z.number().positive().max(100_000),
+    maxChargeableWeightKg: z.number().positive().max(200_000),
     maxLengthCm: z.number().positive().max(10_000),
     maxWidthCm: z.number().positive().max(1_000),
     maxHeightCm: z.number().positive().max(1_000),
@@ -1947,7 +1951,7 @@ export const vehicleClassUpdateSchema = z
   .object({
     name: z.string().trim().min(1).max(64).optional(),
     rank: z.number().int().min(1).max(999).optional(),
-    maxChargeableWeightKg: z.number().positive().max(100_000).optional(),
+    maxChargeableWeightKg: z.number().positive().max(200_000).optional(),
     maxLengthCm: z.number().positive().max(10_000).optional(),
     maxWidthCm: z.number().positive().max(1_000).optional(),
     maxHeightCm: z.number().positive().max(1_000).optional(),

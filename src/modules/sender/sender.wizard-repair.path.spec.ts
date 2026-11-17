@@ -1,8 +1,8 @@
 import { CompanyStatus } from '@prisma/client';
 import { SenderService } from './sender.service';
 
-describe('SenderService payment repair wizard', () => {
-  it('ACTIVE without paymentReady returns payment step', async () => {
+describe('SenderService payment repair + draft-first go/no-go', () => {
+  it('ACTIVE without paymentReady stays complete and canPublishLive', async () => {
     const prisma = {
       isConnected: () => true,
       user: {
@@ -58,19 +58,15 @@ describe('SenderService payment repair wizard', () => {
       territoryCodes: [],
     });
 
-    expect(result.step).toBe('payment');
-    expect(result.paymentRepairRequired).toBe(true);
-    expect(result.goNoGo.canBook).toBe(false);
-    await Promise.resolve();
-    expect(inbox.notifyUsers).toHaveBeenCalledWith(
-      expect.objectContaining({
-        type: 'PAYMENT_SETUP_REQUIRED',
-        href: '/sender/onboarding',
-      }),
-    );
+    // Payment is collectable on /account or at accept — not a wizard step / publish gate.
+    expect(result.step).toBe('complete');
+    expect(result.goNoGo.canDraft).toBe(true);
+    expect(result.goNoGo.canPublishLive).toBe(true);
+    expect(result.goNoGo.canBook).toBe(true);
+    expect(result.goNoGo.paymentReady).toBe(false);
   });
 
-  it('clears mock Stripe ids when live and reopens payment', async () => {
+  it('clears mock Stripe ids when live; publish remains allowed after invoice+Ops', async () => {
     const companyUpdate = jest.fn().mockResolvedValue({
       id: 'co-1',
       paymentReady: false,
@@ -139,7 +135,8 @@ describe('SenderService payment repair wizard', () => {
         }),
       }),
     );
-    expect(result.step).toBe('payment');
+    expect(result.step).toBe('complete');
     expect(result.company.paymentReady).toBe(false);
+    expect(result.goNoGo.canPublishLive).toBe(true);
   });
 });

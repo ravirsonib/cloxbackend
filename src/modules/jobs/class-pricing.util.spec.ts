@@ -29,7 +29,7 @@ describe('class-pricing.util', () => {
       legacy,
     );
     expect(ute.perKmRateCents).toBe(250);
-    expect(semi.perKmRateCents).toBe(775);
+    expect(semi.perKmRateCents).toBe(450);
     expect(quotePerKmIncGstCents(ute, 100, legacy.perKmMinBaseCents)).toBeLessThan(
       quotePerKmIncGstCents(semi, 100, legacy.perKmMinBaseCents),
     );
@@ -73,7 +73,7 @@ describe('class-pricing.util', () => {
       distanceKm: 50,
       billableHours: null,
     });
-    expect(range.maxClassCode).toBe('VAN');
+    expect(range.maxClassCode).toBe('VAN_SWB');
     expect(range.maxIncGstCents).toBeGreaterThanOrEqual(range.minIncGstCents);
   });
 
@@ -91,6 +91,6 @@ describe('class-pricing.util', () => {
       hourlyMinFloorHours: 4,
       globalHardFloorCents: legacy.perKmMinBaseCents,
     });
-    expect(q).toBe(Math.max(legacy.perKmMinBaseCents, rates.perKmMinBaseCents, 40 * 300));
+    expect(q).toBe(Math.max(legacy.perKmMinBaseCents, rates.perKmMinBaseCents, 40 * 340));
   });
 });

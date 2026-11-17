@@ -1077,6 +1077,7 @@ export class RevenueSplitService {
             OR: [
               { email: { contains: q, mode: 'insensitive' } },
               { name: { contains: q, mode: 'insensitive' } },
+              { company: { legalName: { contains: q, mode: 'insensitive' } } },
             ],
           }
         : {}),
@@ -1099,6 +1100,7 @@ export class RevenueSplitService {
       this.prisma.adminUser.findMany({
         where,
         include: {
+          company: { select: { id: true, legalName: true } },
           scopes: {
             include: {
               region: { select: { id: true, code: true, name: true } },
@@ -1345,6 +1347,8 @@ export class RevenueSplitService {
       id: string;
       email: string;
       name: string | null;
+      /** Partner company legal name — same label source as Admin partners list. */
+      companyLegalName: string | null;
       role: AdminRole;
       status: AdminUserStatus;
       scopes: Array<{
@@ -1437,6 +1441,7 @@ export class RevenueSplitService {
         id: admin.id,
         email: admin.email,
         name: admin.name,
+        companyLegalName: admin.company?.legalName ?? null,
         role: admin.role,
         status: admin.status,
         scopes,

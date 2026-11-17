@@ -3,7 +3,7 @@ import { CompanyStatus } from '@prisma/client';
 import { SenderService } from './sender.service';
 
 describe('SenderService booking gate', () => {
-  it('goNoGo requires ACTIVE + invoice + payment', async () => {
+  it('goNoGo allows draft before Ops; live publish needs Ops + invoice', async () => {
     const company = {
       status: CompanyStatus.DRAFT,
       paymentReady: false,
@@ -58,13 +58,15 @@ describe('SenderService booking gate', () => {
       territoryCodes: [],
     });
 
+    expect(result.canDraft).toBe(true);
+    expect(result.canPublishLive).toBe(false);
     expect(result.canBook).toBe(false);
   });
 
-  it('jobs create uses Forbidden when not canBook', () => {
+  it('jobs publish uses Forbidden when not canPublishLive', () => {
     expect(() => {
       throw new ForbiddenException({
-        message: 'Sender cannot create jobs',
+        message: 'Sender cannot publish jobs',
         code: 'SENDER_NOT_BOOKING_READY',
       });
     }).toThrow(ForbiddenException);

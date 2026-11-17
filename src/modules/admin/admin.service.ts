@@ -22,7 +22,7 @@ import {
   type VehicleClassDto,
   type VehicleClassUpdateInput,
 } from '../../shared/types';
-import { DEFAULT_VEHICLE_CLASSES } from '../jobs/job-pricing.util';
+import { DEFAULT_VEHICLE_CLASSES, vehicleClassConfigWriteData } from '../jobs/job-pricing.util';
 import { PLATFORM_TIMEZONE } from '../../shared/timezone';
 import {
   AdminUserStatus,
@@ -2097,41 +2097,19 @@ export class AdminService {
 
   async listVehicleClasses(): Promise<VehicleClassDto[]> {
     this.ensureDatabase();
-    let rows = await this.prisma.vehicleClassConfig.findMany({
-      orderBy: { rank: 'asc' },
+    const existing = await this.prisma.vehicleClassConfig.findMany({
+      select: { code: true },
     });
-    if (rows.length === 0) {
-      for (const c of DEFAULT_VEHICLE_CLASSES) {
-        await this.prisma.vehicleClassConfig.upsert({
-          where: { code: c.code },
-          update: {},
-          create: {
-            code: c.code,
-            name: c.name ?? c.code,
-            rank: c.rank,
-            maxChargeableWeightKg: c.maxChargeableWeightKg,
-            maxLengthCm: c.maxLengthCm,
-            maxWidthCm: c.maxWidthCm,
-            maxHeightCm: c.maxHeightCm,
-            minLicenceClass: c.minLicenceClass,
-            suggestedGvmKg: c.suggestedGvmKg ?? 3500,
-            suggestedTareKg: c.suggestedTareKg ?? 2000,
-            isActive: true,
-            perKmRateCents: c.perKmRateCents ?? null,
-            hourlyRateCents: c.hourlyRateCents ?? null,
-            perKmMinBaseCents: c.perKmMinBaseCents ?? null,
-            hourlyMinBaseCents: c.hourlyMinBaseCents ?? null,
-            perKmGuidanceMinCents: c.perKmGuidanceMinCents ?? null,
-            perKmGuidanceMaxCents: c.perKmGuidanceMaxCents ?? null,
-            hourlyGuidanceMinCents: c.hourlyGuidanceMinCents ?? null,
-            hourlyGuidanceMaxCents: c.hourlyGuidanceMaxCents ?? null,
-          },
-        });
-      }
-      rows = await this.prisma.vehicleClassConfig.findMany({
-        orderBy: { rank: 'asc' },
+    const have = new Set(existing.map((r) => r.code));
+    for (const c of DEFAULT_VEHICLE_CLASSES) {
+      if (have.has(c.code)) continue;
+      await this.prisma.vehicleClassConfig.create({
+        data: vehicleClassConfigWriteData(c),
       });
     }
+    const rows = await this.prisma.vehicleClassConfig.findMany({
+      orderBy: { rank: 'asc' },
+    });
 
     return rows.map((r) => this.mapVehicleClassDto(r));
   }

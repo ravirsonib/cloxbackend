@@ -47,7 +47,7 @@ describe('job-pricing.util', () => {
     expect(recommendVehicleClass(400)).toBe('UTE');
     expect(recommendVehicleClass(800)).toBe('UTE');
     expect(recommendVehicleClass(1000)).toBe('UTE');
-    expect(recommendVehicleClass(1001)).toBe('VAN');
+    expect(recommendVehicleClass(1001)).toBe('VAN_MWB');
     expect(recommendVehicleClass(2000)).toBe('RIGID_1_2T');
   });
 

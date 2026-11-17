@@ -1049,6 +1049,8 @@ model Job {
   /// Hourly billable hours (floor 4.0)
   billableHours        Float?
   publishedAt          DateTime?
+  /// Sender asked to go live while still waiting Ops / invoice (stays DRAFT until publishJob)
+  publishRequestedAt   DateTime?
   /// Exception rescue: sort / badge on market board
   marketplacePriority    Boolean @default(false)
   /// Carrier-facing bid discount % (sender estimate unchanged)
