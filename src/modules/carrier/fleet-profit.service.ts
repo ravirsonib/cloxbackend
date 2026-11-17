@@ -12,6 +12,7 @@ import { FleetPlusService } from './fleet-plus.service';
 
 const MARGIN_FLAG_PCT = 15;
 const IDLE_FLAG_PCT = 40;
+/** Default national carrier share; prefer snapshot/policy when available. */
 const CARRIER_NET_SHARE = 0.7;
 
 function dec(n: { toNumber?: () => number } | number | null | undefined): number {

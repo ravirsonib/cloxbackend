@@ -35,10 +35,16 @@ import { AuditService } from '../audit/audit.service';
 import { InAppNotificationsService } from '../notifications/in-app-notifications.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { RevenueSplitService } from '../settlements/revenue-split.service';
+import {
+  allocateTwoStage,
+  applySenderPlatformFee,
+  DEFAULT_CLOX_POOL,
+} from '../settlements/revenue-split.types';
 import { TripsService } from '../trips/trips.service';
 import { splitIncGst } from '../trips/geofence.util';
 import {
   isAssignmentPaidAndConfirmed,
+  pickPrimaryFarePaymentEvent,
   isAssignmentPendingPayment,
 } from '../jobs/assignment-status.util';
 import {
@@ -255,9 +261,23 @@ export class PaymentsService {
       throw new NotFoundException('Proposal not found or not submittable');
     }
 
-    const amountInc = proposal.amountIncGstCents;
-    const amountEx = proposal.amountExGstCents;
-    const amountGst = proposal.amountGstCents;
+    const feeApplied = this.revenueSplit
+      ? await this.revenueSplit.resolveSenderFee({
+          baseIncGstCents: proposal.amountIncGstCents,
+          senderCompanyId: job.senderCompanyId,
+        })
+      : {
+          ...applySenderPlatformFee({
+            baseIncGstCents: proposal.amountIncGstCents,
+            feePercent: 0,
+            mode: 'EXCLUSIVE',
+          }),
+          senderFeeOverrideId: null as string | null,
+        };
+    const charged = splitIncGst(feeApplied.chargeIncGstCents);
+    const amountInc = charged.amountIncGstCents;
+    const amountEx = charged.amountExGstCents;
+    const amountGst = charged.amountGstCents;
 
     // Marketplace rescue re-list: fare already captured — do not charge sender again.
     const priorCharge = this.prisma.paymentEvent.findFirst
@@ -351,6 +371,12 @@ export class PaymentsService {
             assignmentId: assignment.id,
             acceptKey: key,
             conflictIds: conflictPeers.map((p) => p.id),
+            baseIncGstCents: feeApplied.baseIncGstCents,
+            senderFeePercent: feeApplied.feePercent,
+            senderFeeMode: feeApplied.mode,
+            senderFeeIncGstCents: feeApplied.feeIncGstCents,
+            senderFeeOverrideId: feeApplied.senderFeeOverrideId,
+            settlementGrossIncGstCents: feeApplied.chargeIncGstCents,
           },
         },
       });
@@ -594,8 +620,29 @@ export class PaymentsService {
     });
     if (!job?.senderCompany) throw new NotFoundException('Job/sender not found');
 
-    const amounts = splitIncGst(params.amountIncGstCents);
+    const feeApplied = this.revenueSplit
+      ? await this.revenueSplit.resolveSenderFee({
+          baseIncGstCents: params.amountIncGstCents,
+          senderCompanyId: job.senderCompanyId,
+        })
+      : {
+          ...applySenderPlatformFee({
+            baseIncGstCents: params.amountIncGstCents,
+            feePercent: 0,
+            mode: 'EXCLUSIVE',
+          }),
+          senderFeeOverrideId: null as string | null,
+        };
+    const amounts = splitIncGst(feeApplied.chargeIncGstCents);
     const chargeNow = params.chargeNow !== false;
+    const feeMeta = {
+      baseIncGstCents: feeApplied.baseIncGstCents,
+      senderFeePercent: feeApplied.feePercent,
+      senderFeeMode: feeApplied.mode,
+      senderFeeIncGstCents: feeApplied.feeIncGstCents,
+      senderFeeOverrideId: feeApplied.senderFeeOverrideId,
+      settlementGrossIncGstCents: feeApplied.chargeIncGstCents,
+    };
 
     const created = await this.prisma.$transaction(async (tx) => {
       const paymentEvent = await tx.paymentEvent.create({
@@ -609,6 +656,7 @@ export class PaymentsService {
             kind: params.kind,
             tripId: params.tripId,
             surchargeKind: params.kind,
+            ...feeMeta,
             ...(params.metadata ?? {}),
           },
         },
@@ -623,7 +671,10 @@ export class PaymentsService {
           paymentEventId: paymentEvent.id,
           stopProgressId: params.stopProgressId ?? null,
           idempotencyKey: params.idempotencyKey,
-          metadata: (params.metadata ?? undefined) as object | undefined,
+          metadata: {
+            ...feeMeta,
+            ...(params.metadata ?? {}),
+          } as object,
         },
         include: { paymentEvent: true },
       });
@@ -638,6 +689,7 @@ export class PaymentsService {
         kind: params.kind,
         amountIncGstCents: amounts.amountIncGstCents,
         tripId: params.tripId,
+        ...feeMeta,
       },
     });
 
@@ -862,6 +914,7 @@ export class PaymentsService {
         originRegionId: true,
         originTerritoryId: true,
         senderCompanyId: true,
+        assignment: { select: { carrierCompanyId: true } },
       },
     });
 
@@ -871,6 +924,7 @@ export class PaymentsService {
           originRegionId: job?.originRegionId ?? null,
           originTerritoryId: job?.originTerritoryId ?? null,
           senderCompanyId: job?.senderCompanyId ?? null,
+          carrierCompanyId: job?.assignment?.carrierCompanyId ?? null,
         })
       : null;
 
@@ -892,39 +946,35 @@ export class PaymentsService {
       });
     } else {
       // Specs / fallback when RevenueSplitService not injected — same as fare lock.
-      const gross = surcharge.amountIncGstCents;
-      const carrier = Math.round(gross * 0.7);
-      const superShare = Math.round(gross * 0.15);
-      const stateShare = Math.round(gross * 0.1);
-      const localShare = gross - carrier - superShare - stateShare;
+      const staged = allocateTwoStage(surcharge.amountIncGstCents, 70, DEFAULT_CLOX_POOL);
       await tx.settlementLine.createMany({
         data: [
           {
             jobId: surcharge.jobId,
             recipientType: SettlementRecipientType.CARRIER,
-            sharePercent: 70,
-            amountCents: carrier,
+            sharePercent: staged.grossPercents.carrierPercent,
+            amountCents: staged.carrier,
             status: SettlementLineStatus.ACCRUED,
           },
           {
             jobId: surcharge.jobId,
             recipientType: SettlementRecipientType.SUPER_ADMIN,
-            sharePercent: 15,
-            amountCents: superShare,
+            sharePercent: staged.grossPercents.superPercent,
+            amountCents: staged.superShare,
             status: SettlementLineStatus.ACCRUED,
           },
           {
             jobId: surcharge.jobId,
             recipientType: SettlementRecipientType.STATE_MASTER,
-            sharePercent: 10,
-            amountCents: stateShare,
+            sharePercent: staged.grossPercents.statePercent,
+            amountCents: staged.stateShare,
             status: SettlementLineStatus.ACCRUED,
           },
           {
             jobId: surcharge.jobId,
             recipientType: SettlementRecipientType.LOCAL_BDE,
-            sharePercent: 5,
-            amountCents: localShare,
+            sharePercent: staged.grossPercents.localPercent,
+            amountCents: staged.localShare,
             status: SettlementLineStatus.ACCRUED,
           },
         ],
@@ -1336,10 +1386,24 @@ export class PaymentsService {
       amountIncGstCents: number;
       stripePaymentIntentId: string | null;
       jobId: string | null;
+      metadata?: unknown;
     },
     assignment: { id: string; status: AssignmentStatus; lockedAt: Date | null } | null,
     idempotentReplay: boolean,
   ) {
+    const meta =
+      paymentEvent.metadata && typeof paymentEvent.metadata === 'object'
+        ? (paymentEvent.metadata as Record<string, unknown>)
+        : {};
+    const baseInc =
+      typeof meta.baseIncGstCents === 'number' ? meta.baseIncGstCents : paymentEvent.amountIncGstCents;
+    const feeInc = typeof meta.senderFeeIncGstCents === 'number' ? meta.senderFeeIncGstCents : 0;
+    const feePercent = typeof meta.senderFeePercent === 'number' ? meta.senderFeePercent : 0;
+    const feeMode =
+      meta.senderFeeMode === 'INCLUSIVE' || meta.senderFeeMode === 'EXCLUSIVE'
+        ? meta.senderFeeMode
+        : 'EXCLUSIVE';
+
     return {
       paymentEventId: paymentEvent.id,
       paymentStatus: paymentEvent.status,
@@ -1351,6 +1415,55 @@ export class PaymentsService {
       lockedAt: assignment?.lockedAt ?? null,
       paidAndConfirmed: isAssignmentPaidAndConfirmed(assignment?.status),
       idempotentReplay,
+      senderFee: {
+        mode: feeMode,
+        feePercent,
+        baseIncGstCents: baseInc,
+        feeIncGstCents: feeInc,
+        chargeIncGstCents: paymentEvent.amountIncGstCents,
+      },
+    };
+  }
+
+  /** Sender preview: base / fee / charge before accept. */
+  async previewProposalCharge(principal: AuthenticatedPrincipal, jobId: string, proposalId: string) {
+    this.ensureDatabase();
+    const user = await this.prisma.user.findUnique({ where: { id: principal.id } });
+    if (!user?.companyId) throw new NotFoundException('Sender company not found');
+
+    const job = await this.prisma.job.findFirst({
+      where: { id: jobId, senderCompanyId: user.companyId },
+      include: { proposals: { where: { id: proposalId } } },
+    });
+    if (!job) throw new NotFoundException('Job not found');
+    const proposal = job.proposals[0];
+    if (!proposal) throw new NotFoundException('Proposal not found');
+
+    const fee = await this.resolveSenderFeeOrZero(
+      proposal.amountIncGstCents,
+      job.senderCompanyId,
+    );
+    return {
+      proposalId: proposal.id,
+      jobId: job.id,
+      ...fee,
+    };
+  }
+
+  private async resolveSenderFeeOrZero(baseIncGstCents: number, senderCompanyId: string | null) {
+    if (this.revenueSplit) {
+      return this.revenueSplit.resolveSenderFee({
+        baseIncGstCents,
+        senderCompanyId,
+      });
+    }
+    return {
+      ...applySenderPlatformFee({
+        baseIncGstCents,
+        feePercent: 0,
+        mode: 'EXCLUSIVE',
+      }),
+      senderFeeOverrideId: null as string | null,
     };
   }
 
@@ -1422,6 +1535,7 @@ export class PaymentsService {
             originRegionId: true,
             originTerritoryId: true,
             senderCompanyId: true,
+            assignment: { select: { carrierCompanyId: true } },
           },
         });
         const resolved = this.revenueSplit
@@ -1430,6 +1544,7 @@ export class PaymentsService {
               originRegionId: job?.originRegionId ?? null,
               originTerritoryId: job?.originTerritoryId ?? null,
               senderCompanyId: job?.senderCompanyId ?? null,
+              carrierCompanyId: job?.assignment?.carrierCompanyId ?? null,
             })
           : null;
 
@@ -1451,39 +1566,35 @@ export class PaymentsService {
           });
         } else {
           // Specs / fallback when RevenueSplitService not injected
-          const gross = pe.amountIncGstCents;
-          const carrier = Math.round(gross * 0.7);
-          const superShare = Math.round(gross * 0.15);
-          const stateShare = Math.round(gross * 0.1);
-          const localShare = gross - carrier - superShare - stateShare;
+          const staged = allocateTwoStage(pe.amountIncGstCents, 70, DEFAULT_CLOX_POOL);
           await tx.settlementLine.createMany({
             data: [
               {
                 jobId: pe.jobId!,
                 recipientType: SettlementRecipientType.CARRIER,
-                sharePercent: 70,
-                amountCents: carrier,
+                sharePercent: staged.grossPercents.carrierPercent,
+                amountCents: staged.carrier,
                 status: SettlementLineStatus.ACCRUED,
               },
               {
                 jobId: pe.jobId!,
                 recipientType: SettlementRecipientType.SUPER_ADMIN,
-                sharePercent: 15,
-                amountCents: superShare,
+                sharePercent: staged.grossPercents.superPercent,
+                amountCents: staged.superShare,
                 status: SettlementLineStatus.ACCRUED,
               },
               {
                 jobId: pe.jobId!,
                 recipientType: SettlementRecipientType.STATE_MASTER,
-                sharePercent: 10,
-                amountCents: stateShare,
+                sharePercent: staged.grossPercents.statePercent,
+                amountCents: staged.stateShare,
                 status: SettlementLineStatus.ACCRUED,
               },
               {
                 jobId: pe.jobId!,
                 recipientType: SettlementRecipientType.LOCAL_BDE,
-                sharePercent: 5,
-                amountCents: localShare,
+                sharePercent: staged.grossPercents.localPercent,
+                amountCents: staged.localShare,
                 status: SettlementLineStatus.ACCRUED,
               },
             ],
@@ -2007,7 +2118,7 @@ export class PaymentsService {
     });
     if (!job) throw new NotFoundException('Job not found');
 
-    const charge = job.paymentEvents.find((e) => e.type === PaymentEventType.CHARGE);
+    const charge = pickPrimaryFarePaymentEvent(job.paymentEvents);
     return {
       jobId: job.id,
       jobStatus: job.status,

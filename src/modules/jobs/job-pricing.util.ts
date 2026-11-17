@@ -374,11 +374,15 @@ export function gstSplitFromIncCents(incGstCents: number, gstRatePercent: number
 }
 
 /**
- * Carrier net display — locked at 70% of gross (revenue split 2A).
- * Admin 30% pool is policy/override-driven at settlement accrual.
+ * Carrier net display from settlement gross.
+ * Default 70% matches national default; pass resolved carrier % when known.
  */
-export function carrierNetPayoutCents(grossIncGstCents: number): number {
-  return Math.round(grossIncGstCents * 0.7);
+export function carrierNetPayoutCents(
+  grossIncGstCents: number,
+  carrierPercent: number = 70,
+): number {
+  const pct = Math.max(1, Math.min(99, Math.trunc(carrierPercent)));
+  return Math.round((grossIncGstCents * pct) / 100);
 }
 
 export async function loadVehicleClassMaps(prisma?: {

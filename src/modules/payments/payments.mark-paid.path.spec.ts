@@ -85,7 +85,15 @@ describe('PaymentsService markPaidAndLock leftover paths', () => {
         update: jest.fn().mockResolvedValue({}),
         updateMany: jest.fn().mockResolvedValue({ count: 1 }),
       },
-      job: { update: jest.fn().mockResolvedValue({}) },
+      job: {
+        update: jest.fn().mockResolvedValue({}),
+        findUnique: jest.fn().mockResolvedValue({
+          originRegionId: null,
+          originTerritoryId: null,
+          senderCompanyId: 'co-1',
+          assignment: { carrierCompanyId: 'carrier-1' },
+        }),
+      },
       settlementLine: {
         count: jest.fn().mockResolvedValue(0),
         createMany: jest.fn().mockResolvedValue({ count: 4 }),

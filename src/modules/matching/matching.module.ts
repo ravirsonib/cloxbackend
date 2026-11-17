@@ -6,6 +6,7 @@ import { AuditModule } from '../audit/audit.module';
 import { CarrierModule } from '../carrier/carrier.module';
 import { JobsModule } from '../jobs/jobs.module';
 import { NotificationsModule } from '../notifications/notifications.module';
+import { SettlementsModule } from '../settlements/settlements.module';
 import { MatchingController } from './matching.controller';
 import { MatchingService } from './matching.service';
 
@@ -16,6 +17,7 @@ import { MatchingService } from './matching.service';
     NotificationsModule,
     forwardRef(() => CarrierModule),
     JobsModule,
+    SettlementsModule,
   ],
   controllers: [MatchingController],
   providers: [MatchingService, JwtAuthGuard, RolesGuard],

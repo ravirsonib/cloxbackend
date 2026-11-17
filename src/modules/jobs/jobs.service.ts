@@ -13,6 +13,8 @@ import {
   CompanyType,
   JobPricingModel,
   JobStatus,
+  NotificationType,
+  PaymentEventType,
   PlatformRole,
   ProposalStatus,
   TripExceptionStatus,
@@ -31,9 +33,11 @@ import { InAppNotificationsService } from '../notifications/in-app-notifications
 import { NotificationsService } from '../notifications/notifications.service';
 import { PaymentsService } from '../payments/payments.service';
 import { SenderService } from '../sender/sender.service';
-import { NotificationType } from '@prisma/client';
 import { resolveJobEditMode } from './job-edit-mode';
-import { isAssignmentPaidAndConfirmed } from './assignment-status.util';
+import {
+  isAssignmentPaidAndConfirmed,
+  pickPrimaryFarePaymentEvent,
+} from './assignment-status.util';
 import {
   estimateRangeIncGstCents,
   quoteForModel,
@@ -85,6 +89,7 @@ export class JobsService {
     private readonly payments: PaymentsService,
     @Optional() private readonly notifications?: NotificationsService,
     @Optional() private readonly inbox?: InAppNotificationsService,
+    @Optional() private readonly revenueSplit?: import('../settlements/revenue-split.service').RevenueSplitService,
   ) {}
 
   private ensureDatabase() {
@@ -591,6 +596,7 @@ export class JobsService {
             : null,
           dgDocumentId: p.dgDocumentId ?? p.dgDocument?.id ?? null,
           dgDocumentFilename: p.dgDocument?.originalFilename ?? null,
+          // Enriched with uplift-aware net in getJob when RevenueSplitService is available.
           netToCarrierCents: carrierNetPayoutCents(p.amountIncGstCents),
           createdAt: p.createdAt,
         };
@@ -714,11 +720,16 @@ export class JobsService {
         },
         assignment: true,
         trip: { select: { id: true, status: true, completedAt: true } },
-        paymentEvents: { orderBy: { createdAt: 'desc' }, take: 3 },
+        paymentEvents: {
+          where: { type: PaymentEventType.CHARGE },
+          orderBy: { createdAt: 'desc' },
+          take: 5,
+        },
       },
     });
     if (!job) throw new NotFoundException('Job not found');
     const editability = resolveJobEditMode(job);
+    const primaryPayment = pickPrimaryFarePaymentEvent(job.paymentEvents);
     const openException = await this.prisma.tripException.findFirst({
       where: {
         jobId: job.id,
@@ -761,6 +772,18 @@ export class JobsService {
       },
     });
     const mapped = this.mapJob(job);
+    if (this.revenueSplit && mapped.proposals?.length) {
+      mapped.proposals = await Promise.all(
+        mapped.proposals.map(async (p) => ({
+          ...p,
+          netToCarrierCents: await this.revenueSplit!.carrierNetPayoutCents(
+            p.amountIncGstCents,
+            new Date(),
+            p.carrierCompanyId,
+          ),
+        })),
+      );
+    }
     return {
       ...mapped,
       editability,
@@ -780,12 +803,13 @@ export class JobsService {
             paidAndConfirmed: isAssignmentPaidAndConfirmed(job.assignment.status),
           }
         : null,
-      payment: job.paymentEvents[0]
+      payment: primaryPayment
         ? {
-            id: job.paymentEvents[0].id,
-            status: job.paymentEvents[0].status,
-            amountIncGstCents: job.paymentEvents[0].amountIncGstCents,
-            stripePaymentIntentId: job.paymentEvents[0].stripePaymentIntentId,
+            id: primaryPayment.id,
+            status: primaryPayment.status,
+            amountIncGstCents: primaryPayment.amountIncGstCents,
+            stripePaymentIntentId: primaryPayment.stripePaymentIntentId,
+            type: primaryPayment.type,
           }
         : null,
       openException: openException
@@ -1554,6 +1578,14 @@ export class JobsService {
 
   async acceptProposal(principal: AuthenticatedPrincipal, jobId: string, proposalId: string) {
     return this.payments.acceptProposal(principal, jobId, proposalId);
+  }
+
+  async previewProposalCharge(
+    principal: AuthenticatedPrincipal,
+    jobId: string,
+    proposalId: string,
+  ) {
+    return this.payments.previewProposalCharge(principal, jobId, proposalId);
   }
 
   async cancelJob(principal: AuthenticatedPrincipal, jobId: string) {

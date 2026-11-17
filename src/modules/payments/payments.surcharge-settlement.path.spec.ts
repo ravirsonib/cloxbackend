@@ -99,15 +99,15 @@ describe('PaymentsService surcharge settlement accrual + carrier transfer', () =
           {
             jobId: 'job-1',
             recipientType: SettlementRecipientType.STATE_MASTER,
-            sharePercent: 10,
-            amountCents: 1000,
+            sharePercent: 9,
+            amountCents: 900,
             status: SettlementLineStatus.ACCRUED,
           },
           {
             jobId: 'job-1',
             recipientType: SettlementRecipientType.LOCAL_BDE,
-            sharePercent: 5,
-            amountCents: 500,
+            sharePercent: 6,
+            amountCents: 600,
             status: SettlementLineStatus.ACCRUED,
           },
         ],
@@ -192,6 +192,7 @@ describe('PaymentsService surcharge settlement accrual + carrier transfer', () =
         originRegionId: 'reg-1',
         originTerritoryId: 'terr-1',
         senderCompanyId: 'co-1',
+        carrierCompanyId: null,
       });
       expect(tx.settlementLine.createMany).toHaveBeenCalledWith({
         data: [

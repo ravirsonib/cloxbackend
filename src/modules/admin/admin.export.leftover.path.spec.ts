@@ -125,6 +125,21 @@ describe('AdminService export / updateLead leftovers', () => {
         ]),
         count: jest.fn().mockResolvedValue(1),
       },
+      policyVersion: {
+        findFirst: jest.fn().mockResolvedValue(null),
+      },
+      platformSettings: {
+        findUnique: jest.fn().mockResolvedValue({
+          senderPlatformFeePercent: 2,
+          minPlatformPercent: 10,
+        }),
+      },
+      companyRevenueUplift: {
+        findMany: jest.fn().mockResolvedValue([]),
+      },
+      companySenderFeeOverride: {
+        findMany: jest.fn().mockResolvedValue([]),
+      },
     };
     const result = await makeService(prisma).listCompanies({
       page: 1,

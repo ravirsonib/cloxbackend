@@ -60,6 +60,7 @@ export class MatchingService {
     private readonly jobsService: JobsService,
     @Optional() private readonly notifications?: NotificationsService,
     @Optional() private readonly inbox?: InAppNotificationsService,
+    @Optional() private readonly revenueSplit?: import('../settlements/revenue-split.service').RevenueSplitService,
   ) {}
 
   private ensureDatabase() {
@@ -164,8 +165,24 @@ export class MatchingService {
             ? 'FAIR'
             : 'CRITICAL';
 
+    const carrierPercent = this.revenueSplit
+      ? await this.revenueSplit.nationalCarrierPercent()
+      : 70;
+    // Apply this carrier's uplift for board net hints when present.
+    const effectiveCarrierPercent = this.revenueSplit
+      ? (
+          await this.revenueSplit.resolvePercents({
+            referredByAdminUserId: null,
+            carrierCompanyId: company.id,
+            at: new Date(),
+          })
+        ).percents.carrierPercent
+      : carrierPercent;
+
     return {
-      netPayoutHint: '70% of gross to carrier (admin 30% pool is configurable)',
+      netPayoutHint: `${effectiveCarrierPercent}% of gross to carrier (CLOX pool is nested Super/State/Local)`,
+      carrierPercent: effectiveCarrierPercent,
+      nationalCarrierPercent: carrierPercent,
       carrierReliabilityScore: reliabilityScore,
       carrierReliabilityTier: reliabilityTier,
       jobs: visible.map((j) => {
@@ -196,7 +213,7 @@ export class MatchingService {
           billableHours: j.billableHours,
           estimateIncGstCents: j.estimateIncGstCents,
           estimateNetToCarrierCents: discountedEstimate
-            ? carrierNetPayoutCents(discountedEstimate)
+            ? carrierNetPayoutCents(discountedEstimate, effectiveCarrierPercent)
             : null,
           marketplacePriority: j.marketplacePriority,
           rescueDiscountPercent: j.rescueDiscountPercent,
@@ -402,8 +419,9 @@ export class MatchingService {
       minBase = Math.round((job.estimateIncGstCents * (100 - discount)) / 100);
     }
     if (input.amountIncGstCents < minBase) {
+      const minAud = (minBase / 100).toFixed(2);
       throw new BadRequestException({
-        message: `Bid below minimum (${minBase} cents)`,
+        message: `Bid below minimum (A$${minAud})`,
         code: 'BID_BELOW_MIN_BASE',
         minBaseCents: minBase,
       });
@@ -562,7 +580,13 @@ export class MatchingService {
       jobId: job.id,
       status: proposal.status,
       amountIncGstCents: proposal.amountIncGstCents,
-      netToCarrierCents: carrierNetPayoutCents(proposal.amountIncGstCents),
+      netToCarrierCents: this.revenueSplit
+        ? await this.revenueSplit.carrierNetPayoutCents(
+            proposal.amountIncGstCents,
+            new Date(),
+            company.id,
+          )
+        : carrierNetPayoutCents(proposal.amountIncGstCents),
       etaMinutes: proposal.etaMinutes,
       vehicleId: proposal.vehicleId,
       driverId: proposal.driverId,

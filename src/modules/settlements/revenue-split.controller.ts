@@ -1,7 +1,9 @@
-import { Body, Controller, Get, Post, Query, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Param, ParseUUIDPipe, Post, Query, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import {
   AdminRole,
+  companyRevenueUpliftPublishSchema,
+  companySenderFeeOverridePublishSchema,
   partnerPerformanceQuerySchema,
   revenueSplitAdminPackagePublishSchema,
   revenueSplitAdminPackagesQuerySchema,
@@ -9,6 +11,8 @@ import {
   revenueSplitOverridePublishSchema,
   revenueSplitPreviewQuerySchema,
   revenueSplitPublishSchema,
+  type CompanyRevenueUpliftPublishInput,
+  type CompanySenderFeeOverridePublishInput,
   type PartnerPerformanceQuery,
   type RevenueSplitAdminPackagePublishInput,
   type RevenueSplitAdminPackagesQuery,
@@ -96,7 +100,7 @@ export class RevenueSplitController {
   }
 
   @Post('publish')
-  @ApiOperation({ summary: 'Publish national revenue split (carrier fixed 70%)' })
+  @ApiOperation({ summary: 'Publish national revenue split (carrier % + CLOX pool)' })
   publish(
     @Body(new ZodValidationPipe(revenueSplitPublishSchema)) body: RevenueSplitPublishInput,
     @CurrentAdmin() admin: AuthenticatedAdmin,
@@ -106,7 +110,7 @@ export class RevenueSplitController {
 
   @Post('admin-packages')
   @ApiOperation({
-    summary: 'Publish a personal Super/State/Local package for one State/Local admin',
+    summary: 'Publish a personal CLOX-pool package for one State/Local admin (sum 100 of pool)',
   })
   publishAdminPackage(
     @Body(new ZodValidationPipe(revenueSplitAdminPackagePublishSchema))
@@ -114,6 +118,38 @@ export class RevenueSplitController {
     @CurrentAdmin() admin: AuthenticatedAdmin,
   ) {
     return this.revenueSplit.publishAdminPackage(body, admin.id);
+  }
+
+  @Get('carrier-uplifts/:companyId')
+  @ApiOperation({ summary: 'List published carrier revenue uplifts for a company' })
+  listCarrierUplifts(@Param('companyId', ParseUUIDPipe) companyId: string) {
+    return this.revenueSplit.listCarrierUplifts(companyId);
+  }
+
+  @Post('carrier-uplifts')
+  @ApiOperation({ summary: 'Publish per-carrier performance uplift (bonus % points)' })
+  publishCarrierUplift(
+    @Body(new ZodValidationPipe(companyRevenueUpliftPublishSchema))
+    body: CompanyRevenueUpliftPublishInput,
+    @CurrentAdmin() admin: AuthenticatedAdmin,
+  ) {
+    return this.revenueSplit.publishCarrierUplift(body, admin.id);
+  }
+
+  @Get('sender-fee-overrides/:companyId')
+  @ApiOperation({ summary: 'List published sender platform fee overrides' })
+  listSenderFeeOverrides(@Param('companyId', ParseUUIDPipe) companyId: string) {
+    return this.revenueSplit.listSenderFeeOverrides(companyId);
+  }
+
+  @Post('sender-fee-overrides')
+  @ApiOperation({ summary: 'Publish per-sender platform fee % override' })
+  publishSenderFeeOverride(
+    @Body(new ZodValidationPipe(companySenderFeeOverridePublishSchema))
+    body: CompanySenderFeeOverridePublishInput,
+    @CurrentAdmin() admin: AuthenticatedAdmin,
+  ) {
+    return this.revenueSplit.publishSenderFeeOverride(body, admin.id);
   }
 
   @Post('overrides')

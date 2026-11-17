@@ -226,6 +226,8 @@ export const AuditAction = {
   REVENUE_SPLIT_PUBLISHED: 'policy.revenue_split.published',
   REVENUE_SPLIT_OVERRIDE_PUBLISHED: 'policy.revenue_split.override_published',
   REVENUE_SPLIT_ADMIN_PACKAGE_PUBLISHED: 'policy.revenue_split.admin_package_published',
+  COMPANY_REVENUE_UPLIFT_PUBLISHED: 'company.revenue_uplift.published',
+  COMPANY_SENDER_FEE_OVERRIDE_PUBLISHED: 'company.sender_fee_override.published',
   REFUND_STUB: 'payment.refund_stub',
   TRIP_CREATED: 'trip.created',
   TRIP_SAFETY_PASSED: 'trip.safety_passed',
@@ -741,6 +743,8 @@ export const adminCompanyListQuerySchema = z.object({
   status: companyStatusSchema.optional(),
   regionCode: z.string().trim().max(16).optional(),
   q: z.string().trim().max(200).optional(),
+  /** When true, only companies with an active custom uplift / fee override. */
+  hasCustomPolicy: z.coerce.boolean().optional(),
 });
 
 export type AdminCompanyListQuery = z.infer<typeof adminCompanyListQuerySchema>;
@@ -1897,6 +1901,9 @@ export const platformSettingsPatchSchema = z.object({
   hourlyMinBaseCents: z.number().int().min(0).max(5_000_000).optional(),
   settlementCycleCadenceDays: z.number().int().min(1).max(90).optional(),
   settlementCutoffHour: z.number().int().min(0).max(23).optional(),
+  senderPlatformFeePercent: z.number().int().min(0).max(30).optional(),
+  senderPlatformFeeMode: z.enum(['EXCLUSIVE', 'INCLUSIVE']).optional(),
+  minPlatformPercent: z.number().int().min(1).max(50).optional(),
 });
 
 export type PlatformSettingsPatchInput = z.infer<typeof platformSettingsPatchSchema>;
@@ -1992,17 +1999,42 @@ const adminPoolPercentsSchema = z
 export const revenueSplitDraftSchema = z
   .object({
     carrierPercent: z.number().int().min(1).max(99).optional().default(70),
-    superPercent: z.number().int().min(0).max(100),
-    statePercent: z.number().int().min(0).max(100),
-    localPercent: z.number().int().min(0).max(100),
+    /** Gross admin legs (legacy UI) — optional if clox* pool legs provided */
+    superPercent: z.number().int().min(0).max(100).optional(),
+    statePercent: z.number().int().min(0).max(100).optional(),
+    localPercent: z.number().int().min(0).max(100).optional(),
+    cloxSuperPercent: z.number().int().min(0).max(100).optional(),
+    cloxStatePercent: z.number().int().min(0).max(100).optional(),
+    cloxLocalPercent: z.number().int().min(0).max(100).optional(),
     notes: z.string().trim().max(500).optional(),
   })
-  .refine(
-    (v) => (v.carrierPercent ?? 70) + v.superPercent + v.statePercent + v.localPercent === 100,
-    {
-      message: 'carrierPercent + superPercent + statePercent + localPercent must equal 100',
-    },
-  );
+  .superRefine((v, ctx) => {
+    const hasPool =
+      v.cloxSuperPercent != null && v.cloxStatePercent != null && v.cloxLocalPercent != null;
+    const hasGross = v.superPercent != null && v.statePercent != null && v.localPercent != null;
+    if (!hasPool && !hasGross) {
+      ctx.addIssue({
+        code: 'custom',
+        message: 'Provide CLOX pool percents or gross super/state/local percents',
+      });
+      return;
+    }
+    if (hasPool && v.cloxSuperPercent! + v.cloxStatePercent! + v.cloxLocalPercent! !== 100) {
+      ctx.addIssue({
+        code: 'custom',
+        message: 'cloxSuperPercent + cloxStatePercent + cloxLocalPercent must equal 100',
+      });
+    }
+    if (
+      hasGross &&
+      (v.carrierPercent ?? 70) + v.superPercent! + v.statePercent! + v.localPercent! !== 100
+    ) {
+      ctx.addIssue({
+        code: 'custom',
+        message: 'carrierPercent + superPercent + statePercent + localPercent must equal 100',
+      });
+    }
+  });
 export type RevenueSplitDraftInput = z.infer<typeof revenueSplitDraftSchema>;
 
 export const revenueSplitPublishSchema = z
@@ -2012,28 +2044,44 @@ export const revenueSplitPublishSchema = z
     superPercent: z.number().int().min(0).max(100).optional(),
     statePercent: z.number().int().min(0).max(100).optional(),
     localPercent: z.number().int().min(0).max(100).optional(),
+    cloxSuperPercent: z.number().int().min(0).max(100).optional(),
+    cloxStatePercent: z.number().int().min(0).max(100).optional(),
+    cloxLocalPercent: z.number().int().min(0).max(100).optional(),
     notes: z.string().trim().max(500).optional(),
     effectiveFrom: z.string().datetime().optional(),
   })
   .superRefine((value, ctx) => {
     if (value.draftId) return;
-    if (
-      value.superPercent == null ||
-      value.statePercent == null ||
-      value.localPercent == null
-    ) {
+    const hasPool =
+      value.cloxSuperPercent != null &&
+      value.cloxStatePercent != null &&
+      value.cloxLocalPercent != null;
+    const hasGross =
+      value.superPercent != null && value.statePercent != null && value.localPercent != null;
+    if (!hasPool && !hasGross) {
       ctx.addIssue({
         code: 'custom',
-        message: 'Provide draftId or all of superPercent, statePercent, localPercent',
+        message: 'Provide draftId, CLOX pool percents, or gross super/state/local percents',
       });
       return;
     }
-    const carrier = value.carrierPercent ?? 70;
-    if (carrier + value.superPercent + value.statePercent + value.localPercent !== 100) {
+    if (
+      hasPool &&
+      value.cloxSuperPercent! + value.cloxStatePercent! + value.cloxLocalPercent! !== 100
+    ) {
       ctx.addIssue({
         code: 'custom',
-        message: 'carrierPercent + superPercent + statePercent + localPercent must equal 100',
+        message: 'cloxSuperPercent + cloxStatePercent + cloxLocalPercent must equal 100',
       });
+    }
+    if (hasGross) {
+      const carrier = value.carrierPercent ?? 70;
+      if (carrier + value.superPercent! + value.statePercent! + value.localPercent! !== 100) {
+        ctx.addIssue({
+          code: 'custom',
+          message: 'carrierPercent + superPercent + statePercent + localPercent must equal 100',
+        });
+      }
     }
   });
 export type RevenueSplitPublishInput = z.infer<typeof revenueSplitPublishSchema>;
@@ -2051,14 +2099,26 @@ export type RevenueSplitOverridePublishInput = z.infer<
   typeof revenueSplitOverridePublishSchema
 >;
 
-export const revenueSplitAdminPackagePublishSchema = z.object({
-  adminUserId: z.string().uuid(),
-  superPercent: z.number().int().min(0).max(100),
-  statePercent: z.number().int().min(0).max(100),
-  localPercent: z.number().int().min(0).max(100),
-  notes: z.string().trim().max(500).optional(),
-  effectiveFrom: z.string().datetime().optional(),
-});
+export const revenueSplitAdminPackagePublishSchema = z
+  .object({
+    adminUserId: z.string().uuid(),
+    /** Preferred: % of CLOX pool (sum 100). Legacy absolute % of gross also accepted and normalized. */
+    superPercent: z.number().int().min(0).max(100),
+    statePercent: z.number().int().min(0).max(100),
+    localPercent: z.number().int().min(0).max(100),
+    notes: z.string().trim().max(500).optional(),
+    effectiveFrom: z.string().datetime().optional(),
+  })
+  .superRefine((v, ctx) => {
+    const sum = v.superPercent + v.statePercent + v.localPercent;
+    if (sum !== 100 && sum !== 30) {
+      ctx.addIssue({
+        code: 'custom',
+        message:
+          'Admin package shares must sum to 100 (% of CLOX pool) or legacy 30 (% of gross at 70/30)',
+      });
+    }
+  });
 export type RevenueSplitAdminPackagePublishInput = z.infer<
   typeof revenueSplitAdminPackagePublishSchema
 >;
@@ -2075,8 +2135,43 @@ export const revenueSplitPreviewQuerySchema = z.object({
   regionId: z.string().uuid().optional(),
   territoryId: z.string().uuid().optional(),
   senderCompanyId: z.string().uuid().optional(),
+  carrierCompanyId: z.string().uuid().optional(),
+  /** When set, treat grossIncGstCents as base and apply sender fee first. */
+  applySenderFee: z.coerce.boolean().optional(),
 });
 export type RevenueSplitPreviewQuery = z.infer<typeof revenueSplitPreviewQuerySchema>;
+
+export const companyRevenueUpliftPublishSchema = z.object({
+  companyId: z.string().uuid(),
+  /** Cap is enforced against national + min CLOX pool in RevenueSplitService. */
+  bonusPercent: z.number().int().min(0).max(99),
+  notes: z.string().trim().max(500).optional(),
+  effectiveFrom: z.string().datetime().optional(),
+});
+export type CompanyRevenueUpliftPublishInput = z.infer<typeof companyRevenueUpliftPublishSchema>;
+
+export const companySenderFeeOverridePublishSchema = z
+  .object({
+    companyId: z.string().uuid(),
+    feePercent: z.number().int().min(0).max(30).optional(),
+    /** Clear override and inherit Platform Settings fee again. */
+    inheritNational: z.boolean().optional(),
+    notes: z.string().trim().max(500).optional(),
+    effectiveFrom: z.string().datetime().optional(),
+  })
+  .superRefine((val, ctx) => {
+    if (val.inheritNational) return;
+    if (val.feePercent == null) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'feePercent is required unless inheritNational is true',
+        path: ['feePercent'],
+      });
+    }
+  });
+export type CompanySenderFeeOverridePublishInput = z.infer<
+  typeof companySenderFeeOverridePublishSchema
+>;
 
 export const partnerPerformanceQuerySchema = z.object({
   role: z.enum([AdminRole.STATE_MASTER, AdminRole.LOCAL_BDE]).optional(),

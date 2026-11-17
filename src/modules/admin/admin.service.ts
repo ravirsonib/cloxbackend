@@ -43,6 +43,14 @@ import {
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { NotificationsService } from '../notifications/notifications.service';
+import {
+  assertNationalPayload,
+  CARRIER_PERCENT_FIXED,
+  effectiveCarrierPercent,
+  MIN_PLATFORM_PERCENT_DEFAULT,
+  REVENUE_SPLIT_POLICY_KEY,
+  type RevenueSplitPolicyPayload,
+} from '../settlements/revenue-split.types';
 
 const leadListSelect = {
   id: true,
@@ -779,10 +787,11 @@ export class AdminService {
   async listCompanies(query: AdminCompanyListQuery) {
     this.ensureDatabase();
 
+    const companyType = query.type ?? CompanyType.CARRIER;
     const where: Prisma.CompanyWhereInput = {};
     // Marketplace customers only — admin partners live under Ops → Admin partners.
     // Prefer explicit filter; default CARRIER (matches adminCompanyListQuerySchema).
-    where.type = query.type ?? CompanyType.CARRIER;
+    where.type = companyType;
     if (query.status) where.status = query.status;
     if (query.regionCode) {
       where.homeRegion = { code: query.regionCode.toUpperCase() };
@@ -799,6 +808,13 @@ export class AdminService {
       ];
     }
 
+    if (query.hasCustomPolicy) {
+      const specialIds = await this.findCompanyIdsWithCustomRevenuePolicy(companyType);
+      where.id = {
+        in: specialIds.length ? specialIds : ['00000000-0000-0000-0000-000000000000'],
+      };
+    }
+
     const skip = (query.page - 1) * query.pageSize;
     const openCaseStatuses: ComplianceCaseStatus[] = [
       ComplianceCaseStatus.OPEN,
@@ -806,7 +822,7 @@ export class AdminService {
       ComplianceCaseStatus.ESCALATED,
     ];
 
-    const [rows, total] = await Promise.all([
+    const [rows, total, nationalCarrierPercent, feeSettings] = await Promise.all([
       this.prisma.company.findMany({
         where,
         orderBy: { createdAt: 'desc' },
@@ -845,7 +861,17 @@ export class AdminService {
         },
       }),
       this.prisma.company.count({ where }),
+      this.loadNationalCarrierPercent(),
+      this.loadPlatformFeeSettings(),
     ]);
+
+    const companyIds = rows.map((r) => r.id);
+    const revenueByCompany = await this.loadCompanyRevenuePolicyMap(
+      companyIds,
+      companyType,
+      nationalCarrierPercent,
+      feeSettings,
+    );
 
     const items = rows.map((row) => {
       const { complianceCases, _count, ...company } = row;
@@ -857,6 +883,12 @@ export class AdminService {
           vehicles: _count.vehicles,
           drivers: _count.drivers,
         },
+        revenuePolicy: revenueByCompany.get(row.id) ?? {
+          hasCustomPolicy: false,
+          nationalCarrierPercent,
+          nationalFeePercent: feeSettings.senderPlatformFeePercent,
+          minPlatformPercent: feeSettings.minPlatformPercent,
+        },
       };
     });
 
@@ -867,6 +899,159 @@ export class AdminService {
       total,
       totalPages: Math.max(1, Math.ceil(total / query.pageSize)),
     };
+  }
+
+  private async loadNationalCarrierPercent(): Promise<number> {
+    const row = await this.prisma.policyVersion.findFirst({
+      where: { key: REVENUE_SPLIT_POLICY_KEY, publishedAt: { not: null } },
+      orderBy: [{ publishedAt: 'desc' }, { version: 'desc' }],
+    });
+    if (!row) return CARRIER_PERCENT_FIXED;
+    try {
+      return assertNationalPayload(row.payload as RevenueSplitPolicyPayload).carrierPercent;
+    } catch {
+      return CARRIER_PERCENT_FIXED;
+    }
+  }
+
+  private async loadPlatformFeeSettings(): Promise<{
+    senderPlatformFeePercent: number;
+    minPlatformPercent: number;
+  }> {
+    const row = await this.prisma.platformSettings.findUnique({
+      where: { id: 'default' },
+      select: { senderPlatformFeePercent: true, minPlatformPercent: true },
+    });
+    return {
+      senderPlatformFeePercent: row?.senderPlatformFeePercent ?? 0,
+      minPlatformPercent: row?.minPlatformPercent ?? MIN_PLATFORM_PERCENT_DEFAULT,
+    };
+  }
+
+  private async findCompanyIdsWithCustomRevenuePolicy(
+    companyType: CompanyType,
+  ): Promise<string[]> {
+    const now = new Date();
+    if (companyType === CompanyType.CARRIER) {
+      const rows = await this.prisma.companyRevenueUplift.findMany({
+        where: {
+          publishedAt: { not: null, lte: now },
+          effectiveFrom: { lte: now },
+          company: { type: CompanyType.CARRIER },
+        },
+        orderBy: [{ effectiveFrom: 'desc' }, { publishedAt: 'desc' }],
+        select: { companyId: true, bonusPercent: true },
+      });
+      const latest = new Map<string, number>();
+      for (const row of rows) {
+        if (!latest.has(row.companyId)) latest.set(row.companyId, row.bonusPercent);
+      }
+      return [...latest.entries()].filter(([, bonus]) => bonus > 0).map(([id]) => id);
+    }
+
+    const rows = await this.prisma.companySenderFeeOverride.findMany({
+      where: {
+        publishedAt: { not: null, lte: now },
+        effectiveFrom: { lte: now },
+        company: { type: CompanyType.SENDER },
+      },
+      orderBy: [{ effectiveFrom: 'desc' }, { publishedAt: 'desc' }],
+      select: { companyId: true, inheritNational: true },
+    });
+    const latest = new Map<string, boolean>();
+    for (const row of rows) {
+      if (!latest.has(row.companyId)) latest.set(row.companyId, row.inheritNational);
+    }
+    return [...latest.entries()].filter(([, inherit]) => !inherit).map(([id]) => id);
+  }
+
+  private async loadCompanyRevenuePolicyMap(
+    companyIds: string[],
+    companyType: CompanyType,
+    nationalCarrierPercent: number,
+    feeSettings: { senderPlatformFeePercent: number; minPlatformPercent: number },
+  ) {
+    type RevenuePolicy = {
+      hasCustomPolicy: boolean;
+      nationalCarrierPercent: number;
+      nationalFeePercent: number;
+      minPlatformPercent: number;
+      bonusPercent?: number;
+      effectiveCarrierPercent?: number;
+      feePercent?: number;
+      inheritNational?: boolean;
+    };
+
+    const map = new Map<string, RevenuePolicy>();
+    if (companyIds.length === 0) return map;
+
+    const now = new Date();
+    const base = {
+      nationalCarrierPercent,
+      nationalFeePercent: feeSettings.senderPlatformFeePercent,
+      minPlatformPercent: feeSettings.minPlatformPercent,
+    };
+
+    if (companyType === CompanyType.CARRIER) {
+      const rows = await this.prisma.companyRevenueUplift.findMany({
+        where: {
+          companyId: { in: companyIds },
+          publishedAt: { not: null, lte: now },
+          effectiveFrom: { lte: now },
+        },
+        orderBy: [{ effectiveFrom: 'desc' }, { publishedAt: 'desc' }],
+        select: { companyId: true, bonusPercent: true },
+      });
+      const latest = new Map<string, number>();
+      for (const row of rows) {
+        if (!latest.has(row.companyId)) latest.set(row.companyId, row.bonusPercent);
+      }
+      for (const id of companyIds) {
+        const bonusPercent = latest.get(id) ?? 0;
+        const effective = effectiveCarrierPercent({
+          nationalCarrierPercent,
+          bonusPercent,
+          minPlatformPercent: feeSettings.minPlatformPercent,
+        });
+        map.set(id, {
+          ...base,
+          hasCustomPolicy: bonusPercent > 0,
+          bonusPercent,
+          effectiveCarrierPercent: effective,
+        });
+      }
+      return map;
+    }
+
+    const rows = await this.prisma.companySenderFeeOverride.findMany({
+      where: {
+        companyId: { in: companyIds },
+        publishedAt: { not: null, lte: now },
+        effectiveFrom: { lte: now },
+      },
+      orderBy: [{ effectiveFrom: 'desc' }, { publishedAt: 'desc' }],
+      select: { companyId: true, feePercent: true, inheritNational: true },
+    });
+    const latest = new Map<string, { feePercent: number; inheritNational: boolean }>();
+    for (const row of rows) {
+      if (!latest.has(row.companyId)) {
+        latest.set(row.companyId, {
+          feePercent: row.feePercent,
+          inheritNational: row.inheritNational,
+        });
+      }
+    }
+    for (const id of companyIds) {
+      const ov = latest.get(id);
+      const hasCustomPolicy = Boolean(ov && !ov.inheritNational);
+      map.set(id, {
+        ...base,
+        hasCustomPolicy,
+        feePercent: hasCustomPolicy ? ov!.feePercent : feeSettings.senderPlatformFeePercent,
+        inheritNational: ov?.inheritNational ?? true,
+      });
+    }
+    return map;
   }
 
   /**
@@ -1815,6 +2000,9 @@ export class AdminService {
       hourlyMinBaseCents: (row as any).hourlyMinBaseCents ?? 20000,
       settlementCycleCadenceDays: (row as any).settlementCycleCadenceDays ?? 14,
       settlementCutoffHour: (row as any).settlementCutoffHour ?? 4,
+      senderPlatformFeePercent: (row as any).senderPlatformFeePercent ?? 0,
+      senderPlatformFeeMode: (row as any).senderPlatformFeeMode ?? 'EXCLUSIVE',
+      minPlatformPercent: (row as any).minPlatformPercent ?? 10,
       updatedAt: row.updatedAt,
     };
   }
@@ -1865,6 +2053,15 @@ export class AdminService {
     if (input.settlementCutoffHour !== undefined) {
       (data as any).settlementCutoffHour = input.settlementCutoffHour;
     }
+    if (input.senderPlatformFeePercent !== undefined) {
+      (data as any).senderPlatformFeePercent = input.senderPlatformFeePercent;
+    }
+    if (input.senderPlatformFeeMode !== undefined) {
+      (data as any).senderPlatformFeeMode = input.senderPlatformFeeMode;
+    }
+    if (input.minPlatformPercent !== undefined) {
+      (data as any).minPlatformPercent = input.minPlatformPercent;
+    }
     const updated = await this.prisma.platformSettings.update({
       where: { id: 'default' },
       data,
@@ -1891,6 +2088,9 @@ export class AdminService {
       hourlyMinBaseCents: (updated as any).hourlyMinBaseCents ?? 20000,
       settlementCycleCadenceDays: (updated as any).settlementCycleCadenceDays ?? 14,
       settlementCutoffHour: (updated as any).settlementCutoffHour ?? 4,
+      senderPlatformFeePercent: (updated as any).senderPlatformFeePercent ?? 0,
+      senderPlatformFeeMode: (updated as any).senderPlatformFeeMode ?? 'EXCLUSIVE',
+      minPlatformPercent: (updated as any).minPlatformPercent ?? 10,
       updatedAt: updated.updatedAt,
     };
   }

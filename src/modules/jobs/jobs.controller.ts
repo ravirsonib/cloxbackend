@@ -153,6 +153,19 @@ export class JobsController {
     return this.jobsService.publishJob(principal, id);
   }
 
+  @Get(':id/proposals/:proposalId/charge-preview')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(AppRole.SENDER)
+  @ApiOperation({ summary: 'Preview sender platform fee + charge total before accept' })
+  previewCharge(
+    @CurrentPrincipal() principal: AuthenticatedPrincipal,
+    @Param('id') id: string,
+    @Param('proposalId') proposalId: string,
+  ) {
+    return this.jobsService.previewProposalCharge(principal, id, proposalId);
+  }
+
   @Post(':id/proposals/:proposalId/accept')
   @ApiBearerAuth()
   @UseGuards(JwtAuthGuard, RolesGuard)

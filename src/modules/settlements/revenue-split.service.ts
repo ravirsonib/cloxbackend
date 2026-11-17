@@ -21,22 +21,30 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { AuditAction } from '../../shared/types';
 import {
-  allocateCents,
+  allocateTwoStage,
+  applySenderPlatformFee,
   assertAdminPool,
   assertNationalPayload,
   CARRIER_PERCENT_FIXED,
+  DEFAULT_CLOX_POOL,
+  effectiveCarrierPercent,
+  maxCarrierBonusPercent,
+  MIN_PLATFORM_PERCENT_DEFAULT,
+  normalizeAdminPoolShares,
   REVENUE_SPLIT_POLICY_KEY,
+  toPolicyPayload,
+  type CloxPoolPercents,
   type ResolvedRevenueSplit,
   type RevenueSplitPercents,
   type RevenueSplitPolicyPayload,
+  type SenderFeeApplyResult,
+  type SenderPlatformFeeMode,
 } from './revenue-split.types';
 
-const DEFAULT_PERCENTS: RevenueSplitPercents = {
+const DEFAULT_PERCENTS: RevenueSplitPercents & CloxPoolPercents = assertNationalPayload({
   carrierPercent: CARRIER_PERCENT_FIXED,
-  superPercent: 15,
-  statePercent: 10,
-  localPercent: 5,
-};
+  ...DEFAULT_CLOX_POOL,
+});
 
 @Injectable()
 export class RevenueSplitService {
@@ -51,10 +59,28 @@ export class RevenueSplitService {
     }
   }
 
-  /** Display helper — carrier net from current national policy (fallback 70). */
-  async carrierNetPayoutCents(grossIncGstCents: number, at = new Date()): Promise<number> {
+  /** Display helper — carrier net from national policy ± optional company uplift. */
+  async carrierNetPayoutCents(
+    grossIncGstCents: number,
+    at = new Date(),
+    carrierCompanyId?: string | null,
+  ): Promise<number> {
+    const resolved = await this.resolvePercents({
+      referredByAdminUserId: null,
+      carrierCompanyId: carrierCompanyId ?? null,
+      at,
+    });
+    return allocateTwoStage(
+      grossIncGstCents,
+      resolved.percents.carrierPercent,
+      resolved.cloxPool,
+    ).carrier;
+  }
+
+  /** National carrier % only (for market board hints). */
+  async nationalCarrierPercent(at = new Date()): Promise<number> {
     const national = await this.getEffectiveNational(at);
-    return allocateCents(grossIncGstCents, national.percents).carrier;
+    return national.percents.carrierPercent;
   }
 
   async resolveForJob(params: {
@@ -63,6 +89,8 @@ export class RevenueSplitService {
     originTerritoryId: string | null;
     /** Sender company — package % from referredByAdminUserId when present. */
     senderCompanyId?: string | null;
+    /** Carrier company — optional performance uplift on national carrier %. */
+    carrierCompanyId?: string | null;
     referredByAdminUserId?: string | null;
     at?: Date;
   }): Promise<ResolvedRevenueSplit> {
@@ -78,12 +106,17 @@ export class RevenueSplitService {
       referredByAdminUserId = company?.referredByAdminUserId ?? null;
     }
 
-    const { percents, policyVersionId, adminPackageId } = await this.resolvePercents({
+    const resolved = await this.resolvePercents({
       referredByAdminUserId,
+      carrierCompanyId: params.carrierCompanyId ?? null,
       at,
     });
 
-    const amounts = allocateCents(params.grossIncGstCents, percents);
+    const amounts = allocateTwoStage(
+      params.grossIncGstCents,
+      resolved.percents.carrierPercent,
+      resolved.cloxPool,
+    );
 
     const referrer =
       referredByAdminUserId != null
@@ -134,11 +167,17 @@ export class RevenueSplitService {
       }
     }
 
+    const percents = amounts.grossPercents;
+
     return {
       percents,
-      policyVersionId,
+      cloxPool: amounts.cloxPool,
+      cloxPoolPercent: amounts.cloxPoolPercent,
+      policyVersionId: resolved.policyVersionId,
       overrideId: null,
-      adminPackageId,
+      adminPackageId: resolved.adminPackageId,
+      carrierUpliftId: resolved.carrierUpliftId,
+      carrierBonusPercent: resolved.carrierBonusPercent,
       referredByAdminUserId,
       lines: [
         {
@@ -182,18 +221,39 @@ export class RevenueSplitService {
   }
 
   /**
-   * Percents from the sender onboarder's published package when present;
-   * otherwise national PolicyVersion. Seat overrides are no longer used for new accruals.
+   * National carrier % (+ optional carrier uplift) and CLOX pool mix
+   * (national or sender onboarder's package). Packages never change carrier %.
    */
   async resolvePercents(params: {
     referredByAdminUserId: string | null;
+    carrierCompanyId?: string | null;
     at: Date;
   }): Promise<{
     percents: RevenueSplitPercents;
+    cloxPool: CloxPoolPercents;
     policyVersionId: string | null;
     adminPackageId: string | null;
+    carrierUpliftId: string | null;
+    carrierBonusPercent: number;
   }> {
     const national = await this.getEffectiveNational(params.at);
+    const settings = await this.getFeeSettings();
+    const uplift = params.carrierCompanyId
+      ? await this.findEffectiveCarrierUplift(params.carrierCompanyId, params.at)
+      : null;
+    const bonusPercent = uplift?.bonusPercent ?? 0;
+    const carrierPercent = effectiveCarrierPercent({
+      nationalCarrierPercent: national.percents.carrierPercent,
+      bonusPercent,
+      minPlatformPercent: settings.minPlatformPercent,
+    });
+
+    let cloxPool: CloxPoolPercents = {
+      cloxSuperPercent: national.percents.cloxSuperPercent,
+      cloxStatePercent: national.percents.cloxStatePercent,
+      cloxLocalPercent: national.percents.cloxLocalPercent,
+    };
+    let adminPackageId: string | null = null;
 
     if (params.referredByAdminUserId) {
       const pkg = await this.findEffectiveAdminPackage(
@@ -201,37 +261,75 @@ export class RevenueSplitService {
         params.at,
       );
       if (pkg) {
-        const expectedPool = 100 - national.percents.carrierPercent;
-        const currentPkgPool = pkg.superPercent + pkg.statePercent + pkg.localPercent;
-        // If national carrier share changed after the package was created,
-        // any expanded platform margin accrues to Super Admin (HQ) by default
-        const superPercent =
-          currentPkgPool === expectedPool
-            ? pkg.superPercent
-            : Math.max(0, expectedPool - pkg.statePercent - pkg.localPercent);
-
-        return {
-          percents: {
-            carrierPercent: national.percents.carrierPercent,
-            superPercent,
-            statePercent: pkg.statePercent,
-            localPercent: pkg.localPercent,
-          },
-          policyVersionId: national.policyVersionId,
-          adminPackageId: pkg.id,
-        };
+        cloxPool = normalizeAdminPoolShares({
+          superPercent: pkg.superPercent,
+          statePercent: pkg.statePercent,
+          localPercent: pkg.localPercent,
+        });
+        adminPackageId = pkg.id;
       }
     }
 
+    const staged = allocateTwoStage(10000, carrierPercent, cloxPool);
     return {
-      percents: national.percents,
+      percents: staged.grossPercents,
+      cloxPool,
       policyVersionId: national.policyVersionId,
-      adminPackageId: null,
+      adminPackageId,
+      carrierUpliftId: uplift?.id ?? null,
+      carrierBonusPercent: bonusPercent,
+    };
+  }
+
+  async resolveSenderFee(params: {
+    baseIncGstCents: number;
+    senderCompanyId?: string | null;
+    at?: Date;
+  }): Promise<SenderFeeApplyResult & { senderFeeOverrideId: string | null }> {
+    this.ensureDatabase();
+    const at = params.at ?? new Date();
+    const settings = await this.getFeeSettings();
+    let feePercent = settings.senderPlatformFeePercent;
+    let senderFeeOverrideId: string | null = null;
+    if (params.senderCompanyId) {
+      const override = await this.findEffectiveSenderFeeOverride(params.senderCompanyId, at);
+      if (override && !override.inheritNational) {
+        feePercent = override.feePercent;
+        senderFeeOverrideId = override.id;
+      }
+    }
+    return {
+      ...applySenderPlatformFee({
+        baseIncGstCents: params.baseIncGstCents,
+        feePercent,
+        mode: settings.senderPlatformFeeMode,
+      }),
+      senderFeeOverrideId,
+    };
+  }
+
+  private async getFeeSettings(): Promise<{
+    senderPlatformFeePercent: number;
+    senderPlatformFeeMode: SenderPlatformFeeMode;
+    minPlatformPercent: number;
+  }> {
+    const row = await this.prisma.platformSettings.findUnique({
+      where: { id: 'default' },
+      select: {
+        senderPlatformFeePercent: true,
+        senderPlatformFeeMode: true,
+        minPlatformPercent: true,
+      },
+    });
+    return {
+      senderPlatformFeePercent: row?.senderPlatformFeePercent ?? 0,
+      senderPlatformFeeMode: (row?.senderPlatformFeeMode as SenderPlatformFeeMode) ?? 'EXCLUSIVE',
+      minPlatformPercent: row?.minPlatformPercent ?? MIN_PLATFORM_PERCENT_DEFAULT,
     };
   }
 
   private async getEffectiveNational(at: Date): Promise<{
-    percents: RevenueSplitPercents;
+    percents: RevenueSplitPercents & CloxPoolPercents;
     policyVersionId: string | null;
   }> {
     const rows = await this.prisma.policyVersion.findMany({
@@ -266,6 +364,28 @@ export class RevenueSplitService {
     return this.prisma.adminRevenueSplitPackage.findFirst({
       where: {
         adminUserId,
+        publishedAt: { not: null, lte: at },
+        effectiveFrom: { lte: at },
+      },
+      orderBy: [{ effectiveFrom: 'desc' }, { publishedAt: 'desc' }],
+    });
+  }
+
+  private async findEffectiveCarrierUplift(companyId: string, at: Date) {
+    return this.prisma.companyRevenueUplift.findFirst({
+      where: {
+        companyId,
+        publishedAt: { not: null, lte: at },
+        effectiveFrom: { lte: at },
+      },
+      orderBy: [{ effectiveFrom: 'desc' }, { publishedAt: 'desc' }],
+    });
+  }
+
+  private async findEffectiveSenderFeeOverride(companyId: string, at: Date) {
+    return this.prisma.companySenderFeeOverride.findFirst({
+      where: {
+        companyId,
         publishedAt: { not: null, lte: at },
         effectiveFrom: { lte: at },
       },
@@ -315,9 +435,19 @@ export class RevenueSplitService {
       carrierPercentFixed: effective.percents.carrierPercent,
       platformPercent: 100 - effective.percents.carrierPercent,
       platformPercentFixed: 100 - effective.percents.carrierPercent,
+      cloxPool: {
+        cloxSuperPercent: effective.percents.cloxSuperPercent,
+        cloxStatePercent: effective.percents.cloxStatePercent,
+        cloxLocalPercent: effective.percents.cloxLocalPercent,
+      },
       effective: {
         policyVersionId: effective.policyVersionId,
         percents: effective.percents,
+        cloxPool: {
+          cloxSuperPercent: effective.percents.cloxSuperPercent,
+          cloxStatePercent: effective.percents.cloxStatePercent,
+          cloxLocalPercent: effective.percents.cloxLocalPercent,
+        },
         payload: latestPublished?.payload ?? null,
         publishedAt: latestPublished?.publishedAt ?? null,
         version: latestPublished?.version ?? null,
@@ -369,28 +499,27 @@ export class RevenueSplitService {
   async saveDraft(
     input: {
       carrierPercent?: number;
-      superPercent: number;
-      statePercent: number;
-      localPercent: number;
+      superPercent?: number;
+      statePercent?: number;
+      localPercent?: number;
+      cloxSuperPercent?: number;
+      cloxStatePercent?: number;
+      cloxLocalPercent?: number;
       notes?: string;
     },
     actorAdminId: string,
   ) {
     this.ensureDatabase();
-    let validatedPercents: RevenueSplitPercents;
+    let validatedPercents: RevenueSplitPercents & CloxPoolPercents;
     try {
       validatedPercents = assertNationalPayload(input);
     } catch (error: unknown) {
       throw new BadRequestException(error instanceof Error ? error.message : String(error));
     }
 
-    const payload: RevenueSplitPolicyPayload = {
-      carrierPercent: validatedPercents.carrierPercent,
-      superPercent: validatedPercents.superPercent,
-      statePercent: validatedPercents.statePercent,
-      localPercent: validatedPercents.localPercent,
+    const payload: RevenueSplitPolicyPayload = toPolicyPayload(validatedPercents, {
       notes: input.notes,
-    };
+    });
 
     const existingDraft = await this.prisma.policyVersion.findFirst({
       where: { key: REVENUE_SPLIT_POLICY_KEY, publishedAt: null },
@@ -435,6 +564,9 @@ export class RevenueSplitService {
       superPercent?: number;
       statePercent?: number;
       localPercent?: number;
+      cloxSuperPercent?: number;
+      cloxStatePercent?: number;
+      cloxLocalPercent?: number;
       notes?: string;
       effectiveFrom?: string;
     },
@@ -448,12 +580,14 @@ export class RevenueSplitService {
 
     let draftId = input.draftId;
     if (!draftId) {
-      if (
-        input.superPercent == null ||
-        input.statePercent == null ||
-        input.localPercent == null
-      ) {
-        throw new BadRequestException('Provide draftId or super/state/local percents');
+      const hasPool =
+        input.cloxSuperPercent != null &&
+        input.cloxStatePercent != null &&
+        input.cloxLocalPercent != null;
+      const hasGross =
+        input.superPercent != null && input.statePercent != null && input.localPercent != null;
+      if (!hasPool && !hasGross) {
+        throw new BadRequestException('Provide draftId or CLOX pool / gross admin percents');
       }
       const saved = await this.saveDraft(
         {
@@ -461,6 +595,9 @@ export class RevenueSplitService {
           superPercent: input.superPercent,
           statePercent: input.statePercent,
           localPercent: input.localPercent,
+          cloxSuperPercent: input.cloxSuperPercent,
+          cloxStatePercent: input.cloxStatePercent,
+          cloxLocalPercent: input.cloxLocalPercent,
           notes: input.notes,
         },
         actorAdminId,
@@ -477,22 +614,24 @@ export class RevenueSplitService {
     }
 
     const base = draft.payload as RevenueSplitPolicyPayload;
-    let percents: RevenueSplitPercents;
+    let percents: RevenueSplitPercents & CloxPoolPercents;
     try {
       percents = assertNationalPayload({
         carrierPercent: input.carrierPercent ?? base.carrierPercent,
         superPercent: input.superPercent ?? base.superPercent,
         statePercent: input.statePercent ?? base.statePercent,
         localPercent: input.localPercent ?? base.localPercent,
+        cloxSuperPercent: input.cloxSuperPercent ?? base.cloxSuperPercent,
+        cloxStatePercent: input.cloxStatePercent ?? base.cloxStatePercent,
+        cloxLocalPercent: input.cloxLocalPercent ?? base.cloxLocalPercent,
       });
     } catch (error: unknown) {
       throw new BadRequestException(error instanceof Error ? error.message : String(error));
     }
-    const payload: RevenueSplitPolicyPayload = {
-      ...percents,
+    const payload: RevenueSplitPolicyPayload = toPolicyPayload(percents, {
       effectiveFrom: effectiveFrom.toISOString(),
       notes: input.notes ?? base.notes,
-    };
+    });
 
     const published = await this.prisma.policyVersion.update({
       where: { id: draft.id },
@@ -632,14 +771,22 @@ export class RevenueSplitService {
     actorAdminId: string,
   ) {
     this.ensureDatabase();
-    const now = new Date();
-    const national = await this.getEffectiveNational(now);
-    this.requireAdminPool({
-      superPercent: input.superPercent,
-      statePercent: input.statePercent,
-      localPercent: input.localPercent,
-      carrierPercent: national.percents.carrierPercent,
-    });
+    // Accept pool-relative (sum 100) or legacy absolute gross; always store pool-relative.
+    let pool: CloxPoolPercents;
+    try {
+      this.requireAdminPool({
+        superPercent: input.superPercent,
+        statePercent: input.statePercent,
+        localPercent: input.localPercent,
+      });
+      pool = normalizeAdminPoolShares({
+        superPercent: input.superPercent,
+        statePercent: input.statePercent,
+        localPercent: input.localPercent,
+      });
+    } catch (error: unknown) {
+      throw new BadRequestException(error instanceof Error ? error.message : String(error));
+    }
 
     const admin = await this.prisma.adminUser.findUnique({
       where: { id: input.adminUserId },
@@ -658,9 +805,9 @@ export class RevenueSplitService {
     const row = await this.prisma.adminRevenueSplitPackage.create({
       data: {
         adminUserId: input.adminUserId,
-        superPercent: input.superPercent,
-        statePercent: input.statePercent,
-        localPercent: input.localPercent,
+        superPercent: pool.cloxSuperPercent,
+        statePercent: pool.cloxStatePercent,
+        localPercent: pool.cloxLocalPercent,
         effectiveFrom,
         publishedAt: new Date(),
         publishedBy: actorAdminId,
@@ -676,9 +823,9 @@ export class RevenueSplitService {
       metadata: {
         adminUserId: row.adminUserId,
         email: admin.email,
-        superPercent: row.superPercent,
-        statePercent: row.statePercent,
-        localPercent: row.localPercent,
+        cloxSuperPercent: row.superPercent,
+        cloxStatePercent: row.statePercent,
+        cloxLocalPercent: row.localPercent,
         effectiveFrom: row.effectiveFrom.toISOString(),
       },
     });
@@ -686,22 +833,195 @@ export class RevenueSplitService {
     return row;
   }
 
+  async publishCarrierUplift(
+    input: {
+      companyId: string;
+      bonusPercent: number;
+      effectiveFrom?: string;
+      notes?: string;
+    },
+    actorAdminId: string,
+  ) {
+    this.ensureDatabase();
+    const company = await this.prisma.company.findUnique({
+      where: { id: input.companyId },
+      select: { id: true, type: true, legalName: true },
+    });
+    if (!company) throw new NotFoundException('Company not found');
+    if (company.type !== CompanyType.CARRIER) {
+      throw new BadRequestException('Revenue uplift is only for carrier companies');
+    }
+
+    const national = await this.getEffectiveNational(new Date());
+    const settings = await this.getFeeSettings();
+    const maxBonus = maxCarrierBonusPercent({
+      nationalCarrierPercent: national.percents.carrierPercent,
+      minPlatformPercent: settings.minPlatformPercent,
+    });
+    if (
+      !Number.isInteger(input.bonusPercent) ||
+      input.bonusPercent < 0 ||
+      input.bonusPercent > maxBonus
+    ) {
+      throw new BadRequestException(
+        `bonusPercent must be an integer 0–${maxBonus} (national carrier ${national.percents.carrierPercent}% · min CLOX ${settings.minPlatformPercent}%)`,
+      );
+    }
+    const effectiveFrom = input.effectiveFrom ? new Date(input.effectiveFrom) : new Date();
+    if (Number.isNaN(effectiveFrom.getTime())) {
+      throw new BadRequestException('Invalid effectiveFrom');
+    }
+
+    const row = await this.prisma.companyRevenueUplift.create({
+      data: {
+        companyId: company.id,
+        bonusPercent: input.bonusPercent,
+        effectiveFrom,
+        publishedAt: new Date(),
+        publishedBy: actorAdminId,
+        notes: input.notes,
+      },
+    });
+
+    await this.audit.recordPlatform({
+      action: AuditAction.COMPANY_REVENUE_UPLIFT_PUBLISHED,
+      actorAdminId,
+      entityType: 'CompanyRevenueUplift',
+      entityId: row.id,
+      metadata: {
+        companyId: company.id,
+        legalName: company.legalName,
+        bonusPercent: row.bonusPercent,
+        effectiveFrom: row.effectiveFrom.toISOString(),
+      },
+    });
+
+    return row;
+  }
+
+  async publishSenderFeeOverride(
+    input: {
+      companyId: string;
+      feePercent?: number;
+      inheritNational?: boolean;
+      effectiveFrom?: string;
+      notes?: string;
+    },
+    actorAdminId: string,
+  ) {
+    this.ensureDatabase();
+    const company = await this.prisma.company.findUnique({
+      where: { id: input.companyId },
+      select: { id: true, type: true, legalName: true },
+    });
+    if (!company) throw new NotFoundException('Company not found');
+    if (company.type !== CompanyType.SENDER) {
+      throw new BadRequestException('Sender fee override is only for sender companies');
+    }
+
+    const inheritNational = Boolean(input.inheritNational);
+    const settings = await this.getFeeSettings();
+    let feePercent = settings.senderPlatformFeePercent;
+    if (!inheritNational) {
+      if (
+        input.feePercent == null ||
+        !Number.isInteger(input.feePercent) ||
+        input.feePercent < 0 ||
+        input.feePercent > 30
+      ) {
+        throw new BadRequestException('feePercent must be an integer 0–30');
+      }
+      feePercent = input.feePercent;
+    }
+
+    const effectiveFrom = input.effectiveFrom ? new Date(input.effectiveFrom) : new Date();
+    if (Number.isNaN(effectiveFrom.getTime())) {
+      throw new BadRequestException('Invalid effectiveFrom');
+    }
+
+    const row = await this.prisma.companySenderFeeOverride.create({
+      data: {
+        companyId: company.id,
+        feePercent,
+        inheritNational,
+        effectiveFrom,
+        publishedAt: new Date(),
+        publishedBy: actorAdminId,
+        notes: input.notes,
+      },
+    });
+
+    await this.audit.recordPlatform({
+      action: AuditAction.COMPANY_SENDER_FEE_OVERRIDE_PUBLISHED,
+      actorAdminId,
+      entityType: 'CompanySenderFeeOverride',
+      entityId: row.id,
+      metadata: {
+        companyId: company.id,
+        legalName: company.legalName,
+        feePercent: row.feePercent,
+        inheritNational: row.inheritNational,
+        effectiveFrom: row.effectiveFrom.toISOString(),
+      },
+    });
+
+    return row;
+  }
+
+  async listCarrierUplifts(companyId: string) {
+    this.ensureDatabase();
+    const items = await this.prisma.companyRevenueUplift.findMany({
+      where: { companyId, publishedAt: { not: null } },
+      orderBy: [{ effectiveFrom: 'desc' }, { publishedAt: 'desc' }],
+      take: 50,
+      include: { publisher: { select: { id: true, email: true, name: true } } },
+    });
+    return { items };
+  }
+
+  async listSenderFeeOverrides(companyId: string) {
+    this.ensureDatabase();
+    const items = await this.prisma.companySenderFeeOverride.findMany({
+      where: { companyId, publishedAt: { not: null } },
+      orderBy: [{ effectiveFrom: 'desc' }, { publishedAt: 'desc' }],
+      take: 50,
+      include: { publisher: { select: { id: true, email: true, name: true } } },
+    });
+    return { items };
+  }
+
   async preview(params: {
     grossIncGstCents: number;
     regionId?: string;
     territoryId?: string;
     senderCompanyId?: string;
+    carrierCompanyId?: string;
+    applySenderFee?: boolean;
   }) {
     this.ensureDatabase();
     if (!Number.isInteger(params.grossIncGstCents) || params.grossIncGstCents < 0) {
       throw new BadRequestException('grossIncGstCents must be a non-negative integer');
     }
-    return this.resolveForJob({
-      grossIncGstCents: params.grossIncGstCents,
+
+    let settlementGross = params.grossIncGstCents;
+    let senderFee: (SenderFeeApplyResult & { senderFeeOverrideId: string | null }) | null = null;
+    if (params.applySenderFee) {
+      senderFee = await this.resolveSenderFee({
+        baseIncGstCents: params.grossIncGstCents,
+        senderCompanyId: params.senderCompanyId ?? null,
+      });
+      settlementGross = senderFee.chargeIncGstCents;
+    }
+
+    const split = await this.resolveForJob({
+      grossIncGstCents: settlementGross,
       originRegionId: params.regionId ?? null,
       originTerritoryId: params.territoryId ?? null,
       senderCompanyId: params.senderCompanyId ?? null,
+      carrierCompanyId: params.carrierCompanyId ?? null,
     });
+
+    return { ...split, senderFee, settlementGrossIncGstCents: settlementGross };
   }
 
   async listScopes() {

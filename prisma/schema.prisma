@@ -92,6 +92,8 @@ model AdminUser {
   referredCompanies Company[]       @relation("CompanyReferredBy")
   companyInvites    CompanyInvite[] @relation("CompanyInviteInviter")
   prospects         Prospect[]      @relation("ProspectOwner")
+  publishedCompanyRevenueUplifts CompanyRevenueUplift[] @relation("CompanyRevenueUpliftPublisher")
+  publishedCompanySenderFeeOverrides CompanySenderFeeOverride[] @relation("CompanySenderFeeOverridePublisher")
   notifications     Notification[]
   triagedDisputes   Dispute[]       @relation("DisputeTriagedBy")
   assignedDisputes  Dispute[]       @relation("DisputeAssignedTo")
@@ -474,6 +476,8 @@ model Company {
   vehicleFuelLogs     VehicleFuelLog[]
   vehicleCostEntries  VehicleCostEntry[]
   vehicleMaintenanceWorkOrders VehicleMaintenanceWorkOrder[]
+  revenueUplifts      CompanyRevenueUplift[]
+  senderFeeOverrides  CompanySenderFeeOverride[]
 
   @@index([type, status])
   @@index([abn])
@@ -1257,8 +1261,20 @@ model PlatformSettings {
   /// Hour of day (0-23, AEST) when scheduled automated settlement disbursement runs (default 4 = 4:00 AM)
   settlementCutoffHour                Int      @default(4)
 
+  /// Sender platform usage fee % of base (0–30). Applied before Carrier|CLOX split.
+  senderPlatformFeePercent            Int      @default(0)
+  /// EXCLUSIVE = base + fee%; INCLUSIVE = listed amount all-in (fee disclosure only).
+  senderPlatformFeeMode               SenderPlatformFeeMode @default(EXCLUSIVE)
+  /// Floor for CLOX pool % when applying carrier uplifts (default 10 → max carrier 90 if national allows).
+  minPlatformPercent                  Int      @default(10)
+
   updatedAt                           DateTime @updatedAt
   createdAt                           DateTime @default(now())
+}
+
+enum SenderPlatformFeeMode {
+  EXCLUSIVE
+  INCLUSIVE
 }
 
 model TripException {
@@ -1592,11 +1608,13 @@ model RevenueSplitOverride {
   @@index([effectiveFrom])
 }
 
-/// Per-AdminUser Super/State/Local package (sums to 30). Carrier stays 70%.
+/// Per-AdminUser Super/State/Local package as **% of CLOX pool** (sum 100). Carrier % is national ± uplift only.
+/// Legacy rows may still store absolute % of gross (sum ≈ platform pool); readers normalize both shapes.
 model AdminRevenueSplitPackage {
   id            String    @id @default(uuid())
   adminUserId   String
   adminUser     AdminUser @relation("AdminRevenueSplitPackageSubject", fields: [adminUserId], references: [id], onDelete: Cascade)
+  /// % of CLOX pool (preferred) or legacy % of gross — see RevenueSplitService.normalizeAdminPoolShares
   superPercent  Int
   statePercent  Int
   localPercent  Int
@@ -1611,6 +1629,45 @@ model AdminRevenueSplitPackage {
   settlementLines SettlementLine[]
 
   @@index([adminUserId, publishedAt])
+  @@index([effectiveFrom])
+}
+
+/// Per-carrier performance uplift: bonus percentage points on national carrier %.
+model CompanyRevenueUplift {
+  id            String    @id @default(uuid())
+  companyId     String
+  company       Company   @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  /// Percentage points added to national carrierPercent (e.g. 10 → 70+10=80), capped by minPlatformPercent.
+  bonusPercent  Int
+  effectiveFrom DateTime
+  publishedAt   DateTime?
+  publishedBy   String?
+  publisher     AdminUser? @relation("CompanyRevenueUpliftPublisher", fields: [publishedBy], references: [id], onDelete: SetNull)
+  notes         String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  @@index([companyId, publishedAt])
+  @@index([effectiveFrom])
+}
+
+/// Per-sender override of national senderPlatformFeePercent.
+model CompanySenderFeeOverride {
+  id            String    @id @default(uuid())
+  companyId     String
+  company       Company   @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  feePercent    Int
+  /// When true, clear custom fee and inherit platform default again.
+  inheritNational Boolean @default(false)
+  effectiveFrom DateTime
+  publishedAt   DateTime?
+  publishedBy   String?
+  publisher     AdminUser? @relation("CompanySenderFeeOverridePublisher", fields: [publishedBy], references: [id], onDelete: SetNull)
+  notes         String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  @@index([companyId, publishedAt])
   @@index([effectiveFrom])
 }
 
