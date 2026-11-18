@@ -693,6 +693,9 @@ model Driver {
   disabledNote   String?
   /// Reliability 0–100 (unavailability impacts)
   reliabilityScore Int @default(100)
+  baseTimezone     String?      @default("Australia/Sydney")
+  fatigueScheme    FatigueScheme @default(STANDARD)
+  bfmAccreditationNumber String?
   createdAt DateTime     @default(now())
   updatedAt DateTime     @updatedAt
 
@@ -701,6 +704,10 @@ model Driver {
   complianceDocuments ComplianceDocument[]
   proposedOnExceptions TripException[] @relation("ExceptionProposedDriver")
   scheduleEntries      DriverScheduleEntry[]
+  ewdRecords           EwdWorkRestRecord[]
+  ewdDailySheets       EwdDailySheet[]
+  ewdBreaches          EwdBreachRecord[]
+  ewdRoadsideSessions  EwdRoadsideSession[]
 
   @@index([companyId, status])
   @@index([inviteTokenHash])
@@ -1589,3 +1596,110 @@ model StripeWebhookEvent {
   processedAt   DateTime @default(now())
   payload       Json?
 }
+
+// =============================================================================
+// NHVR Electronic Work Diary (EWD) & Fatigue Management (s319 HVNL v1.0)
+// =============================================================================
+
+enum FatigueScheme {
+  STANDARD
+  BFM
+  AFM
+}
+
+enum EwdActivityType {
+  REST
+  WORK
+}
+
+enum EwdBreachSeverity {
+  MINOR
+  SUBSTANTIAL
+  SEVERE
+  CRITICAL
+}
+
+enum DailySheetStatus {
+  IN_PROGRESS
+  SUBMITTED
+  VERIFIED
+}
+
+model EwdWorkRestRecord {
+  id               String          @id @default(uuid())
+  driverId         String
+  driver           Driver          @relation(fields: [driverId], references: [id], onDelete: Cascade)
+  activity         EwdActivityType
+  workType         String?         @default("DRIVING")
+  startTime        DateTime
+  endTime          DateTime?
+  durationMinutes  Int?
+  odometerStart    Int?
+  odometerEnd      Int?
+  locationStart    String?
+  locationEnd      String?
+  latStart         Float?
+  lngStart         Float?
+  latEnd           Float?
+  lngEnd           Float?
+  vehicleRego      String?
+  isEdited         Boolean         @default(false)
+  editReason       String?
+  originalRecordId String?
+  createdAt        DateTime        @default(now())
+  updatedAt        DateTime        @updatedAt
+
+  @@index([driverId, startTime])
+}
+
+model EwdDailySheet {
+  id               String           @id @default(uuid())
+  driverId         String
+  driver           Driver           @relation(fields: [driverId], references: [id], onDelete: Cascade)
+  date             DateTime         @db.Date
+  timezone         String           @default("Australia/Sydney")
+  totalWorkMinutes Int              @default(0)
+  totalRestMinutes Int              @default(0)
+  status           DailySheetStatus @default(IN_PROGRESS)
+  driverSignature  String?
+  signedAt         DateTime?
+  declarationText  String?
+  createdAt        DateTime         @default(now())
+  updatedAt        DateTime         @updatedAt
+
+  @@unique([driverId, date])
+  @@index([driverId, date])
+}
+
+model EwdBreachRecord {
+  id               String            @id @default(uuid())
+  driverId         String
+  driver           Driver            @relation(fields: [driverId], references: [id], onDelete: Cascade)
+  ruleName         String
+  severity         EwdBreachSeverity
+  detectedAt       DateTime          @default(now())
+  description      String
+  actualMinutes    Int
+  allowableMinutes Int
+  resolved         Boolean           @default(false)
+  acknowledgedAt   DateTime?
+  createdAt        DateTime          @default(now())
+
+  @@index([driverId, detectedAt])
+}
+
+model EwdRoadsideSession {
+  id             String    @id @default(uuid())
+  driverId       String
+  driver         Driver    @relation(fields: [driverId], references: [id], onDelete: Cascade)
+  accessPin      String
+  expiresAt      DateTime
+  isActive       Boolean   @default(true)
+  accessedCount  Int       @default(0)
+  lastAccessedAt DateTime?
+  createdAt      DateTime  @default(now())
+
+  @@index([accessPin, isActive])
+  @@index([driverId, expiresAt])
+}
+

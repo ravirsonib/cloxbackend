@@ -28,6 +28,7 @@ import { ExceptionsModule } from './modules/exceptions/exceptions.module';
 import { SettlementsModule } from './modules/settlements/settlements.module';
 import { TripsModule } from './modules/trips/trips.module';
 import { TranslationsModule } from './modules/translations/translations.module';
+import { NhvrModule } from './modules/nhvr/nhvr.module';
 import { PrismaModule } from './prisma/prisma.module';
 import { AttributionModule } from './common/services/attribution.module';
 
@@ -80,6 +81,7 @@ import { AttributionModule } from './common/services/attribution.module';
     GrowthModule,
     AuditModule,
     DisputesModule,
+    NhvrModule,
   ],
 })
 export class AppModule implements NestModule {
