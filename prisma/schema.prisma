@@ -92,6 +92,12 @@ model AdminUser {
   referredCompanies Company[]       @relation("CompanyReferredBy")
   companyInvites    CompanyInvite[] @relation("CompanyInviteInviter")
   prospects         Prospect[]      @relation("ProspectOwner")
+  rateFloorVersionsCreated   RateFloorVersion[] @relation("RateFloorVersionCreatedBy")
+  rateFloorVersionsPublished RateFloorVersion[] @relation("RateFloorVersionPublishedBy")
+  rateFloorVersionsApproved  RateFloorVersion[] @relation("RateFloorVersionApprovedBy")
+  rateFloorOverridesApproved RateFloorOverride[] @relation("RateFloorOverrideApprovedBy")
+  fuelIndexesEntered         FuelIndex[]        @relation("FuelIndexEnteredBy")
+  fuelIndexesConfirmed       FuelIndex[]        @relation("FuelIndexConfirmedBy")
   publishedCompanyRevenueUplifts CompanyRevenueUplift[] @relation("CompanyRevenueUpliftPublisher")
   publishedCompanySenderFeeOverrides CompanySenderFeeOverride[] @relation("CompanySenderFeeOverridePublisher")
   notifications     Notification[]
@@ -800,6 +806,141 @@ model VehicleClassConfig {
   @@index([isActive])
 }
 
+enum RateFloorVersionStatus {
+  DRAFT
+  PUBLISHED
+  RETIRED
+}
+
+enum RateFloorCheckResult {
+  PASS
+  REJECT
+  OVERRIDE
+}
+
+/// Versioned hard cost-recovery floor table (Wave 1 rate-floor engine).
+model RateFloorVersion {
+  id                   String                 @id @default(uuid())
+  label                String
+  status               RateFloorVersionStatus @default(DRAFT)
+  effectiveFrom        DateTime?
+  /// Reference diesel cents per litre (e.g. 211.4 → store 2114 as tenths? Use Float for cpl)
+  referenceDieselCpl   Float                  @default(211.4)
+  /// Award labour component cents per hour (e.g. 3440 = $34.40) — Wave 2 labour multipliers
+  labourRateHrCents    Int                    @default(3440)
+  minHours             Float                  @default(4.0)
+  minKmChargeKm        Float                  @default(25.0)
+  /// Wave 2 backhaul factor (unused in W1 calc)
+  backhaulFactor       Float                  @default(0.85)
+  createdByAdminId     String?
+  createdByAdmin       AdminUser?             @relation("RateFloorVersionCreatedBy", fields: [createdByAdminId], references: [id], onDelete: SetNull)
+  /// Wave 2.6 — set when creator submits DRAFT for dual-approve publish.
+  approvalSubmittedAt  DateTime?
+  approvedByAdminId    String?
+  approvedByAdmin      AdminUser?             @relation("RateFloorVersionApprovedBy", fields: [approvedByAdminId], references: [id], onDelete: SetNull)
+  publishedByAdminId   String?
+  publishedByAdmin     AdminUser?             @relation("RateFloorVersionPublishedBy", fields: [publishedByAdminId], references: [id], onDelete: SetNull)
+  createdAt            DateTime               @default(now())
+  updatedAt            DateTime               @updatedAt
+
+  lines              RateFloorLine[]
+  labourMultipliers  RateFloorLabourMultiplier[]
+  bodyLoadings       RateFloorBodyLoading[]
+  jobs               Job[]
+  checks             RateFloorCheck[]
+
+  @@index([status])
+}
+
+/// Time-limited per-job floor override (Wave 2.6). Active while expiresAt > now.
+model RateFloorOverride {
+  id                       String    @id @default(uuid())
+  jobId                    String
+  job                      Job       @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  approvedByAdminId        String
+  approvedByAdmin          AdminUser @relation("RateFloorOverrideApprovedBy", fields: [approvedByAdminId], references: [id], onDelete: Restrict)
+  reason                   String
+  expiresAt                DateTime
+  /// Absolute sender-facing floor ex GST (cents). Required.
+  floorExGstCentsOverride  Int
+  createdAt                DateTime  @default(now())
+
+  @@index([jobId, expiresAt])
+  @@index([expiresAt])
+}
+
+/// PDF §4.4 specialised body loadings (per floor version).
+model RateFloorBodyLoading {
+  id         String           @id @default(uuid())
+  versionId  String
+  version    RateFloorVersion @relation(fields: [versionId], references: [id], onDelete: Cascade)
+  bodyCode   String
+  loadingPct Float            @default(0)
+  /// Optional min engagement hours (crane = 4).
+  minHours   Float?
+  createdAt  DateTime         @default(now())
+  updatedAt  DateTime         @updatedAt
+
+  @@unique([versionId, bodyCode])
+  @@index([bodyCode])
+}
+
+/// Per-check audit trail for hard-floor calculate / bid enforce (Wave 2.5).
+model RateFloorCheck {
+  id                 String               @id @default(uuid())
+  jobId              String?
+  job                Job?                 @relation(fields: [jobId], references: [id], onDelete: SetNull)
+  actorUserId        String?
+  actorAdminId       String?
+  versionId          String
+  version            RateFloorVersion     @relation(fields: [versionId], references: [id], onDelete: Restrict)
+  fuelIndexId        String?
+  inputs             Json
+  breakdown          Json
+  floorExGstCents    Int
+  floorIncGstCents   Int
+  offeredIncGstCents Int?
+  result             RateFloorCheckResult
+  createdAt          DateTime             @default(now())
+
+  @@index([jobId])
+  @@index([versionId])
+  @@index([result])
+  @@index([createdAt])
+}
+
+/// PDF §5.1 labour-only period multipliers (per floor version).
+model RateFloorLabourMultiplier {
+  id         String           @id @default(uuid())
+  versionId  String
+  version    RateFloorVersion @relation(fields: [versionId], references: [id], onDelete: Cascade)
+  periodCode String
+  multiplier Float
+  createdAt  DateTime         @default(now())
+  updatedAt  DateTime         @updatedAt
+
+  @@unique([versionId, periodCode])
+  @@index([periodCode])
+}
+
+model RateFloorLine {
+  id               String           @id @default(uuid())
+  versionId        String
+  version          RateFloorVersion @relation(fields: [versionId], references: [id], onDelete: Cascade)
+  vehicleClassCode String
+  hourlyFloorCents Int
+  kmFloorCents     Int
+  /// Variable cost per km (fuel+tyres+maint) — Wave 2 backhaul floor
+  variableKmCents  Int              @default(0)
+  litresPerKm      Float            @default(0)
+  basis            String           @default("D")
+  createdAt        DateTime         @default(now())
+  updatedAt        DateTime         @updatedAt
+
+  @@unique([versionId, vehicleClassCode])
+  @@index([vehicleClassCode])
+}
+
 model Driver {
   id        String       @id @default(uuid())
   userId    String       @unique
@@ -1037,6 +1178,14 @@ model Job {
   recommendedVehicleClass String?
   /// Vehicle class whose rates produced estimate* (recommended or sender preferred if larger)
   pricingVehicleClass  String?
+  /// Snapshot of hard rate floor used when estimate was computed (Wave 1)
+  rateFloorVersionId   String?
+  rateFloorVersion     RateFloorVersion? @relation(fields: [rateFloorVersionId], references: [id], onDelete: SetNull)
+  rateFloorExGstCents  Int?
+  rateFloorIncGstCents Int?
+  rateFloorBreakdown   Json?
+  /// Wave 2.4 — return-leg / backhaul (allows 85% per-km floor, never below variable+fuel).
+  isBackhaul           Boolean         @default(false)
   siteManeuverability  String?
   siteFacility         String?
   siteDisclaimerAcceptedAt DateTime?
@@ -1068,6 +1217,8 @@ model Job {
   surcharges    Surcharge[]
   tripExceptions TripException[]
   disputes      Dispute[]        @relation("JobDisputes")
+  rateFloorChecks    RateFloorCheck[]
+  rateFloorOverrides RateFloorOverride[]
 
   @@index([senderCompanyId, status])
   @@index([originRegionId])
@@ -1270,8 +1421,47 @@ model PlatformSettings {
   /// Floor for CLOX pool % when applying carrier uplifts (default 10 → max carrier 90 if national allows).
   minPlatformPercent                  Int      @default(10)
 
+  /// Wave 2 fuel index: treat latest diesel entry stale after this many days (default 10).
+  fuelStaleDays                       Int      @default(10)
+  /// Week-over-week diesel move % that requires an explicit confirm on entry (default 8).
+  fuelMoveConfirmPercent              Float    @default(8)
+  /// Cap applied week-over-week diesel move % for floor calc (default 15); excess is ignored + flagged.
+  fuelWeeklyChangeCapPercent          Float    @default(15)
+
   updatedAt                           DateTime @updatedAt
   createdAt                           DateTime @default(now())
+}
+
+/// State public holidays for labour period resolution (Wave 2.7).
+/// Multiplier uses PUBLIC_HOLIDAY (= Sunday stub) until Award confirms a distinct rate.
+model PublicHoliday {
+  id          String   @id @default(uuid())
+  /// AU state code (VIC|NSW|…) or NATIONAL for all-states.
+  state       String
+  holidayDate DateTime @db.Date
+  name        String
+  createdAt   DateTime @default(now())
+
+  @@unique([state, holidayDate])
+  @@index([holidayDate])
+  @@index([state])
+}
+
+/// Weekly national average retail diesel (cents per litre) for rate-floor per-km fuel index.
+model FuelIndex {
+  id                 String    @id @default(uuid())
+  /// Monday of the week (date-only, UTC midnight).
+  weekStart          DateTime  @unique @db.Date
+  /// National average retail diesel, cents per litre (e.g. 211.4).
+  dieselCpl          Float
+  enteredByAdminId   String?
+  enteredByAdmin     AdminUser? @relation("FuelIndexEnteredBy", fields: [enteredByAdminId], references: [id], onDelete: SetNull)
+  confirmedByAdminId String?
+  confirmedByAdmin   AdminUser? @relation("FuelIndexConfirmedBy", fields: [confirmedByAdminId], references: [id], onDelete: SetNull)
+  note               String?
+  createdAt          DateTime  @default(now())
+
+  @@index([weekStart])
 }
 
 enum SenderPlatformFeeMode {

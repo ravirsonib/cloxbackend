@@ -27,6 +27,7 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { CarrierService } from '../carrier/carrier.service';
 import { JobsService } from '../jobs/jobs.service';
+import { RateFloorService } from '../rate-floor/rate-floor.service';
 import { InAppNotificationsService } from '../notifications/in-app-notifications.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import {
@@ -34,6 +35,7 @@ import {
   evaluateDriverLicenceFields,
 } from '../jobs/assignment-gates';
 import {
+  assertCrewNotBusyElsewhere,
   assertDriverAvailabilityForWindow,
   calculateJobExecutionWindow,
   checkDriverAvailabilityForWindow,
@@ -61,6 +63,7 @@ export class MatchingService {
     @Optional() private readonly notifications?: NotificationsService,
     @Optional() private readonly inbox?: InAppNotificationsService,
     @Optional() private readonly revenueSplit?: import('../settlements/revenue-split.service').RevenueSplitService,
+    @Optional() private readonly rateFloor?: RateFloorService,
   ) {}
 
   private ensureDatabase() {
@@ -323,86 +326,11 @@ export class MatchingService {
       windowEnd: executionWindow.windowEnd,
       excludeJobId: job.id,
     });
-
-    const vehicleBusyAssignment = await this.prisma.assignment.findFirst({
-      where: {
-        vehicleId: vehicle.id,
-        OR: [
-          { status: AssignmentStatus.PENDING },
-          {
-            status: AssignmentStatus.LOCKED,
-            trip: {
-              status: { notIn: [TripStatus.COMPLETED, TripStatus.CANCELLED] },
-            },
-          },
-        ],
-      },
-      select: { id: true, jobId: true, status: true },
+    await assertCrewNotBusyElsewhere(this.prisma, {
+      vehicleId: vehicle.id,
+      driverId: driver.id,
+      excludeJobId: job.id,
     });
-    if (vehicleBusyAssignment) {
-      throw new ConflictException({
-        message: 'Vehicle is already assigned or pending payment on another job',
-        code: 'VEHICLE_BUSY',
-        jobId: vehicleBusyAssignment.jobId,
-      });
-    }
-    const driverBusyAssignment = await this.prisma.assignment.findFirst({
-      where: {
-        driverId: driver.id,
-        OR: [
-          { status: AssignmentStatus.PENDING },
-          {
-            status: AssignmentStatus.LOCKED,
-            trip: {
-              status: { notIn: [TripStatus.COMPLETED, TripStatus.CANCELLED] },
-            },
-          },
-        ],
-      },
-      select: { id: true, jobId: true, status: true },
-    });
-    if (driverBusyAssignment) {
-      throw new ConflictException({
-        message: 'Driver is already assigned or pending payment on another job',
-        code: 'DRIVER_BUSY',
-        jobId: driverBusyAssignment.jobId,
-      });
-    }
-
-    const vehicleOpenBid = await this.prisma.proposal.findFirst({
-      where: {
-        vehicleId: vehicle.id,
-        status: ProposalStatus.SUBMITTED,
-        jobId: { not: job.id },
-        job: { status: { in: [JobStatus.PUBLISHED, JobStatus.BIDDING] } },
-      },
-      select: { id: true, jobId: true },
-    });
-    if (vehicleOpenBid) {
-      throw new ConflictException({
-        message: 'Vehicle already has an open bid on another job — accept/withdraw that bid first',
-        code: 'VEHICLE_BID_COMMITTED',
-        jobId: vehicleOpenBid.jobId,
-        proposalId: vehicleOpenBid.id,
-      });
-    }
-    const driverOpenBid = await this.prisma.proposal.findFirst({
-      where: {
-        driverId: driver.id,
-        status: ProposalStatus.SUBMITTED,
-        jobId: { not: job.id },
-        job: { status: { in: [JobStatus.PUBLISHED, JobStatus.BIDDING] } },
-      },
-      select: { id: true, jobId: true },
-    });
-    if (driverOpenBid) {
-      throw new ConflictException({
-        message: 'Driver already has an open bid on another job — accept/withdraw that bid first',
-        code: 'DRIVER_BID_COMMITTED',
-        jobId: driverOpenBid.jobId,
-        proposalId: driverOpenBid.id,
-      });
-    }
 
     const pricingModel = job.pricingModel === 'HOURLY' ? 'HOURLY' : 'PER_KM';
     const globalFloor = await this.jobsService.getMinBaseCents(pricingModel);
@@ -418,12 +346,80 @@ export class MatchingService {
       // Rescue listing: carrier may bid down to discounted sender estimate.
       minBase = Math.round((job.estimateIncGstCents * (100 - discount)) / 100);
     }
+
+    let hardFloorInc: number | null =
+      job.rateFloorIncGstCents != null && job.rateFloorIncGstCents > 0
+        ? job.rateFloorIncGstCents
+        : null;
+    let hardFloorEx: number | null = job.rateFloorExGstCents ?? null;
+    let hardFloorVersionId: string | null = job.rateFloorVersionId ?? null;
+    let hardFloorBreakdown: Record<string, unknown> | null =
+      (job.rateFloorBreakdown as Record<string, unknown> | null) ?? null;
+    if (this.rateFloor) {
+      try {
+        const pickupStop =
+          job.stops?.find((s) => s.stopType === 'PICKUP') ?? job.stops?.[0] ?? null;
+        const floor = await this.rateFloor.calculate({
+          vehicleClassCode: vehicleClass,
+          pricingModel,
+          distanceKm: job.routeDistanceKm ?? 0,
+          billableHours: job.billableHours,
+          at: job.pickupAt,
+          pickupState: pickupStop?.state ?? null,
+          requiresReefer: job.requiresReefer,
+          requiresDg: job.requiresDg,
+          backhaul: job.isBackhaul,
+          jobId: job.id,
+        });
+        hardFloorInc = floor.floorIncGstCents;
+        hardFloorEx = floor.floorExGstCents;
+        hardFloorVersionId = floor.versionId;
+        hardFloorBreakdown = floor.breakdown;
+      } catch {
+        // Fail closed only when we have no job snapshot either — keep legacy minBase.
+      }
+    }
+    if (hardFloorInc != null) {
+      minBase = Math.max(minBase, hardFloorInc);
+    }
+
     if (input.amountIncGstCents < minBase) {
       const minAud = (minBase / 100).toFixed(2);
+      const belowHardFloor =
+        hardFloorInc != null && input.amountIncGstCents < hardFloorInc;
+      if (belowHardFloor && this.rateFloor && hardFloorVersionId && hardFloorEx != null) {
+        const fuelIndexId =
+          typeof hardFloorBreakdown?.fuelIndexId === 'string'
+            ? hardFloorBreakdown.fuelIndexId
+            : null;
+        await this.rateFloor.recordCheck({
+          jobId: job.id,
+          actorUserId: user.id,
+          versionId: hardFloorVersionId,
+          fuelIndexId,
+          inputs: {
+            vehicleClassCode: vehicleClass,
+            pricingModel,
+            distanceKm: job.routeDistanceKm ?? 0,
+            billableHours: job.billableHours,
+            offeredIncGstCents: input.amountIncGstCents,
+          },
+          breakdown: hardFloorBreakdown ?? {},
+          floorExGstCents: hardFloorEx,
+          floorIncGstCents: hardFloorInc!,
+          offeredIncGstCents: input.amountIncGstCents,
+          result: 'REJECT',
+        });
+      }
       throw new BadRequestException({
-        message: `Bid below minimum (A$${minAud})`,
-        code: 'BID_BELOW_MIN_BASE',
+        message: belowHardFloor
+          ? `Bid below hard floor (A$${minAud} inc GST)`
+          : `Bid below minimum (A$${minAud})`,
+        code: belowHardFloor ? 'PRICE_BELOW_FLOOR' : 'BID_BELOW_MIN_BASE',
         minBaseCents: minBase,
+        floorExGstCents: hardFloorEx,
+        floorIncGstCents: hardFloorInc,
+        versionId: hardFloorVersionId,
       });
     }
 

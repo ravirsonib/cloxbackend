@@ -30,7 +30,8 @@ describe('Thin controller status / meta endpoints', () => {
         },
       ]),
     };
-    const controller = new JobsController(jobsService as never);
+    const rateFloor = { calculate: jest.fn() };
+    const controller = new JobsController(jobsService as never, rateFloor as never);
     expect(controller.status()).toEqual({
       module: 'jobs',
       status: 'ready',

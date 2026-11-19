@@ -35,7 +35,14 @@ describe('Controller delegation leftovers', () => {
       addNote: jest.fn().mockResolvedValue({ id: 'N1' }),
       listAudit: jest.fn().mockResolvedValue({ items: [] }),
     };
-    const c = new AdminController(adminService as never);
+    const rateFloor = {
+      listVersions: jest.fn(),
+      getVersion: jest.fn(),
+      createDraftFromPublished: jest.fn(),
+      updateDraftLine: jest.fn(),
+      publishDraft: jest.fn(),
+    };
+    const c = new AdminController(adminService as never, rateFloor as never);
     await expect(c.getDashboardStats()).resolves.toEqual({ ok: 1 });
     await expect(c.exportLeads({} as never)).resolves.toBe('csv');
     await expect(c.listLeads({} as never)).resolves.toEqual({ items: [] });
@@ -200,6 +207,8 @@ describe('Controller delegation leftovers', () => {
       matching as never,
       { getProfile: jest.fn(), updateSelf: jest.fn(), requestChange: jest.fn() } as never,
       { getCarrierFleetSchedule: jest.fn(), createDriverScheduleByCarrier: jest.fn(), reviewDriverSchedule: jest.fn() } as never,
+      {} as never,
+      {} as never,
     );
     await expect(c.register({} as never)).resolves.toEqual({ id: 'co' });
     await expect(c.onboarding(principal)).resolves.toEqual({ step: 1 });

@@ -14,16 +14,19 @@ import {
   jobReceiverUpdateSchema,
   jobRecommendSchema,
   jobRouteEstimateSchema,
+  rateFloorPreviewSchema,
   type JobCreateInput,
   type JobReceiverUpdateInput,
   type JobRecommendInput,
   type JobRouteEstimateInput,
+  type RateFloorPreviewInput,
 } from '../../shared/types';
 import { CurrentPrincipal } from '../../common/decorators/current-admin.decorator';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { JwtAuthGuard, type AuthenticatedPrincipal } from '../../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../../common/guards/roles.guard';
 import { ZodValidationPipe } from '../../common/pipes/zod-validation.pipe';
+import { RateFloorService } from '../rate-floor/rate-floor.service';
 import { JobsService } from './jobs.service';
 import {
   MAX_JOB_CHARGEABLE_WEIGHT_KG,
@@ -35,7 +38,10 @@ import {
 @ApiTags('jobs')
 @Controller('jobs')
 export class JobsController {
-  constructor(private readonly jobsService: JobsService) {}
+  constructor(
+    private readonly jobsService: JobsService,
+    private readonly rateFloor: RateFloorService,
+  ) {}
 
   @Get('_status')
   @ApiOperation({ summary: 'Jobs module status' })
@@ -82,6 +88,39 @@ export class JobsController {
     @Body(new ZodValidationPipe(jobRouteEstimateSchema)) body: JobRouteEstimateInput,
   ) {
     return this.jobsService.previewRoute(body);
+  }
+
+  @Post('pricing/floor')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(AppRole.SENDER, AppRole.TRANSPORT_COMPANY)
+  @ApiOperation({
+    summary: 'Preview sender-facing hard rate floor for class + mode (Wave 1)',
+  })
+  async pricingFloor(
+    @Body(new ZodValidationPipe(rateFloorPreviewSchema)) body: RateFloorPreviewInput,
+  ) {
+    const result = await this.rateFloor.calculate({
+      vehicleClassCode: body.vehicleClassCode,
+      pricingModel: body.pricingModel,
+      distanceKm: body.distanceKm,
+      billableHours: body.billableHours,
+      at: body.at ? new Date(body.at) : null,
+      pickupState: body.pickupState,
+      bodyCode: body.bodyCode,
+      requiresReefer: body.requiresReefer,
+      requiresDg: body.requiresDg,
+      backhaul: body.backhaul,
+    });
+    return {
+      floorExGstCents: result.floorExGstCents,
+      floorIncGstCents: result.floorIncGstCents,
+      versionId: result.versionId,
+      versionLabel: result.versionLabel,
+      currency: 'AUD',
+      breakdown: result.breakdown,
+      message: `Minimum price for this job is $${(result.floorExGstCents / 100).toFixed(2)} ex GST ($${(result.floorIncGstCents / 100).toFixed(2)} inc GST).`,
+    };
   }
 
   @Get()

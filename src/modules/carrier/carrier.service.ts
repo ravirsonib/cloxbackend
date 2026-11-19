@@ -50,6 +50,11 @@ import {
   isVehicleClassAdequate,
   loadVehicleClassMaps,
 } from '../jobs/job-pricing.util';
+import {
+  assertCrewNotBusyElsewhere,
+  assertDriverAvailabilityForWindow,
+  calculateJobExecutionWindow,
+} from '../matching/driver-schedule.util';
 import { InAppNotificationsService } from '../notifications/in-app-notifications.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { companyHasMockCarrierConnect } from '../payments/stripe-mock-ids.util';
@@ -1808,7 +1813,16 @@ export class CarrierService {
     const assignment = await this.prisma.assignment.findFirst({
       where: { id: assignmentId, carrierCompanyId: company.id },
       include: {
-        job: { select: { id: true, minVehicleClass: true, title: true } },
+        job: {
+          select: {
+            id: true,
+            minVehicleClass: true,
+            title: true,
+            pickupAt: true,
+            routeDurationMinutes: true,
+            routeFatigueBreakMinutes: true,
+          },
+        },
         trip: { select: { id: true, status: true } },
         vehicle: { select: { id: true, registration: true } },
         driver: { select: { id: true, user: { select: { email: true, name: true } } } },
@@ -1893,6 +1907,21 @@ export class CarrierService {
       },
       'badRequest',
     );
+
+    // Same commitment gates as bid submit (leave / window collision / busy / open bids).
+    const executionWindow = calculateJobExecutionWindow(assignment.job);
+    await assertDriverAvailabilityForWindow(this.prisma, {
+      driverId: driver.id,
+      windowStart: executionWindow.windowStart,
+      windowEnd: executionWindow.windowEnd,
+      excludeJobId: assignment.job.id,
+    });
+    await assertCrewNotBusyElsewhere(this.prisma, {
+      vehicleId: vehicle.id,
+      driverId: driver.id,
+      excludeJobId: assignment.job.id,
+      excludeAssignmentId: assignment.id,
+    });
 
     const previousVehicleId = assignment.vehicleId;
     const previousDriverId = assignment.driverId;

@@ -1,4 +1,4 @@
-import { BadRequestException, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, NotFoundException } from '@nestjs/common';
 import {
   AssignmentStatus,
   CompanyStatus,
@@ -56,11 +56,33 @@ describe('CarrierService.reassignAssignment', () => {
     status: AssignmentStatus.LOCKED,
     vehicleId: 'veh-old',
     driverId: 'drv-old',
-    job: { id: 'job-1', minVehicleClass: 'RIGID_1_2T', title: 'Job' },
+    job: {
+      id: 'job-1',
+      minVehicleClass: 'RIGID_1_2T',
+      title: 'Job',
+      pickupAt: new Date('2026-12-01T02:00:00.000Z'),
+      routeDurationMinutes: 120,
+      routeFatigueBreakMinutes: 0,
+    },
     trip: { id: 'trip-1', status: TripStatus.EN_ROUTE_PICKUP },
     vehicle: { id: 'veh-old', registration: 'OLD' },
     driver: { id: 'drv-old', user: { email: 'old@yopmail.com', name: 'Old' } },
   };
+
+  /** Load assignment once, then free for busy checks. */
+  function assignmentFindFirstFree() {
+    return jest
+      .fn()
+      .mockResolvedValueOnce(lockedAssignment)
+      .mockResolvedValue(null);
+  }
+
+  function freeScheduleAndBids() {
+    return {
+      driverScheduleEntry: { findFirst: jest.fn().mockResolvedValue(null) },
+      proposal: { findFirst: jest.fn().mockResolvedValue(null) },
+    };
+  }
 
   it('404 when assignment missing', async () => {
     const prisma = {
@@ -205,7 +227,7 @@ describe('CarrierService.reassignAssignment', () => {
         }),
       },
       assignment: {
-        findFirst: jest.fn().mockResolvedValue(lockedAssignment),
+        findFirst: assignmentFindFirstFree(),
         update: assignmentUpdate,
       },
       tripException: { findFirst: tripExceptionFindFirst },
@@ -230,6 +252,7 @@ describe('CarrierService.reassignAssignment', () => {
       complianceDocument: {
         findFirst: jest.fn().mockResolvedValue({ id: 'doc-ok' }),
       },
+      ...freeScheduleAndBids(),
       trip: { update: tripUpdate },
       $transaction: jest.fn(async (fn: (tx: unknown) => Promise<unknown>) =>
         fn({
@@ -294,7 +317,7 @@ describe('CarrierService.reassignAssignment', () => {
         }),
       },
       assignment: {
-        findFirst: jest.fn().mockResolvedValue(lockedAssignment),
+        findFirst: assignmentFindFirstFree(),
         update: assignmentUpdate,
       },
       tripException: { findFirst: jest.fn().mockResolvedValue(null) },
@@ -316,6 +339,7 @@ describe('CarrierService.reassignAssignment', () => {
           nhvrAcknowledgedAt: new Date('2026-01-01'),
         }),
       },
+      ...freeScheduleAndBids(),
       complianceDocument: {
         findFirst: jest.fn().mockResolvedValue({ id: 'doc-ok' }),
       },
@@ -355,6 +379,61 @@ describe('CarrierService.reassignAssignment', () => {
         }),
       }),
     );
+  });
+
+  it('rejects reassign when replacement driver is busy on another assignment', async () => {
+    const prisma = {
+      isConnected: () => true,
+      user: {
+        findUnique: jest.fn().mockResolvedValue({
+          id: 'user-carrier',
+          company: {
+            id: 'co-c',
+            type: 'CARRIER',
+            status: CompanyStatus.BID_ELIGIBLE,
+          },
+        }),
+      },
+      assignment: {
+        findFirst: jest
+          .fn()
+          .mockResolvedValueOnce(lockedAssignment)
+          .mockResolvedValueOnce(null) // vehicle free
+          .mockResolvedValueOnce({ id: 'asg-other', jobId: 'job-other', status: AssignmentStatus.LOCKED }),
+      },
+      tripException: { findFirst: jest.fn().mockResolvedValue(null) },
+      vehicle: {
+        findFirst: jest.fn().mockResolvedValue({
+          id: 'veh-new',
+          companyId: 'co-c',
+          status: VehicleStatus.ACTIVE,
+          vehicleClass: 'RIGID_1_2T',
+        }),
+      },
+      driver: {
+        findFirst: jest.fn().mockResolvedValue({
+          id: 'drv-new',
+          companyId: 'co-c',
+          status: DriverStatus.ACTIVE,
+          licenceClass: 'MR',
+          licenceExpiry: new Date('2099-01-01'),
+          nhvrAcknowledgedAt: new Date('2026-01-01'),
+        }),
+      },
+      complianceDocument: {
+        findFirst: jest.fn().mockResolvedValue({ id: 'doc-ok' }),
+      },
+      driverScheduleEntry: { findFirst: jest.fn().mockResolvedValue(null) },
+      proposal: { findFirst: jest.fn().mockResolvedValue(null) },
+    };
+
+    await expect(
+      makeService(prisma).reassignAssignment(carrier, 'asg-1', {
+        vehicleId: '11111111-1111-1111-1111-111111111111',
+        driverId: '22222222-2222-2222-2222-222222222222',
+        reason: 'Swap to busy driver',
+      }),
+    ).rejects.toBeInstanceOf(ConflictException);
   });
 
   it('rejects completed trip', async () => {

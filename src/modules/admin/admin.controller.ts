@@ -26,6 +26,11 @@ import {
   updateLeadSchema,
   vehicleClassCreateSchema,
   vehicleClassUpdateSchema,
+  rateFloorDraftCreateSchema,
+  rateFloorLinePatchSchema,
+  fuelIndexCreateSchema,
+  rateFloorOverrideCreateSchema,
+  publicHolidayUpsertSchema,
   type AdminAuditQuery,
   type AdminCompanyListQuery,
   type AdminDashboardQuery,
@@ -38,12 +43,18 @@ import {
   type UpdateLeadInput,
   type VehicleClassCreateInput,
   type VehicleClassUpdateInput,
+  type RateFloorDraftCreateInput,
+  type RateFloorLinePatchInput,
+  type FuelIndexCreateInput,
+  type RateFloorOverrideCreateInput,
+  type PublicHolidayUpsertInput,
 } from '../../shared/types';
 import { CurrentAdmin } from '../../common/decorators/current-admin.decorator';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { JwtAuthGuard, type AuthenticatedAdmin } from '../../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../../common/guards/roles.guard';
 import { ZodValidationPipe } from '../../common/pipes/zod-validation.pipe';
+import { RateFloorService } from '../rate-floor/rate-floor.service';
 import { AdminService } from './admin.service';
 
 @ApiTags('admin')
@@ -52,7 +63,10 @@ import { AdminService } from './admin.service';
 @UseGuards(JwtAuthGuard, RolesGuard)
 @Roles(AdminRole.SUPER_ADMIN)
 export class AdminController {
-  constructor(private readonly adminService: AdminService) {}
+  constructor(
+    private readonly adminService: AdminService,
+    private readonly rateFloor: RateFloorService,
+  ) {}
 
   @Get('dashboard/stats')
   @ApiOperation({ summary: 'Dashboard KPIs and recent activity' })
@@ -255,5 +269,147 @@ export class AdminController {
     @CurrentAdmin() admin: AuthenticatedAdmin,
   ) {
     return this.adminService.deleteVehicleClass(id, admin.id);
+  }
+
+  @Get('rate-floor/versions')
+  @ApiOperation({ summary: 'List rate floor versions (Super Admin)' })
+  listRateFloorVersions() {
+    return this.rateFloor.listVersions();
+  }
+
+  @Get('rate-floor/versions/:id')
+  @ApiOperation({ summary: 'Get a rate floor version with lines' })
+  getRateFloorVersion(@Param('id', ParseUUIDPipe) id: string) {
+    return this.rateFloor.getVersion(id);
+  }
+
+  @Post('rate-floor/versions')
+  @ApiOperation({ summary: 'Create DRAFT floor version from current PUBLISHED' })
+  createRateFloorDraft(
+    @Body(new ZodValidationPipe(rateFloorDraftCreateSchema)) body: RateFloorDraftCreateInput,
+    @CurrentAdmin() admin: AuthenticatedAdmin,
+  ) {
+    return this.rateFloor.createDraftFromPublished(admin.id, body.label);
+  }
+
+  @Patch('rate-floor/versions/:id/lines/:code')
+  @ApiOperation({ summary: 'Update a DRAFT floor line by vehicle class code' })
+  patchRateFloorLine(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('code') code: string,
+    @Body(new ZodValidationPipe(rateFloorLinePatchSchema)) body: RateFloorLinePatchInput,
+  ) {
+    return this.rateFloor.updateDraftLine(id, code, body);
+  }
+
+  @Post('rate-floor/versions/:id/submit-approval')
+  @ApiOperation({ summary: 'Creator submits DRAFT for dual-approve publish (Wave 2.6)' })
+  submitRateFloorApproval(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentAdmin() admin: AuthenticatedAdmin,
+  ) {
+    return this.rateFloor.submitForApproval(id, admin.id);
+  }
+
+  @Post('rate-floor/versions/:id/withdraw-approval')
+  @ApiOperation({ summary: 'Creator withdraws pending approval so draft can be edited' })
+  withdrawRateFloorApproval(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentAdmin() admin: AuthenticatedAdmin,
+  ) {
+    return this.rateFloor.withdrawApproval(id, admin.id);
+  }
+
+  @Post('rate-floor/versions/:id/publish')
+  @ApiOperation({
+    summary:
+      'Second Super publishes submitted DRAFT (≠ creator). Retires previous PUBLISHED.',
+  })
+  publishRateFloorVersion(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentAdmin() admin: AuthenticatedAdmin,
+  ) {
+    return this.rateFloor.publishDraft(id, admin.id);
+  }
+
+  @Get('rate-floor/checks')
+  @ApiOperation({ summary: 'List rate-floor check audit rows (Super Admin)' })
+  listRateFloorChecks(
+    @Query('jobId') jobId?: string,
+    @Query('result') result?: 'PASS' | 'REJECT' | 'OVERRIDE',
+  ) {
+    return this.rateFloor.listChecks({
+      jobId,
+      result,
+    });
+  }
+
+  @Get('rate-floor/overrides')
+  @ApiOperation({ summary: 'List rate-floor job overrides (Super Admin)' })
+  listRateFloorOverrides(
+    @Query('jobId') jobId?: string,
+    @Query('activeOnly') activeOnly?: string,
+  ) {
+    return this.rateFloor.listOverrides({
+      jobId,
+      activeOnly: activeOnly === '1' || activeOnly === 'true',
+    });
+  }
+
+  @Post('rate-floor/overrides')
+  @ApiOperation({ summary: 'Create time-limited per-job floor override (Super Admin)' })
+  createRateFloorOverride(
+    @Body(new ZodValidationPipe(rateFloorOverrideCreateSchema)) body: RateFloorOverrideCreateInput,
+    @CurrentAdmin() admin: AuthenticatedAdmin,
+  ) {
+    return this.rateFloor.createOverride(admin.id, body);
+  }
+
+  @Get('public-holidays')
+  @ApiOperation({
+    summary:
+      'List public holidays for labour period (Wave 2.7). Multiplier = Sunday stub until Award confirms.',
+  })
+  async listPublicHolidays(@Query('state') state?: string) {
+    await this.rateFloor.ensurePublicHolidaySeed();
+    return this.rateFloor.listPublicHolidays({ state });
+  }
+
+  @Post('public-holidays')
+  @ApiOperation({ summary: 'Upsert a public holiday (state|NATIONAL + date)' })
+  upsertPublicHoliday(
+    @Body(new ZodValidationPipe(publicHolidayUpsertSchema)) body: PublicHolidayUpsertInput,
+  ) {
+    return this.rateFloor.upsertPublicHoliday(body);
+  }
+
+  @Delete('public-holidays/:id')
+  @ApiOperation({ summary: 'Delete a public holiday row' })
+  deletePublicHoliday(@Param('id', ParseUUIDPipe) id: string) {
+    return this.rateFloor.deletePublicHoliday(id);
+  }
+
+  @Get('fuel-index/status')
+  @ApiOperation({ summary: 'Latest diesel index + stale banner flags (Super Admin)' })
+  getFuelIndexStatus() {
+    return this.rateFloor.getFuelStatus();
+  }
+
+  @Get('fuel-index')
+  @ApiOperation({ summary: 'List weekly diesel fuel index history (Super Admin)' })
+  listFuelIndex() {
+    return this.rateFloor.listFuelIndexes();
+  }
+
+  @Post('fuel-index')
+  @ApiOperation({
+    summary:
+      'Enter weekly national average retail diesel (c/L). Large week-over-week moves require confirm=true.',
+  })
+  createFuelIndex(
+    @Body(new ZodValidationPipe(fuelIndexCreateSchema)) body: FuelIndexCreateInput,
+    @CurrentAdmin() admin: AuthenticatedAdmin,
+  ) {
+    return this.rateFloor.createFuelIndex(admin.id, body);
   }
 }

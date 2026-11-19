@@ -277,7 +277,7 @@ describe('PaymentsService branch leftovers', () => {
     });
   });
 
-  it('acceptProposal PI fail non-Error + null metadata; processing message without vehicle/driver', async () => {
+  it('acceptProposal PI fail non-Error + null metadata; processing message with crew', async () => {
     const assignment = {
       id: 'asg-1',
       status: AssignmentStatus.PENDING,
@@ -315,8 +315,8 @@ describe('PaymentsService branch leftovers', () => {
                 id: 'prop-1',
                 status: ProposalStatus.SUBMITTED,
                 carrierCompanyId: 'co-c',
-                vehicleId: null,
-                driverId: null,
+                vehicleId: 'veh-1',
+                driverId: 'drv-1',
                 amountIncGstCents: 1100,
                 amountExGstCents: 1000,
                 amountGstCents: 100,

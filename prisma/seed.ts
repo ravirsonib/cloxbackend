@@ -629,10 +629,135 @@ async function seedVehicleClasses() {
   console.log(`Seeded ${DEFAULT_VEHICLE_CLASSES.length} vehicle classes (docs catalog)`);
 }
 
+async function seedRateFloorVersion() {
+  const {
+    DEFAULT_RATE_FLOOR_LINES,
+    DEFAULT_RATE_FLOOR_VERSION_LABEL,
+    DEFAULT_RATE_FLOOR_VERSION_PARAMS,
+  } = await import('../src/modules/rate-floor/rate-floor.defaults');
+
+  const existing = await prisma.rateFloorVersion.findFirst({
+    where: { status: 'PUBLISHED' },
+    select: { id: true },
+  });
+  if (existing) {
+    // eslint-disable-next-line no-console
+    console.log(`Rate floor PUBLISHED version already present (${existing.id})`);
+    return;
+  }
+
+  const { DEFAULT_LABOUR_MULTIPLIERS } = await import(
+    '../src/modules/rate-floor/rate-floor.labour'
+  );
+  const { DEFAULT_BODY_LOADINGS } = await import('../src/modules/rate-floor/rate-floor.body');
+
+  // Nested labour/body creates trip Prisma CreateInput XOR typing in seed; createMany after.
+  const version = await prisma.rateFloorVersion.create({
+    data: {
+      label: DEFAULT_RATE_FLOOR_VERSION_LABEL,
+      status: 'PUBLISHED',
+      effectiveFrom: new Date(),
+      referenceDieselCpl: DEFAULT_RATE_FLOOR_VERSION_PARAMS.referenceDieselCpl,
+      labourRateHrCents: DEFAULT_RATE_FLOOR_VERSION_PARAMS.labourRateHrCents,
+      minHours: DEFAULT_RATE_FLOOR_VERSION_PARAMS.minHours,
+      minKmChargeKm: DEFAULT_RATE_FLOOR_VERSION_PARAMS.minKmChargeKm,
+      backhaulFactor: DEFAULT_RATE_FLOOR_VERSION_PARAMS.backhaulFactor,
+      lines: {
+        create: DEFAULT_RATE_FLOOR_LINES.map((l) => ({
+          vehicleClassCode: l.vehicleClassCode,
+          hourlyFloorCents: l.hourlyFloorCents,
+          kmFloorCents: l.kmFloorCents,
+          variableKmCents: l.variableKmCents,
+          litresPerKm: l.litresPerKm,
+          basis: l.basis,
+        })),
+      },
+    },
+  });
+
+  await prisma.rateFloorLabourMultiplier.createMany({
+    data: DEFAULT_LABOUR_MULTIPLIERS.map((m) => ({
+      versionId: version.id,
+      periodCode: m.periodCode,
+      multiplier: m.multiplier,
+    })),
+    skipDuplicates: true,
+  });
+  await prisma.rateFloorBodyLoading.createMany({
+    data: DEFAULT_BODY_LOADINGS.map((b) => ({
+      versionId: version.id,
+      bodyCode: b.bodyCode,
+      loadingPct: b.loadingPct,
+      minHours: b.minHours,
+    })),
+    skipDuplicates: true,
+  });
+
+  // eslint-disable-next-line no-console
+  console.log(
+    `Seeded rate floor version ${version.id} (${DEFAULT_RATE_FLOOR_LINES.length} lines)`,
+  );
+}
+
+async function seedPublicHolidays() {
+  const existing = await prisma.publicHoliday.findFirst({ select: { id: true } });
+  if (existing) {
+    // eslint-disable-next-line no-console
+    console.log(`Public holidays already present (${existing.id})`);
+    return;
+  }
+  const rows = [
+    { state: 'NATIONAL', holidayDate: '2026-01-01', name: "New Year's Day" },
+    { state: 'NATIONAL', holidayDate: '2026-01-26', name: 'Australia Day' },
+    { state: 'NATIONAL', holidayDate: '2026-04-03', name: 'Good Friday' },
+    { state: 'NATIONAL', holidayDate: '2026-04-06', name: 'Easter Monday' },
+    { state: 'NATIONAL', holidayDate: '2026-04-25', name: 'ANZAC Day' },
+    { state: 'NATIONAL', holidayDate: '2026-12-25', name: 'Christmas Day' },
+    { state: 'NATIONAL', holidayDate: '2026-12-26', name: 'Boxing Day' },
+    { state: 'VIC', holidayDate: '2026-11-03', name: 'Melbourne Cup Day' },
+  ];
+  await prisma.publicHoliday.createMany({
+    data: rows.map((r) => ({
+      state: r.state,
+      holidayDate: new Date(`${r.holidayDate}T00:00:00.000Z`),
+      name: r.name,
+    })),
+  });
+  // eslint-disable-next-line no-console
+  console.log(`Seeded ${rows.length} public holidays (Award stub → Sunday multiplier)`);
+}
+
+async function seedFuelIndex() {
+  const { DEFAULT_RATE_FLOOR_VERSION_PARAMS } = await import(
+    '../src/modules/rate-floor/rate-floor.defaults'
+  );
+  const { mondayOfWeek } = await import('../src/modules/rate-floor/rate-floor.fuel');
+
+  const existing = await prisma.fuelIndex.findFirst({ select: { id: true } });
+  if (existing) {
+    // eslint-disable-next-line no-console
+    console.log(`Fuel index already present (${existing.id})`);
+    return;
+  }
+
+  const row = await prisma.fuelIndex.create({
+    data: {
+      weekStart: mondayOfWeek(),
+      dieselCpl: DEFAULT_RATE_FLOOR_VERSION_PARAMS.referenceDieselCpl,
+      note: 'Seed: July 2026 national average retail reference (211.4 c/L)',
+    },
+  });
+  // eslint-disable-next-line no-console
+  console.log(`Seeded fuel index ${row.id} @ ${row.dieselCpl} c/L`);
+}
+
 async function main() {
   await seedSuperAdmin();
   const vic = await seedRegions();
   await seedVehicleClasses();
+  await seedRateFloorVersion();
+  await seedFuelIndex();
+  await seedPublicHolidays();
   await seedScopedAdmins(vic.id);
   const { senderCompanyId, carrierCompanyId } = await seedMarketplaceUsers(vic.id);
   await seedPolicy();

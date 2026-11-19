@@ -3,6 +3,8 @@ import {
   AssignmentStatus,
   DriverAvailabilityType,
   DriverScheduleStatus,
+  JobStatus,
+  ProposalStatus,
   TripStatus,
   type PrismaClient,
 } from '@prisma/client';
@@ -210,6 +212,117 @@ export async function assertDriverAvailabilityForWindow(
       code: check.code,
       scheduleEntryId: check.conflictingScheduleEntryId,
       conflictingWindow: check.conflictingWindow,
+    });
+  }
+}
+
+const busyAssignmentWhere = (excludeAssignmentId?: string) => ({
+  ...(excludeAssignmentId ? { id: { not: excludeAssignmentId } } : {}),
+  OR: [
+    { status: AssignmentStatus.PENDING },
+    {
+      status: AssignmentStatus.LOCKED,
+      trip: {
+        status: { notIn: [TripStatus.COMPLETED, TripStatus.CANCELLED] },
+      },
+    },
+  ],
+});
+
+/**
+ * Shared choke-point: vehicle/driver must not be PENDING/LOCKED-busy (or open-bid committed)
+ * on another job. Used by bid submit and assignment reassign.
+ */
+export async function assertCrewNotBusyElsewhere(
+  prisma: Partial<Pick<PrismaClient, 'assignment' | 'proposal'>>,
+  params: {
+    vehicleId: string;
+    driverId: string;
+    /** Current job (open bids on this job are allowed). */
+    excludeJobId?: string;
+    /** Current assignment being reassigned (must not count as busy). */
+    excludeAssignmentId?: string;
+    /** When false, skip open-bid commit checks (default true). */
+    checkOpenBids?: boolean;
+  },
+): Promise<void> {
+  const {
+    vehicleId,
+    driverId,
+    excludeJobId,
+    excludeAssignmentId,
+    checkOpenBids = true,
+  } = params;
+
+  const vehicleBusy = prisma.assignment?.findFirst
+    ? await prisma.assignment.findFirst({
+        where: {
+          vehicleId,
+          ...busyAssignmentWhere(excludeAssignmentId),
+        },
+        select: { id: true, jobId: true, status: true },
+      })
+    : null;
+  if (vehicleBusy) {
+    throw new ConflictException({
+      message: 'Vehicle is already assigned or pending payment on another job',
+      code: 'VEHICLE_BUSY',
+      jobId: vehicleBusy.jobId,
+    });
+  }
+
+  const driverBusy = prisma.assignment?.findFirst
+    ? await prisma.assignment.findFirst({
+        where: {
+          driverId,
+          ...busyAssignmentWhere(excludeAssignmentId),
+        },
+        select: { id: true, jobId: true, status: true },
+      })
+    : null;
+  if (driverBusy) {
+    throw new ConflictException({
+      message: 'Driver is already assigned or pending payment on another job',
+      code: 'DRIVER_BUSY',
+      jobId: driverBusy.jobId,
+    });
+  }
+
+  if (!checkOpenBids || !prisma.proposal?.findFirst) return;
+
+  const vehicleOpenBid = await prisma.proposal.findFirst({
+    where: {
+      vehicleId,
+      status: ProposalStatus.SUBMITTED,
+      ...(excludeJobId ? { jobId: { not: excludeJobId } } : {}),
+      job: { status: { in: [JobStatus.PUBLISHED, JobStatus.BIDDING] } },
+    },
+    select: { id: true, jobId: true },
+  });
+  if (vehicleOpenBid) {
+    throw new ConflictException({
+      message: 'Vehicle already has an open bid on another job — accept/withdraw that bid first',
+      code: 'VEHICLE_BID_COMMITTED',
+      jobId: vehicleOpenBid.jobId,
+      proposalId: vehicleOpenBid.id,
+    });
+  }
+
+  const driverOpenBid = await prisma.proposal.findFirst({
+    where: {
+      driverId,
+      status: ProposalStatus.SUBMITTED,
+      ...(excludeJobId ? { jobId: { not: excludeJobId } } : {}),
+      job: { status: { in: [JobStatus.PUBLISHED, JobStatus.BIDDING] } },
+    },
+    select: { id: true, jobId: true },
+  });
+  if (driverOpenBid) {
+    throw new ConflictException({
+      message: 'Driver already has an open bid on another job — accept/withdraw that bid first',
+      code: 'DRIVER_BID_COMMITTED',
+      jobId: driverOpenBid.jobId,
+      proposalId: driverOpenBid.id,
     });
   }
 }

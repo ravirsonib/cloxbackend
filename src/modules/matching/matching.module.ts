@@ -7,6 +7,7 @@ import { CarrierModule } from '../carrier/carrier.module';
 import { JobsModule } from '../jobs/jobs.module';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { SettlementsModule } from '../settlements/settlements.module';
+import { RateFloorModule } from '../rate-floor/rate-floor.module';
 import { MatchingController } from './matching.controller';
 import { MatchingService } from './matching.service';
 
@@ -18,6 +19,7 @@ import { MatchingService } from './matching.service';
     forwardRef(() => CarrierModule),
     JobsModule,
     SettlementsModule,
+    RateFloorModule,
   ],
   controllers: [MatchingController],
   providers: [MatchingService, JwtAuthGuard, RolesGuard],

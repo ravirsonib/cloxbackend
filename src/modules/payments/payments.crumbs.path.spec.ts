@@ -88,8 +88,8 @@ describe('PaymentsService crumb branch leftovers', () => {
               id: 'prop-1',
               status: ProposalStatus.SUBMITTED,
               carrierCompanyId: 'co-c',
-              vehicleId: null,
-              driverId: null,
+              vehicleId: 'veh-1',
+              driverId: 'drv-1',
               amountIncGstCents: 1100,
               amountExGstCents: 1000,
               amountGstCents: 100,
@@ -111,13 +111,20 @@ describe('PaymentsService crumb branch leftovers', () => {
             findMany: jest.fn().mockResolvedValue([]),
             updateMany: jest.fn(),
           },
-          job: { update: jest.fn() },
+          job: {
+            update: jest.fn(),
+            findUnique: jest.fn().mockResolvedValue({
+              id: 'job-1',
+              originRegionId: null,
+              destinationRegionId: null,
+            }),
+          },
           paymentEvent: {
             create: jest.fn().mockResolvedValue(pePending),
             update: jest.fn(),
           },
           settlementLine: {
-            count: jest.fn().mockResolvedValue(0),
+            count: jest.fn().mockResolvedValue(1),
             createMany: jest.fn(),
           },
         };

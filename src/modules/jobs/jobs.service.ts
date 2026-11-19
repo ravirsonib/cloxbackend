@@ -55,6 +55,7 @@ import {
   recommendVehicleClass,
 } from './job-pricing.util';
 import { estimateRoute, orderStopsTspObjects, routeFromDistanceKm } from './routing.mock';
+import { RateFloorService } from '../rate-floor/rate-floor.service';
 
 /** Soft cap so one unverified sender cannot flood DRAFT rows. */
 const MAX_OPEN_DRAFT_JOBS_PER_SENDER = 10;
@@ -94,7 +95,80 @@ export class JobsService {
     @Optional() private readonly notifications?: NotificationsService,
     @Optional() private readonly inbox?: InAppNotificationsService,
     @Optional() private readonly revenueSplit?: import('../settlements/revenue-split.service').RevenueSplitService,
+    @Optional() private readonly rateFloor?: RateFloorService,
   ) {}
+
+  /**
+   * Sender-facing hard floor (Wave 1). Market quote is raised to floor when needed.
+   * Returns null when RateFloorService is unavailable (unit tests without module).
+   */
+  async resolveHardFloor(params: {
+    vehicleClassCode: string;
+    pricingModel: 'PER_KM' | 'HOURLY';
+    distanceKm?: number | null;
+    billableHours?: number | null;
+    at?: Date | null;
+    pickupState?: string | null;
+    bodyCode?: string | null;
+    requiresReefer?: boolean | null;
+    requiresDg?: boolean | null;
+    backhaul?: boolean | null;
+  }) {
+    if (!this.rateFloor) return null;
+    return this.rateFloor.calculate({
+      vehicleClassCode: params.vehicleClassCode,
+      pricingModel: params.pricingModel,
+      distanceKm: params.distanceKm,
+      billableHours: params.billableHours,
+      at: params.at,
+      pickupState: params.pickupState,
+      bodyCode: params.bodyCode,
+      requiresReefer: params.requiresReefer,
+      requiresDg: params.requiresDg,
+      backhaul: params.backhaul,
+    });
+  }
+
+  /** Apply hard floor under market estimate; returns GST split + snapshot fields. */
+  private async withHardFloorEstimate(params: {
+    marketEstimateIncGstCents: number;
+    gstPercent: number;
+    vehicleClassCode: string;
+    pricingModel: 'PER_KM' | 'HOURLY';
+    distanceKm?: number | null;
+    billableHours?: number | null;
+    at?: Date | null;
+    pickupState?: string | null;
+    bodyCode?: string | null;
+    requiresReefer?: boolean | null;
+    requiresDg?: boolean | null;
+    backhaul?: boolean | null;
+  }) {
+    const floor = await this.resolveHardFloor({
+      vehicleClassCode: params.vehicleClassCode,
+      pricingModel: params.pricingModel,
+      distanceKm: params.distanceKm,
+      billableHours: params.billableHours,
+      at: params.at,
+      pickupState: params.pickupState,
+      bodyCode: params.bodyCode,
+      requiresReefer: params.requiresReefer,
+      requiresDg: params.requiresDg,
+      backhaul: params.backhaul,
+    });
+    const estimateInc = floor
+      ? Math.max(params.marketEstimateIncGstCents, floor.floorIncGstCents)
+      : params.marketEstimateIncGstCents;
+    const estimate = gstSplitFromIncCents(estimateInc, params.gstPercent);
+    return {
+      estimate,
+      rateFloorVersionId: floor?.versionId ?? null,
+      rateFloorExGstCents: floor?.floorExGstCents ?? null,
+      rateFloorIncGstCents: floor?.floorIncGstCents ?? null,
+      rateFloorBreakdown: floor?.breakdown ?? null,
+      hardFloor: floor,
+    };
+  }
 
   private ensureDatabase() {
     if (!this.prisma.isConnected()) {
@@ -418,6 +492,11 @@ export class JobsService {
     minVehicleClass: string | null;
     recommendedVehicleClass: string | null;
     pricingVehicleClass?: string | null;
+    rateFloorVersionId?: string | null;
+    rateFloorExGstCents?: number | null;
+    rateFloorIncGstCents?: number | null;
+    rateFloorBreakdown?: unknown;
+    isBackhaul?: boolean;
     siteManeuverability: string | null;
     siteFacility: string | null;
     siteDisclaimerAcceptedAt: Date | null;
@@ -507,6 +586,7 @@ export class JobsService {
       dgDocumentFilename: job.dgDocument?.originalFilename ?? null,
       requiresReefer: job.requiresReefer,
       requiresOversize: job.requiresOversize,
+      isBackhaul: job.isBackhaul ?? false,
       minVehicleClass: job.minVehicleClass,
       recommendedVehicleClass: job.recommendedVehicleClass,
       pricingVehicleClass: job.pricingVehicleClass ?? job.minVehicleClass ?? job.recommendedVehicleClass,
@@ -525,6 +605,12 @@ export class JobsService {
         exGstCents: job.estimateExGstCents,
         gstCents: job.estimateGstCents,
         incGstCents: job.estimateIncGstCents,
+      },
+      rateFloor: {
+        versionId: job.rateFloorVersionId ?? null,
+        exGstCents: job.rateFloorExGstCents ?? null,
+        incGstCents: job.rateFloorIncGstCents ?? null,
+        breakdown: job.rateFloorBreakdown ?? null,
       },
       publishedAt: job.publishedAt,
       publishRequestedAt: job.publishRequestedAt ?? null,
@@ -852,7 +938,7 @@ export class JobsService {
     const rates = resolveClassRates(pricingClass, classRow, legacy);
     const globalFloor =
       input.pricingModel === 'HOURLY' ? legacy.hourlyMinBaseCents : legacy.perKmMinBaseCents;
-    const estimateIncGstCents = quoteForModel({
+    const marketEstimateIncGstCents = quoteForModel({
       pricingModel: input.pricingModel,
       rates,
       distanceKm: route.distanceKm,
@@ -860,6 +946,18 @@ export class JobsService {
       hourlyMinFloorHours: config.hourlyMinFloorHours,
       globalHardFloorCents: globalFloor,
     });
+    const pickupStop =
+      orderedStops.find((s) => s.stopType === 'PICKUP') ?? orderedStops[0] ?? null;
+    const floored = await this.withHardFloorEstimate({
+      marketEstimateIncGstCents,
+      gstPercent: config.gstPercent,
+      vehicleClassCode: pricingClass,
+      pricingModel: input.pricingModel,
+      distanceKm: route.distanceKm,
+      billableHours: route.billableHours,
+      pickupState: pickupStop?.state ?? null,
+    });
+    const estimateIncGstCents = floored.estimate.amountIncGstCents;
     const range = estimateRangeIncGstCents({
       pricingModel: input.pricingModel,
       pricingClass,
@@ -870,7 +968,7 @@ export class JobsService {
     });
     const minBillableHours =
       input.pricingModel === 'HOURLY' ? config.hourlyMinFloorHours : null;
-    const minChargeIncGstCents =
+    const legacyMinCharge =
       input.pricingModel === 'HOURLY'
         ? Math.max(
             globalFloor,
@@ -878,6 +976,8 @@ export class JobsService {
             Math.round(config.hourlyMinFloorHours * rates.hourlyRateCents),
           )
         : Math.max(globalFloor, rates.perKmMinBaseCents);
+    const hardFloorInc = floored.rateFloorIncGstCents ?? 0;
+    const minChargeIncGstCents = Math.max(legacyMinCharge, hardFloorInc);
 
     return {
       distanceKm: route.distanceKm,
@@ -891,15 +991,19 @@ export class JobsService {
       minBaseCents: Math.max(
         globalFloor,
         input.pricingModel === 'HOURLY' ? rates.hourlyMinBaseCents : rates.perKmMinBaseCents,
+        hardFloorInc,
       ),
       minChargeIncGstCents,
       estimateIncGstCents,
       pricingVehicleClass: pricingClass,
       estimateRange: {
-        minIncGstCents: range.minIncGstCents,
-        maxIncGstCents: range.maxIncGstCents,
+        minIncGstCents: Math.max(range.minIncGstCents, hardFloorInc),
+        maxIncGstCents: Math.max(range.maxIncGstCents, hardFloorInc),
         maxClassCode: range.maxClassCode,
       },
+      rateFloorExGstCents: floored.rateFloorExGstCents,
+      rateFloorIncGstCents: floored.rateFloorIncGstCents,
+      rateFloorVersionId: floored.rateFloorVersionId,
       mock: route.mock,
     };
   }
@@ -1014,7 +1118,7 @@ export class JobsService {
     const rates = resolveClassRates(pricingVehicleClass, pricingRow, legacy);
     const globalFloor =
       input.pricingModel === 'HOURLY' ? legacy.hourlyMinBaseCents : legacy.perKmMinBaseCents;
-    const estimateInc = quoteForModel({
+    const marketEstimateInc = quoteForModel({
       pricingModel: input.pricingModel,
       rates,
       distanceKm: route.distanceKm,
@@ -1023,7 +1127,23 @@ export class JobsService {
       globalHardFloorCents: globalFloor,
     });
     const gstRatePercent = config.gstPercent;
-    const estimate = gstSplitFromIncCents(estimateInc, gstRatePercent);
+    const pickupStopForFloor =
+      persistedStops.find((s) => s.stopType === 'PICKUP') ?? persistedStops[0] ?? null;
+    const floored = await this.withHardFloorEstimate({
+      marketEstimateIncGstCents: marketEstimateInc,
+      gstPercent: gstRatePercent,
+      vehicleClassCode: pricingVehicleClass,
+      pricingModel: input.pricingModel,
+      distanceKm: route.distanceKm,
+      billableHours: route.billableHours,
+      at: new Date(input.pickupAt),
+      pickupState: pickupStopForFloor?.state ?? null,
+      bodyCode: input.bodyCode,
+      requiresReefer,
+      requiresDg,
+      backhaul: input.isBackhaul ?? false,
+    });
+    const estimate = floored.estimate;
 
     const origin = await this.resolveJobOrigin(persistedStops, user.company.homeRegionId);
 
@@ -1067,6 +1187,14 @@ export class JobsService {
         estimateExGstCents: estimate.amountExGstCents,
         estimateGstCents: estimate.amountGstCents,
         estimateIncGstCents: estimate.amountIncGstCents,
+        rateFloorVersionId: floored.rateFloorVersionId,
+        rateFloorExGstCents: floored.rateFloorExGstCents,
+        rateFloorIncGstCents: floored.rateFloorIncGstCents,
+        rateFloorBreakdown:
+          floored.rateFloorBreakdown != null
+            ? (floored.rateFloorBreakdown as object)
+            : undefined,
+        isBackhaul: input.isBackhaul ?? false,
         stops: {
           create: persistedStops.map((s, index) => ({
             sequence: index,
@@ -1096,6 +1224,31 @@ export class JobsService {
       entityId: job.id,
       metadata: { pricingModel: input.pricingModel, minClass, chargeable },
     });
+
+    if (this.rateFloor && floored.hardFloor && floored.rateFloorVersionId) {
+      const fuelIndexId =
+        typeof floored.hardFloor.breakdown?.fuelIndexId === 'string'
+          ? floored.hardFloor.breakdown.fuelIndexId
+          : null;
+      await this.rateFloor.recordCheck({
+        jobId: job.id,
+        actorUserId: user.id,
+        versionId: floored.rateFloorVersionId,
+        fuelIndexId,
+        inputs: {
+          vehicleClassCode: pricingVehicleClass,
+          pricingModel: input.pricingModel,
+          distanceKm: route.distanceKm,
+          billableHours: route.billableHours,
+          source: 'JOB_CREATE',
+        },
+        breakdown: floored.hardFloor.breakdown,
+        floorExGstCents: floored.hardFloor.floorExGstCents,
+        floorIncGstCents: floored.hardFloor.floorIncGstCents,
+        offeredIncGstCents: estimate.amountIncGstCents,
+        result: 'PASS',
+      });
+    }
 
     return this.mapJob(job);
   }
@@ -1229,7 +1382,7 @@ export class JobsService {
     const rates = resolveClassRates(pricingVehicleClass, pricingRow, legacy);
     const globalFloor =
       input.pricingModel === 'HOURLY' ? legacy.hourlyMinBaseCents : legacy.perKmMinBaseCents;
-    const estimateInc = quoteForModel({
+    const marketEstimateInc = quoteForModel({
       pricingModel: input.pricingModel,
       rates,
       distanceKm: route.distanceKm,
@@ -1238,7 +1391,23 @@ export class JobsService {
       globalHardFloorCents: globalFloor,
     });
     const gstRatePercent = config.gstPercent;
-    const estimate = gstSplitFromIncCents(estimateInc, gstRatePercent);
+    const pickupStopForFloor =
+      persistedStops.find((s) => s.stopType === 'PICKUP') ?? persistedStops[0] ?? null;
+    const floored = await this.withHardFloorEstimate({
+      marketEstimateIncGstCents: marketEstimateInc,
+      gstPercent: gstRatePercent,
+      vehicleClassCode: pricingVehicleClass,
+      pricingModel: input.pricingModel,
+      distanceKm: route.distanceKm,
+      billableHours: route.billableHours,
+      at: new Date(input.pickupAt),
+      pickupState: pickupStopForFloor?.state ?? null,
+      bodyCode: input.bodyCode,
+      requiresReefer,
+      requiresDg,
+      backhaul: input.isBackhaul ?? false,
+    });
+    const estimate = floored.estimate;
     const origin = await this.resolveJobOrigin(persistedStops, user.company.homeRegionId);
 
     const job = await this.prisma.job.update({
@@ -1280,6 +1449,14 @@ export class JobsService {
         estimateExGstCents: estimate.amountExGstCents,
         estimateGstCents: estimate.amountGstCents,
         estimateIncGstCents: estimate.amountIncGstCents,
+        rateFloorVersionId: floored.rateFloorVersionId,
+        rateFloorExGstCents: floored.rateFloorExGstCents,
+        rateFloorIncGstCents: floored.rateFloorIncGstCents,
+        rateFloorBreakdown:
+          floored.rateFloorBreakdown != null
+            ? (floored.rateFloorBreakdown as object)
+            : undefined,
+        isBackhaul: input.isBackhaul ?? false,
         stops: {
           deleteMany: {},
           create: persistedStops.map((s, index) => ({
@@ -1315,6 +1492,31 @@ export class JobsService {
         editMode: 'FULL',
       },
     });
+
+    if (this.rateFloor && floored.hardFloor && floored.rateFloorVersionId) {
+      const fuelIndexId =
+        typeof floored.hardFloor.breakdown?.fuelIndexId === 'string'
+          ? floored.hardFloor.breakdown.fuelIndexId
+          : null;
+      await this.rateFloor.recordCheck({
+        jobId: job.id,
+        actorUserId: user.id,
+        versionId: floored.rateFloorVersionId,
+        fuelIndexId,
+        inputs: {
+          vehicleClassCode: pricingVehicleClass,
+          pricingModel: input.pricingModel,
+          distanceKm: route.distanceKm,
+          billableHours: route.billableHours,
+          source: 'JOB_UPDATE',
+        },
+        breakdown: floored.hardFloor.breakdown,
+        floorExGstCents: floored.hardFloor.floorExGstCents,
+        floorIncGstCents: floored.hardFloor.floorIncGstCents,
+        offeredIncGstCents: estimate.amountIncGstCents,
+        result: 'PASS',
+      });
+    }
 
     return { ...this.mapJob(job), editability: resolveJobEditMode(existing) };
   }

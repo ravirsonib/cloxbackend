@@ -4,11 +4,12 @@ import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../../common/guards/roles.guard';
 import { AuditModule } from '../audit/audit.module';
 import { NotificationsModule } from '../notifications/notifications.module';
+import { RateFloorModule } from '../rate-floor/rate-floor.module';
 import { AdminController } from './admin.controller';
 import { AdminService } from './admin.service';
 
 @Module({
-  imports: [JwtModule.register({}), AuditModule, NotificationsModule],
+  imports: [JwtModule.register({}), AuditModule, NotificationsModule, RateFloorModule],
   controllers: [AdminController],
   providers: [AdminService, JwtAuthGuard, RolesGuard],
   exports: [AdminService],

@@ -20,7 +20,7 @@ describe('Jobs + Health controller leftovers', () => {
       publishJob: jest.fn().mockResolvedValue({ id: 'j2', status: 'BIDDING' }),
       acceptProposal: jest.fn().mockResolvedValue({ paymentEventId: 'pe1' }),
     };
-    const c = new JobsController(jobs as never);
+    const c = new JobsController(jobs as never, { calculate: jest.fn() } as never);
     await expect(c.list(sender)).resolves.toEqual([{ id: 'j1' }]);
     await expect(c.get(sender, 'j1')).resolves.toEqual({ id: 'j1' });
     await expect(c.create(sender, {} as never)).resolves.toEqual({ id: 'j2' });

@@ -60,6 +60,178 @@ describe('PaymentsService acceptProposal + webhook paths', () => {
       ).rejects.toBeInstanceOf(ForbiddenException);
     });
 
+    it('rejects when proposal has no vehicle/driver at accept', async () => {
+      const prisma = {
+        isConnected: () => true,
+        user: {
+          findUnique: jest.fn().mockResolvedValue({
+            id: 'user-sender',
+            companyId: 'co-s',
+            company: {
+              id: 'co-s',
+              paymentReady: true,
+              stripeCustomerId: 'cus_1',
+              stripeDefaultPaymentMethodId: 'pm_1',
+            },
+          }),
+        },
+        paymentEvent: { findUnique: jest.fn().mockResolvedValue(null) },
+        job: {
+          findFirst: jest.fn().mockResolvedValue({
+            id: 'job-1',
+            status: JobStatus.BIDDING,
+            assignment: null,
+            pickupAt: new Date('2026-12-01T02:00:00.000Z'),
+            routeDurationMinutes: 60,
+            routeFatigueBreakMinutes: 0,
+            proposals: [
+              {
+                id: 'prop-1',
+                status: ProposalStatus.SUBMITTED,
+                carrierCompanyId: 'co-c',
+                vehicleId: null,
+                driverId: null,
+                amountIncGstCents: 11000,
+                amountExGstCents: 10000,
+                amountGstCents: 1000,
+              },
+            ],
+          }),
+        },
+      };
+      try {
+        await makeService(prisma).acceptProposal(senderPrincipal, 'job-1', 'prop-1');
+        fail('expected CREW_REQUIRED_FOR_ACCEPT');
+      } catch (err) {
+        expect(err).toBeInstanceOf(BadRequestException);
+        expect((err as BadRequestException).getResponse()).toMatchObject({
+          code: 'CREW_REQUIRED_FOR_ACCEPT',
+        });
+      }
+    });
+
+    it('rejects when driver is on approved leave at accept', async () => {
+      const prisma = {
+        isConnected: () => true,
+        user: {
+          findUnique: jest.fn().mockResolvedValue({
+            id: 'user-sender',
+            companyId: 'co-s',
+            company: {
+              id: 'co-s',
+              paymentReady: true,
+              stripeCustomerId: 'cus_1',
+              stripeDefaultPaymentMethodId: 'pm_1',
+            },
+          }),
+        },
+        paymentEvent: { findUnique: jest.fn().mockResolvedValue(null) },
+        job: {
+          findFirst: jest.fn().mockResolvedValue({
+            id: 'job-1',
+            status: JobStatus.BIDDING,
+            assignment: null,
+            pickupAt: new Date('2026-12-01T02:00:00.000Z'),
+            routeDurationMinutes: 60,
+            routeFatigueBreakMinutes: 0,
+            proposals: [
+              {
+                id: 'prop-1',
+                status: ProposalStatus.SUBMITTED,
+                carrierCompanyId: 'co-c',
+                vehicleId: 'veh-1',
+                driverId: 'drv-1',
+                amountIncGstCents: 11000,
+                amountExGstCents: 10000,
+                amountGstCents: 1000,
+              },
+            ],
+          }),
+        },
+        driverScheduleEntry: {
+          findFirst: jest.fn().mockResolvedValue({
+            id: 'sched-1',
+            type: 'ANNUAL_LEAVE',
+            startAt: new Date('2026-12-01T00:00:00.000Z'),
+            endAt: new Date('2026-12-02T00:00:00.000Z'),
+            reason: 'Holiday',
+          }),
+        },
+        assignment: { findFirst: jest.fn().mockResolvedValue(null) },
+      };
+      try {
+        await makeService(prisma).acceptProposal(senderPrincipal, 'job-1', 'prop-1');
+        fail('expected DRIVER_UNAVAILABLE_SCHEDULED');
+      } catch (err) {
+        expect(err).toBeInstanceOf(BadRequestException);
+        expect((err as BadRequestException).getResponse()).toMatchObject({
+          code: 'DRIVER_UNAVAILABLE_SCHEDULED',
+        });
+      }
+    });
+
+    it('rejects when vehicle is busy elsewhere at accept', async () => {
+      const prisma = {
+        isConnected: () => true,
+        user: {
+          findUnique: jest.fn().mockResolvedValue({
+            id: 'user-sender',
+            companyId: 'co-s',
+            company: {
+              id: 'co-s',
+              paymentReady: true,
+              stripeCustomerId: 'cus_1',
+              stripeDefaultPaymentMethodId: 'pm_1',
+            },
+          }),
+        },
+        paymentEvent: { findUnique: jest.fn().mockResolvedValue(null) },
+        job: {
+          findFirst: jest.fn().mockResolvedValue({
+            id: 'job-1',
+            status: JobStatus.BIDDING,
+            assignment: null,
+            pickupAt: new Date('2026-12-01T02:00:00.000Z'),
+            routeDurationMinutes: 60,
+            routeFatigueBreakMinutes: 0,
+            proposals: [
+              {
+                id: 'prop-1',
+                status: ProposalStatus.SUBMITTED,
+                carrierCompanyId: 'co-c',
+                vehicleId: 'veh-1',
+                driverId: 'drv-1',
+                amountIncGstCents: 11000,
+                amountExGstCents: 10000,
+                amountGstCents: 1000,
+              },
+            ],
+          }),
+        },
+        driverScheduleEntry: { findFirst: jest.fn().mockResolvedValue(null) },
+        assignment: {
+          findFirst: jest
+            .fn()
+            .mockResolvedValueOnce(null) // leave/window assignment collision free
+            .mockResolvedValueOnce({
+              id: 'asg-other',
+              jobId: 'job-other',
+              status: AssignmentStatus.LOCKED,
+            }),
+        },
+        proposal: { findFirst: jest.fn().mockResolvedValue(null) },
+      };
+      try {
+        await makeService(prisma).acceptProposal(senderPrincipal, 'job-1', 'prop-1');
+        fail('expected VEHICLE_BUSY');
+      } catch (err) {
+        expect(err).toBeInstanceOf(ConflictException);
+        expect((err as ConflictException).getResponse()).toMatchObject({
+          code: 'VEHICLE_BUSY',
+        });
+      }
+    });
+
     it('creates Stripe customer on the fly when sender has no stripeCustomerId and returns requires_payment_method message', async () => {
       const createCustomer = jest.fn().mockResolvedValue({ id: 'cus_auto', mock: false });
       const stripeWithCustomer = { ...stripe, createCustomer };

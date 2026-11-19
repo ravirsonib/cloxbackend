@@ -48,6 +48,11 @@ import {
   isAssignmentPendingPayment,
 } from '../jobs/assignment-status.util';
 import {
+  assertCrewNotBusyElsewhere,
+  assertDriverAvailabilityForWindow,
+  calculateJobExecutionWindow,
+} from '../matching/driver-schedule.util';
+import {
   isMockStripeCustomerId,
   isMockStripePaymentMethodId,
 } from './stripe-mock-ids.util';
@@ -260,6 +265,18 @@ export class PaymentsService {
     if (!proposal || proposal.status !== ProposalStatus.SUBMITTED) {
       throw new NotFoundException('Proposal not found or not submittable');
     }
+
+    // Re-check leave/busy at accept (bid→accept race); same gates as bid submit + reassign.
+    await this.assertProposalCrewAvailableAtAccept({
+      jobId: job.id,
+      vehicleId: proposal.vehicleId,
+      driverId: proposal.driverId,
+      pickupAt: job.pickupAt,
+      routeDurationMinutes: job.routeDurationMinutes,
+      routeFatigueBreakMinutes: job.routeFatigueBreakMinutes,
+      excludeAssignmentId:
+        job.assignment?.status === AssignmentStatus.CANCELLED ? job.assignment.id : null,
+    });
 
     const feeApplied = this.revenueSplit
       ? await this.revenueSplit.resolveSenderFee({
@@ -2231,6 +2248,43 @@ export class PaymentsService {
         openTripExceptionKind: openTripException?.kind ?? null,
         exceptions: a.trip?.surcharges ?? [],
       };
+    });
+  }
+
+  /**
+   * Bid→accept race guard: same leave/busy/open-bid gates as submitProposal + reassign.
+   */
+  private async assertProposalCrewAvailableAtAccept(params: {
+    jobId: string;
+    vehicleId: string | null;
+    driverId: string | null;
+    pickupAt: Date | null;
+    routeDurationMinutes: number | null;
+    routeFatigueBreakMinutes: number | null;
+    excludeAssignmentId?: string | null;
+  }) {
+    if (!params.vehicleId || !params.driverId) {
+      throw new BadRequestException({
+        message: 'Proposal must have vehicle and driver before accept',
+        code: 'CREW_REQUIRED_FOR_ACCEPT',
+      });
+    }
+    const executionWindow = calculateJobExecutionWindow({
+      pickupAt: params.pickupAt,
+      routeDurationMinutes: params.routeDurationMinutes,
+      routeFatigueBreakMinutes: params.routeFatigueBreakMinutes,
+    });
+    await assertDriverAvailabilityForWindow(this.prisma, {
+      driverId: params.driverId,
+      windowStart: executionWindow.windowStart,
+      windowEnd: executionWindow.windowEnd,
+      excludeJobId: params.jobId,
+    });
+    await assertCrewNotBusyElsewhere(this.prisma, {
+      vehicleId: params.vehicleId,
+      driverId: params.driverId,
+      excludeJobId: params.jobId,
+      excludeAssignmentId: params.excludeAssignmentId ?? undefined,
     });
   }
 

@@ -16,6 +16,7 @@ import { IdentityModule } from './modules/identity/identity.module';
 import { JobsModule } from './modules/jobs/jobs.module';
 import { LeadsModule } from './modules/leads/leads.module';
 import { MatchingModule } from './modules/matching/matching.module';
+import { RateFloorModule } from './modules/rate-floor/rate-floor.module';
 import { NotificationsModule } from './modules/notifications/notifications.module';
 import { OpsModule } from './modules/ops/ops.module';
 import { GrowthModule } from './modules/growth/growth.module';
@@ -69,6 +70,7 @@ import { AttributionModule } from './common/services/attribution.module';
     DocumentsModule,
     JobsModule,
     MatchingModule,
+    RateFloorModule,
     TripsModule,
     ExceptionsModule,
     PaymentsModule,

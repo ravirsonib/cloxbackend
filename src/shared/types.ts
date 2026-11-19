@@ -1706,6 +1706,13 @@ export const jobCreateSchema = z
     ]),
     siteDisclaimerAccepted: z.literal(true),
     stops: z.array(jobStopSchema).min(2).max(50),
+    /** Wave 2.4 — return-leg / backhaul (optional; default false). */
+    isBackhaul: z.boolean().optional(),
+    /** Wave 2.3 — specialised body override (otherwise inferred from load types / class). */
+    bodyCode: z
+      .enum(['DRY', 'TAILLIFT', 'REEFER', 'TIPPER', 'CRANE', 'TANKER', 'DG', 'LIVESTOCK'])
+      .optional()
+      .nullable(),
   })
   .superRefine((val, ctx) => {
     if (
@@ -1785,6 +1792,79 @@ export const jobRouteEstimateSchema = z
   });
 
 export type JobRouteEstimateInput = z.infer<typeof jobRouteEstimateSchema>;
+
+/** Preview sender-facing hard rate floor (Wave 1 + W2 modifiers). */
+export const rateFloorPreviewSchema = z.object({
+  vehicleClassCode: vehicleClassField,
+  pricingModel: z.enum(['PER_KM', 'HOURLY']),
+  distanceKm: z.number().min(0).max(20_000).optional().nullable(),
+  billableHours: z.number().min(0).max(500).optional().nullable(),
+  /** ISO pickup/start time for labour period (Wave 2.2). */
+  at: z
+    .string()
+    .datetime({ offset: true })
+    .or(z.string().regex(/^\d{4}-\d{2}-\d{2}T/))
+    .optional()
+    .nullable(),
+  pickupState: z.string().trim().toUpperCase().regex(/^[A-Z]{2,3}$/).optional().nullable(),
+  bodyCode: z
+    .enum(['DRY', 'TAILLIFT', 'REEFER', 'TIPPER', 'CRANE', 'TANKER', 'DG', 'LIVESTOCK'])
+    .optional()
+    .nullable(),
+  requiresReefer: z.boolean().optional().nullable(),
+  requiresDg: z.boolean().optional().nullable(),
+  backhaul: z.boolean().optional().nullable(),
+});
+
+export type RateFloorPreviewInput = z.infer<typeof rateFloorPreviewSchema>;
+
+export const rateFloorDraftCreateSchema = z.object({
+  label: z.string().trim().min(1).max(120).optional(),
+});
+
+export type RateFloorDraftCreateInput = z.infer<typeof rateFloorDraftCreateSchema>;
+
+export const rateFloorLinePatchSchema = z.object({
+  hourlyFloorCents: z.number().int().positive().max(10_000_000).optional(),
+  kmFloorCents: z.number().int().positive().max(1_000_000).optional(),
+  variableKmCents: z.number().int().min(0).max(1_000_000).optional(),
+  litresPerKm: z.number().min(0).max(5).optional(),
+  basis: z.enum(['V', 'W', 'D']).optional(),
+});
+
+export type RateFloorLinePatchInput = z.infer<typeof rateFloorLinePatchSchema>;
+
+export const fuelIndexCreateSchema = z.object({
+  weekStart: z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/, 'weekStart must be YYYY-MM-DD')
+    .optional(),
+  dieselCpl: z.number().min(50).max(500),
+  note: z.string().trim().max(500).optional(),
+  confirm: z.boolean().optional(),
+});
+
+export type FuelIndexCreateInput = z.infer<typeof fuelIndexCreateSchema>;
+
+export const rateFloorOverrideCreateSchema = z.object({
+  jobId: z.string().uuid(),
+  reason: z.string().trim().min(8).max(500),
+  expiresAt: z
+    .string()
+    .datetime({ offset: true })
+    .or(z.string().regex(/^\d{4}-\d{2}-\d{2}T/)),
+  floorExGstCentsOverride: z.number().int().min(0).max(50_000_000),
+});
+
+export type RateFloorOverrideCreateInput = z.infer<typeof rateFloorOverrideCreateSchema>;
+
+export const publicHolidayUpsertSchema = z.object({
+  state: z.string().trim().toUpperCase().min(2).max(10),
+  holidayDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  name: z.string().trim().min(2).max(120),
+});
+
+export type PublicHolidayUpsertInput = z.infer<typeof publicHolidayUpsertSchema>;
 
 export const proposalSubmitSchema = z.object({
   jobId: z.string().uuid(),
