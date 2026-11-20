@@ -34,6 +34,7 @@ import {
   assertAssignmentCompliance,
   evaluateDriverLicenceFields,
 } from '../jobs/assignment-gates';
+import { buildStopLoadProfile } from '../jobs/job-stop-load.util';
 import {
   assertCrewNotBusyElsewhere,
   assertDriverAvailabilityForWindow,
@@ -149,6 +150,7 @@ export class MatchingService {
             carrierCompanyId: company.id,
             status: ProposalStatus.SUBMITTED,
           },
+          select: { id: true, amountIncGstCents: true },
           take: 1,
         },
       },
@@ -194,6 +196,14 @@ export class MatchingService {
           j.estimateIncGstCents != null && discount > 0
             ? Math.round((j.estimateIncGstCents * (100 - discount)) / 100)
             : j.estimateIncGstCents;
+        const myBidIncGstCents = j.proposals[0]?.amountIncGstCents ?? null;
+        const estimateNetToCarrierCents = discountedEstimate
+          ? carrierNetPayoutCents(discountedEstimate, effectiveCarrierPercent)
+          : null;
+        const myNetToCarrierCents =
+          myBidIncGstCents != null
+            ? carrierNetPayoutCents(myBidIncGstCents, effectiveCarrierPercent)
+            : null;
         return {
           id: j.id,
           title: j.title,
@@ -215,9 +225,14 @@ export class MatchingService {
           routeFatigueBreakMinutes: j.routeFatigueBreakMinutes,
           billableHours: j.billableHours,
           estimateIncGstCents: j.estimateIncGstCents,
-          estimateNetToCarrierCents: discountedEstimate
-            ? carrierNetPayoutCents(discountedEstimate, effectiveCarrierPercent)
-            : null,
+          /** Guide net from sender estimate (pre-bid). */
+          estimateNetToCarrierCents,
+          /** Carrier's submitted bid gross (inc GST), when alreadyBid. */
+          myBidIncGstCents,
+          /** Carrier net from their bid — use this for “your earnings” once bid exists. */
+          myNetToCarrierCents,
+          /** Prefer bid net when present so board matches settlement base. */
+          displayNetToCarrierCents: myNetToCarrierCents ?? estimateNetToCarrierCents,
           marketplacePriority: j.marketplacePriority,
           rescueDiscountPercent: j.rescueDiscountPercent,
           minBidIncGstCents: discountedEstimate,
@@ -226,6 +241,26 @@ export class MatchingService {
           pickupAt: j.pickupAt,
           publishedAt: j.publishedAt,
           alreadyBid: j.proposals.length > 0,
+          loadProfile: (() => {
+            const profile = buildStopLoadProfile(
+              j.stops.map((s) => ({
+                sequence: s.sequence,
+                stopType: s.stopType,
+                weightKg: (s as { weightKg?: number | null }).weightKg ?? null,
+              })),
+            );
+            if (!profile.hasStopWeights) return null;
+            return {
+              peakOnboardKg: profile.peakOnboardKg,
+              totalPickupKg: profile.totalPickupKg,
+              segments: profile.segments.map((seg) => ({
+                sequence: seg.sequence,
+                stopType: seg.stopType,
+                weightKg: seg.weightKg,
+                onboardKgAfter: seg.onboardKgAfter,
+              })),
+            };
+          })(),
           stops: j.stops.map((s) => ({
             sequence: s.sequence,
             stopType: s.stopType,
@@ -233,6 +268,7 @@ export class MatchingService {
             suburb: s.suburb,
             state: s.state,
             postcode: s.postcode,
+            weightKg: (s as { weightKg?: number | null }).weightKg ?? null,
           })),
           stopsSummary: j.stops
             .map((s) =>

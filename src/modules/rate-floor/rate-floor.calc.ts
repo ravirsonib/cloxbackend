@@ -1,4 +1,8 @@
-import { loadedHourlyFloorCents } from './rate-floor.labour';
+import {
+  loadedHourlyFloorCents,
+  walkHourlyLabourBlocks,
+  type HourlyLabourBlock,
+} from './rate-floor.labour';
 
 /** Round money up to whole cents (never under-floor). */
 export function ceilCents(value: number): number {
@@ -38,11 +42,23 @@ export type RateFloorFuelInput = {
   weekStart?: string | null;
 };
 
-/** Wave 2.2 — labour period already resolved. */
+/** Wave 2.2 — labour period already resolved (single start period / PER_KM 1h floor). */
 export type RateFloorLabourInput = {
   periodCode: string;
   multiplier: number;
   labourRateHrCents: number;
+};
+
+/**
+ * W3.3 — HOURLY hour-block labour walk (IT §4.1 / T12).
+ * When present, each ≤1h block resolves its own period; OT &gt;7.6h deferred.
+ */
+export type RateFloorLabourWalkInput = {
+  startAt: Date;
+  timeZone: string;
+  labourRateHrCents: number;
+  multipliers: Array<{ periodCode: string; multiplier: number }>;
+  holidayDates?: ReadonlySet<string>;
 };
 
 /** Wave 2.3 — body loading already resolved. */
@@ -61,6 +77,8 @@ export type RateFloorCalcInput = {
   gstPercent: number;
   fuel?: RateFloorFuelInput | null;
   labour?: RateFloorLabourInput | null;
+  /** Preferred for HOURLY when pickup time is known. */
+  labourWalk?: RateFloorLabourWalkInput | null;
   body?: RateFloorBodyInput | null;
   /** Wave 2.4 — PER_KM return-leg discount. */
   backhaul?: boolean;
@@ -139,10 +157,11 @@ function applyBodyLoading(
 }
 
 /**
- * Hard-floor total (PDF §5.3 + W2.1 fuel + W2.2 labour + W2.3 body + W2.4 backhaul).
+ * Hard-floor total (PDF §5.3 + W2.1 fuel + W2.2 labour + W2.3 body + W2.4 backhaul + W3.3 hour blocks).
+ * TODO(W3.3+/Legal): OT beyond 7.6h/day (1.5 then 2.0 on labour) — not applied here.
  */
 export function calculateRateFloor(input: RateFloorCalcInput): RateFloorCalcResult {
-  const { line, version, pricingModel, gstPercent, fuel, labour, body } = input;
+  const { line, version, pricingModel, gstPercent, fuel, labour, labourWalk, body } = input;
   const versionMinHours = version.minHours > 0 ? version.minHours : 4;
   const bodyMin = body?.minHours != null && body.minHours > 0 ? body.minHours : 0;
   const minHours = Math.max(versionMinHours, bodyMin);
@@ -155,19 +174,63 @@ export function calculateRateFloor(input: RateFloorCalcInput): RateFloorCalcResu
   if (pricingModel === 'HOURLY') {
     const hoursRaw = input.billableHours ?? minHours;
     const hours = Math.max(hoursRaw, minHours);
-    const baseEx = ceilCents(hours * loadedHourly);
+
+    let baseEx: number;
+    let hourBlocks: HourlyLabourBlock[] | null = null;
+    let labourAddTotal = labourAddCents;
+    let loadedHourlyForBreakdown = loadedHourly;
+    let labourPeriodCode: string | null = labour?.periodCode ?? null;
+    let labourMultiplier: number | null = labour?.multiplier ?? 1;
+
+    if (labourWalk?.startAt instanceof Date && !Number.isNaN(labourWalk.startAt.getTime())) {
+      hourBlocks = walkHourlyLabourBlocks({
+        startAt: labourWalk.startAt,
+        hoursCharged: hours,
+        timeZone: labourWalk.timeZone,
+        baseHourlyFloorCents: line.hourlyFloorCents,
+        labourRateHrCents: labourWalk.labourRateHrCents,
+        multipliers: labourWalk.multipliers,
+        holidayDates: labourWalk.holidayDates,
+      });
+      baseEx = hourBlocks.reduce((sum, b) => sum + b.blockExGstCents, 0);
+      labourAddTotal = hourBlocks.reduce(
+        (sum, b) => sum + Math.ceil(b.blockHours * b.labourAddCents - 1e-9),
+        0,
+      );
+      const periods = [...new Set(hourBlocks.map((b) => b.periodCode))];
+      labourPeriodCode = periods.length === 1 ? periods[0]! : 'MIXED';
+      labourMultiplier = periods.length === 1 ? hourBlocks[0]?.multiplier ?? 1 : null;
+      loadedHourlyForBreakdown =
+        hours > 0 ? Math.ceil(baseEx / hours - 1e-9) : line.hourlyFloorCents;
+    } else {
+      baseEx = ceilCents(hours * loadedHourly);
+    }
+
     const { floorExGstCents, bodyAddCents } = applyBodyLoading(baseEx, body);
     const modifiersApplied: string[] = [];
-    if (labourAddCents > 0) modifiersApplied.push('LABOUR');
+    if (labourAddTotal > 0) modifiersApplied.push('LABOUR');
+    if (hourBlocks && hourBlocks.length > 1) {
+      const distinct = new Set(hourBlocks.map((b) => b.periodCode));
+      if (distinct.size > 1) modifiersApplied.push('HOUR_BLOCKS');
+    }
     if (bodyAddCents > 0) modifiersApplied.push('BODY');
     const breakdown = {
       mode: 'HOURLY',
       vehicleClassCode: line.vehicleClassCode,
       hourlyFloorCents: line.hourlyFloorCents,
-      loadedHourlyFloorCents: loadedHourly,
-      labourPeriodCode: labour?.periodCode ?? null,
-      labourMultiplier: labour?.multiplier ?? 1,
-      labourAddCents,
+      loadedHourlyFloorCents: loadedHourlyForBreakdown,
+      labourPeriodCode,
+      labourMultiplier,
+      labourAddCents: labourAddTotal,
+      hourBlocks: hourBlocks?.map((b) => ({
+        at: b.atIso,
+        localDate: b.localDate,
+        periodCode: b.periodCode,
+        multiplier: b.multiplier,
+        blockHours: b.blockHours,
+        loadedHourlyFloorCents: b.loadedHourlyFloorCents,
+        blockExGstCents: b.blockExGstCents,
+      })) ?? null,
       bodyCode: body?.bodyCode ?? 'DRY',
       bodyLoadingPct: body?.loadingPct ?? 0,
       bodyAddCents,
@@ -177,6 +240,8 @@ export function calculateRateFloor(input: RateFloorCalcInput): RateFloorCalcResu
       minHours,
       floorExGstCents,
       modifiersApplied,
+      /** OT &gt;7.6h/day not applied — Legal/Award deferred. */
+      overtimeBeyond76Deferred: true,
     };
     return {
       floorExGstCents,

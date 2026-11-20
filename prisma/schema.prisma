@@ -385,6 +385,8 @@ enum NotificationType {
   TRIP_EXCEPTION_ESCALATED
   FLEET_RWC_REVIEW_OPENED
   DRIVER_LICENCE_REVIEW_OPENED
+  /// W3.6 — diesel index older than fuelStaleDays (Ops Super inbox).
+  FUEL_INDEX_STALE
 }
 
 /// In-app inbox row (email remains separate via NotificationsService).
@@ -973,6 +975,9 @@ model Driver {
   baseTimezone     String?      @default("Australia/Sydney")
   fatigueScheme    FatigueScheme @default(STANDARD)
   bfmAccreditationNumber String?
+  /// Optional face / profile photo (ComplianceDocument SELFIE) — not licence scan
+  facePhotoDocumentId String? @unique
+  facePhotoDocument   ComplianceDocument? @relation("DriverFacePhoto", fields: [facePhotoDocumentId], references: [id], onDelete: SetNull)
   createdAt DateTime     @default(now())
   updatedAt DateTime     @updatedAt
 
@@ -1062,6 +1067,9 @@ model ComplianceDocument {
 
   jobsAsDgDocument      Job[]      @relation("JobDgDocument")
   proposalsAsDgDocument Proposal[] @relation("ProposalDgDocument")
+  /// Reverse of Driver.facePhotoDocumentId (optional profile selfie)
+  facePhotoOfDriver     Driver?    @relation("DriverFacePhoto")
+
 
   @@index([companyId, status])
   @@index([vehicleId])
@@ -1250,6 +1258,8 @@ model JobStop {
   /// Drop-level receiver (multi-drop); job-level used when null
   receiverName  String?
   receiverEmail String?
+  /// PICKUP = load on; DROPOFF = load off (kg). Null = legacy job-level weight only.
+  weightKg      Float?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 

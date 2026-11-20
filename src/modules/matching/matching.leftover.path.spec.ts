@@ -77,7 +77,7 @@ function boardJob(partial: {
       ? { code: partial.originRegionCode }
       : null,
     stops: [{ stopType: 'PICKUP', suburb: 'Melbourne' }],
-    proposals: [{ id: 'existing-prop' }],
+    proposals: [{ id: 'existing-prop', amountIncGstCents: 12_200 }],
   };
 }
 
@@ -120,6 +120,47 @@ describe('MatchingService leftover paths', () => {
       estimateIncGstCents: null,
       estimateNetToCarrierCents: null,
       alreadyBid: true,
+      myBidIncGstCents: 12_200,
+      myNetToCarrierCents: 8_540,
+      displayNetToCarrierCents: 8_540,
+    });
+  });
+
+  it('listBoard prefers bid net over estimate net when alreadyBid', async () => {
+    const prisma = {
+      isConnected: () => true,
+      user: {
+        findUnique: jest.fn().mockResolvedValue(
+          carrierUser({
+            capabilities: ['DG'],
+            serviceRegionCodes: ['VIC'],
+            homeRegionCode: 'VIC',
+          }),
+        ),
+      },
+      job: {
+        findMany: jest.fn().mockResolvedValue([
+          boardJob({
+            id: 'job-bid',
+            originRegionCode: 'VIC',
+            estimateIncGstCents: 1_040_375,
+          }),
+        ]),
+      },
+    };
+    const service = new MatchingService(
+      prisma as never,
+      { recordPlatform: jest.fn() } as never,
+      { getBidEligibility: jest.fn().mockResolvedValue({ canBid: true, goNoGo: {} }) } as never,
+      {} as never,
+    );
+
+    const result = await service.listBoard(carrierPrincipal);
+    expect(result.jobs[0]).toMatchObject({
+      estimateNetToCarrierCents: 728_263,
+      myBidIncGstCents: 12_200,
+      myNetToCarrierCents: 8_540,
+      displayNetToCarrierCents: 8_540,
     });
   });
 
@@ -213,6 +254,9 @@ describe('MatchingService leftover paths', () => {
     const jobsService = {
       assertJobOpenForBidding: jest.fn().mockResolvedValue(openJob),
       getMinBaseCents: jest.fn().mockResolvedValue(20_000),
+      quoteForVehicleClass: jest.fn().mockResolvedValue({
+        estimateIncGstCents: 15_000,
+      }),
     };
     const service = new MatchingService(
       prisma as never,

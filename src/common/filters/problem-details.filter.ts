@@ -67,6 +67,7 @@ export class ProblemDetailsFilter implements ExceptionFilter {
         'goNoGo',
         'minBaseCents',
         'recommended',
+        'existingVehicleId',
       ]) {
         if (key in extra && extra[key] !== undefined) {
           body[key] = extra[key];

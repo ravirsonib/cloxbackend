@@ -584,7 +584,11 @@ export class DocumentsService {
       await this.attachVehicleRwcToFleetCaseIfBidEligible(updated.companyId, updated.id);
     }
 
-    if (updated.driverId && updated.companyId) {
+    if (
+      updated.driverId &&
+      updated.companyId &&
+      updated.docType !== ComplianceDocType.SELFIE
+    ) {
       await this.attachDriverDocToReviewCaseIfCarrier(
         updated.companyId,
         updated.driverId,
@@ -776,6 +780,8 @@ export class DocumentsService {
         where: {
           companyId,
           driverId: { not: null },
+          // Face / profile selfies are not Ops licence-review artefacts.
+          docType: { not: ComplianceDocType.SELFIE },
           status: {
             in: [ComplianceDocStatus.UPLOADED, ComplianceDocStatus.UNDER_REVIEW],
           },

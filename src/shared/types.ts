@@ -7,6 +7,7 @@ import {
   MAX_JOB_WIDTH_CM,
   chargeableWeightKg,
 } from './job-cargo.limits';
+import { buildStopLoadProfile } from './job-stop-load';
 import {
   TRIP_SAFETY_CHECK_ITEM_IDS,
   hasAllTripSafetyCheckItems,
@@ -260,6 +261,7 @@ export const AuditAction = {
   DISPUTE_CLOSED_LOCAL: 'dispute.closed_local',
   SETTLEMENT_CYCLE_RUN: 'settlement.cycle_run',
   RECONCILIATION_RUN: 'settlement.reconciliation_run',
+  FINANCE_LEDGER_EXPORTED: 'finance.ledger_exported',
 } as const;
 
 export type AuditAction = (typeof AuditAction)[keyof typeof AuditAction];
@@ -1496,6 +1498,8 @@ export const driverProfileSchema = z
     nhvrAcknowledged: z.literal(true),
     /** Required DRIVER_LICENCE document id after upload */
     licenceDocumentId: z.string().uuid(),
+    /** Optional face / profile photo (SELFIE) — not the licence scan */
+    facePhotoDocumentId: z.string().uuid().optional().nullable(),
   })
   .superRefine((val, ctx) => {
     if (!isValidAuPostcodeForState(val.postcode, val.state)) {
@@ -1530,6 +1534,8 @@ const jobStopSchema = z
     lng: z.number().min(-180).max(180),
     receiverName: z.string().trim().min(2).max(120).optional(),
     receiverEmail: z.string().trim().email().optional(),
+    /** PICKUP = load on; DROPOFF = load off (kg). Required for PICKUP/DROPOFF. */
+    weightKg: z.number().positive().max(MAX_JOB_DEAD_WEIGHT_KG).optional().nullable(),
   })
   .superRefine((stop, ctx) => {
     if (!isValidAuPostcodeForState(stop.postcode, stop.state)) {
@@ -1538,6 +1544,15 @@ const jobStopSchema = z
         path: ['postcode'],
         message: `Invalid postcode ${stop.postcode} for state ${stop.state}`,
       });
+    }
+    if (stop.stopType === 'PICKUP' || stop.stopType === 'DROPOFF') {
+      if (stop.weightKg == null || !Number.isFinite(stop.weightKg) || stop.weightKg <= 0) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['weightKg'],
+          message: `${stop.stopType} requires a positive weightKg`,
+        });
+      }
     }
   });
 
@@ -1571,6 +1586,25 @@ function refineJobStops(
   }
 }
 
+function refineJobStopLoadProfile(
+  val: {
+    stops: Array<{ sequence?: number; stopType: string; weightKg?: number | null }>;
+  },
+  ctx: z.RefinementCtx,
+) {
+  const profile = buildStopLoadProfile(val.stops);
+  if (!profile.hasStopWeights) return;
+  if (!profile.ok) {
+    for (const message of profile.errors) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message,
+        path: ['stops'],
+      });
+    }
+  }
+}
+
 const jobCargoFieldsSchema = z.object({
   deadWeightKg: z.number().positive().max(MAX_JOB_DEAD_WEIGHT_KG),
   lengthCm: z.number().positive().max(MAX_JOB_LENGTH_CM),
@@ -1598,7 +1632,12 @@ function refineJobCargoChargeable(
 }
 
 /** Preview recommend — same cargo caps as job create (no BDOUBLE for over-limit input). */
-export const jobRecommendSchema = jobCargoFieldsSchema.superRefine(refineJobCargoChargeable);
+export const jobRecommendSchema = jobCargoFieldsSchema
+  .extend({
+    /** When set (stop load profile peak), class recommend uses max(peak, volumetric). */
+    peakOnboardKg: z.number().positive().max(MAX_JOB_DEAD_WEIGHT_KG).optional(),
+  })
+  .superRefine(refineJobCargoChargeable);
 
 export type JobRecommendInput = z.infer<typeof jobRecommendSchema>;
 
@@ -1730,6 +1769,7 @@ export const jobCreateSchema = z
       requireHourlyPattern: true,
       hourlyPattern: val.hourlyPattern,
     });
+    refineJobStopLoadProfile(val, ctx);
     refineJobCargoChargeable(val, ctx);
   });
 
@@ -1833,6 +1873,29 @@ export const rateFloorLinePatchSchema = z.object({
 });
 
 export type RateFloorLinePatchInput = z.infer<typeof rateFloorLinePatchSchema>;
+
+export const rateFloorBodyPatchSchema = z.object({
+  loadingPct: z.number().min(0).max(200).optional(),
+  minHours: z.number().min(0).max(24).nullable().optional(),
+});
+
+export type RateFloorBodyPatchInput = z.infer<typeof rateFloorBodyPatchSchema>;
+
+export const rateFloorChecksQuerySchema = z.object({
+  jobId: z.string().uuid().optional(),
+  result: z.enum(['PASS', 'REJECT', 'OVERRIDE']).optional(),
+  from: z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/)
+    .optional(),
+  to: z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/)
+    .optional(),
+  limit: z.coerce.number().int().min(1).max(500).optional(),
+});
+
+export type RateFloorChecksQuery = z.infer<typeof rateFloorChecksQuerySchema>;
 
 export const fuelIndexCreateSchema = z.object({
   weekStart: z

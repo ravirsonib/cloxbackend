@@ -2,13 +2,16 @@ import {
   Body,
   Controller,
   Get,
+  Header,
   Param,
   ParseUUIDPipe,
   Post,
   Query,
+  Res,
   UseGuards,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
+import type { Response } from 'express';
 import {
   AdminRole,
   AppRole,
@@ -110,6 +113,94 @@ export class SettlementsController {
   ) {
     if (!this.financeService) throw new Error('FinanceService unavailable');
     return this.financeService.getSenderFinance(principal, query);
+  }
+
+  @Get('finance/super/export')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(AdminRole.SUPER_ADMIN)
+  @Header('Content-Type', 'text/csv; charset=utf-8')
+  @ApiOperation({
+    summary: 'Export Super Admin period-filtered finance ledger as CSV (AUD cents)',
+  })
+  async exportSuperFinance(
+    @CurrentPrincipal() principal: AuthenticatedPrincipal,
+    @Query(new ZodValidationPipe(financeQuerySchema)) query: FinanceQuery,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    if (!this.financeService) throw new Error('FinanceService unavailable');
+    const { csv, filename } = await this.financeService.exportSuperFinanceCsv(
+      principal,
+      query,
+    );
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    return csv;
+  }
+
+  @Get('finance/partner/export')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(AdminRole.SUPER_ADMIN, AdminRole.STATE_MASTER, AdminRole.LOCAL_BDE)
+  @Header('Content-Type', 'text/csv; charset=utf-8')
+  @ApiOperation({
+    summary: 'Export partner commission ledger CSV for the selected period',
+  })
+  async exportPartnerFinance(
+    @CurrentPrincipal() principal: AuthenticatedPrincipal,
+    @Query(new ZodValidationPipe(financeQuerySchema)) query: FinanceQuery,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    if (!this.financeService) throw new Error('FinanceService unavailable');
+    const { csv, filename } = await this.financeService.exportPartnerFinanceCsv(
+      principal,
+      query,
+    );
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    return csv;
+  }
+
+  @Get('finance/carrier/export')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(AppRole.TRANSPORT_COMPANY, AdminRole.SUPER_ADMIN)
+  @Header('Content-Type', 'text/csv; charset=utf-8')
+  @ApiOperation({
+    summary: 'Export carrier settlement / transfer ledger CSV for the selected period',
+  })
+  async exportCarrierFinance(
+    @CurrentPrincipal() principal: AuthenticatedPrincipal,
+    @Query(new ZodValidationPipe(financeQuerySchema)) query: FinanceQuery,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    if (!this.financeService) throw new Error('FinanceService unavailable');
+    const { csv, filename } = await this.financeService.exportCarrierFinanceCsv(
+      principal,
+      query,
+    );
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    return csv;
+  }
+
+  @Get('finance/sender/export')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(AppRole.SENDER, AdminRole.SUPER_ADMIN)
+  @Header('Content-Type', 'text/csv; charset=utf-8')
+  @ApiOperation({
+    summary: 'Export sender charge / surcharge ledger CSV for the selected period',
+  })
+  async exportSenderFinance(
+    @CurrentPrincipal() principal: AuthenticatedPrincipal,
+    @Query(new ZodValidationPipe(financeQuerySchema)) query: FinanceQuery,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    if (!this.financeService) throw new Error('FinanceService unavailable');
+    const { csv, filename } = await this.financeService.exportSenderFinanceCsv(
+      principal,
+      query,
+    );
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    return csv;
   }
 
   // ─── M12: Settlement Cycles & Disbursement ───────────────────────────────────

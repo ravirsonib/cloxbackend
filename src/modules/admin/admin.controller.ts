@@ -28,6 +28,8 @@ import {
   vehicleClassUpdateSchema,
   rateFloorDraftCreateSchema,
   rateFloorLinePatchSchema,
+  rateFloorBodyPatchSchema,
+  rateFloorChecksQuerySchema,
   fuelIndexCreateSchema,
   rateFloorOverrideCreateSchema,
   publicHolidayUpsertSchema,
@@ -45,6 +47,8 @@ import {
   type VehicleClassUpdateInput,
   type RateFloorDraftCreateInput,
   type RateFloorLinePatchInput,
+  type RateFloorBodyPatchInput,
+  type RateFloorChecksQuery,
   type FuelIndexCreateInput,
   type RateFloorOverrideCreateInput,
   type PublicHolidayUpsertInput,
@@ -302,6 +306,16 @@ export class AdminController {
     return this.rateFloor.updateDraftLine(id, code, body);
   }
 
+  @Patch('rate-floor/versions/:id/body/:code')
+  @ApiOperation({ summary: 'Update a DRAFT body loading % / minHours (W3.4)' })
+  patchRateFloorBody(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('code') code: string,
+    @Body(new ZodValidationPipe(rateFloorBodyPatchSchema)) body: RateFloorBodyPatchInput,
+  ) {
+    return this.rateFloor.updateDraftBodyLoading(id, code, body);
+  }
+
   @Post('rate-floor/versions/:id/submit-approval')
   @ApiOperation({ summary: 'Creator submits DRAFT for dual-approve publish (Wave 2.6)' })
   submitRateFloorApproval(
@@ -335,13 +349,19 @@ export class AdminController {
   @Get('rate-floor/checks')
   @ApiOperation({ summary: 'List rate-floor check audit rows (Super Admin)' })
   listRateFloorChecks(
-    @Query('jobId') jobId?: string,
-    @Query('result') result?: 'PASS' | 'REJECT' | 'OVERRIDE',
+    @Query(new ZodValidationPipe(rateFloorChecksQuerySchema)) query: RateFloorChecksQuery,
   ) {
-    return this.rateFloor.listChecks({
-      jobId,
-      result,
-    });
+    return this.rateFloor.listChecks(query);
+  }
+
+  @Get('rate-floor/checks/export')
+  @ApiOperation({ summary: 'Export rate-floor checks as CSV (W3.4)' })
+  @Header('Content-Type', 'text/csv; charset=utf-8')
+  @Header('Content-Disposition', 'attachment; filename="clox-rate-floor-checks.csv"')
+  exportRateFloorChecks(
+    @Query(new ZodValidationPipe(rateFloorChecksQuerySchema)) query: RateFloorChecksQuery,
+  ) {
+    return this.rateFloor.exportChecksCsv(query);
   }
 
   @Get('rate-floor/overrides')
@@ -363,6 +383,12 @@ export class AdminController {
     @CurrentAdmin() admin: AuthenticatedAdmin,
   ) {
     return this.rateFloor.createOverride(admin.id, body);
+  }
+
+  @Post('rate-floor/overrides/:id/expire')
+  @ApiOperation({ summary: 'Expire a rate-floor override now (W3.4)' })
+  expireRateFloorOverride(@Param('id', ParseUUIDPipe) id: string) {
+    return this.rateFloor.expireOverride(id);
   }
 
   @Get('public-holidays')

@@ -63,15 +63,23 @@ export class JobsController {
 
   @Post('meta/recommend')
   @ApiOperation({
-    summary: 'Recommend vehicle class from dead weight + dimensions (50 t chargeable cap)',
+    summary:
+      'Recommend vehicle class from dead weight + dimensions (50 t chargeable cap); optional peakOnboardKg for multi-stop class',
   })
   async recommend(@Body(new ZodValidationPipe(jobRecommendSchema)) body: JobRecommendInput) {
     const chargeable = chargeableWeightKg(body);
+    const volumetricKg = (body.lengthCm * body.widthCm * body.heightCm) / 4000;
+    const classWeightKg =
+      body.peakOnboardKg != null && Number.isFinite(body.peakOnboardKg)
+        ? Math.max(body.peakOnboardKg, volumetricKg)
+        : chargeable;
     const classes = await this.jobsService.getActiveVehicleClasses();
-    const recommended = recommendVehicleClass(chargeable, body, classes);
+    const recommended = recommendVehicleClass(classWeightKg, body, classes);
     const matchedClass = classes.find((c) => c.code === recommended);
     return {
       chargeableWeightKg: chargeable,
+      peakOnboardKg: body.peakOnboardKg ?? null,
+      classWeightKg,
       recommendedVehicleClass: recommended,
       maxChargeableWeightKg: matchedClass?.maxChargeableWeightKg ?? MAX_JOB_CHARGEABLE_WEIGHT_KG,
     };

@@ -1771,7 +1771,23 @@ export class AdminService {
       where: { id },
       include: {
         senderCompany: {
-          select: { id: true, legalName: true, email: true, type: true, status: true },
+          select: {
+            id: true,
+            legalName: true,
+            tradingName: true,
+            email: true,
+            phone: true,
+            type: true,
+            status: true,
+          },
+        },
+        dgDocument: {
+          select: {
+            id: true,
+            docType: true,
+            status: true,
+            originalFilename: true,
+          },
         },
         stops: { orderBy: { sequence: 'asc' } },
         proposals: {
@@ -1783,17 +1799,70 @@ export class AdminService {
             amountIncGstCents: true,
             etaMinutes: true,
             createdAt: true,
-            carrierCompany: { select: { id: true, legalName: true } },
+            carrierCompany: {
+              select: { id: true, legalName: true, tradingName: true, email: true },
+            },
+            vehicle: {
+              select: { id: true, registration: true, label: true, vehicleClass: true },
+            },
+            driver: {
+              select: {
+                id: true,
+                user: { select: { email: true, name: true, phone: true } },
+              },
+            },
+            dgDocument: {
+              select: {
+                id: true,
+                docType: true,
+                status: true,
+                originalFilename: true,
+              },
+            },
           },
         },
         assignment: {
           include: {
-            carrierCompany: { select: { id: true, legalName: true } },
-            vehicle: { select: { id: true, registration: true, vehicleClass: true } },
+            carrierCompany: {
+              select: {
+                id: true,
+                legalName: true,
+                tradingName: true,
+                email: true,
+                phone: true,
+                status: true,
+              },
+            },
+            vehicle: {
+              select: {
+                id: true,
+                registration: true,
+                label: true,
+                vehicleClass: true,
+                status: true,
+              },
+            },
             driver: {
               select: {
                 id: true,
-                user: { select: { email: true, name: true } },
+                status: true,
+                licenceClass: true,
+                user: { select: { email: true, name: true, phone: true } },
+              },
+            },
+            proposal: {
+              select: {
+                id: true,
+                amountIncGstCents: true,
+                etaMinutes: true,
+                dgDocument: {
+                  select: {
+                    id: true,
+                    docType: true,
+                    status: true,
+                    originalFilename: true,
+                  },
+                },
               },
             },
           },
@@ -1806,14 +1875,29 @@ export class AdminService {
             completedAt: true,
             safetyPassedAt: true,
             massCheckOk: true,
-            stopProgress: { select: { jobStopId: true, podStatus: true } },
+            podStorageKey: true,
+            taxInvoiceStorageKey: true,
+            runSheetStorageKey: true,
+            stopProgress: {
+              select: {
+                jobStopId: true,
+                podStatus: true,
+                signedAt: true,
+                signerName: true,
+                podFinalizedAt: true,
+                podPackageStorageKey: true,
+                signaturePdfStorageKey: true,
+                goodsPhotoRefs: true,
+              },
+            },
           },
         },
         paymentEvents: {
           orderBy: { createdAt: 'desc' },
-          take: 5,
+          take: 10,
           select: {
             id: true,
+            type: true,
             status: true,
             amountIncGstCents: true,
             stripePaymentIntentId: true,
@@ -1829,6 +1913,7 @@ export class AdminService {
     const trip = job.trip
       ? (() => {
           const { stopProgress, ...tripRest } = job.trip;
+          const stopById = new Map(stopProgress.map((p) => [p.jobStopId, p]));
           return {
             ...tripRest,
             podAwaitingExit: this.podAwaitingDriverExit({
@@ -1836,6 +1921,26 @@ export class AdminService {
               dropoffStopIds,
               stopProgress,
             }),
+            dropoffs: job.stops
+              .filter((s) => s.stopType === 'DROPOFF')
+              .map((s) => {
+                const p = stopById.get(s.id);
+                const photoCount = Array.isArray(p?.goodsPhotoRefs)
+                  ? (p!.goodsPhotoRefs as unknown[]).length
+                  : 0;
+                return {
+                  jobStopId: s.id,
+                  sequence: s.sequence,
+                  suburb: s.suburb,
+                  podStatus: p?.podStatus ?? 'PENDING',
+                  signedAt: p?.signedAt ?? null,
+                  signerName: p?.signerName ?? null,
+                  podFinalizedAt: p?.podFinalizedAt ?? null,
+                  goodsPhotoCount: photoCount,
+                  hasPodPackage: Boolean(p?.podPackageStorageKey),
+                  hasSignaturePdf: Boolean(p?.signaturePdfStorageKey),
+                };
+              }),
           };
         })()
       : null;

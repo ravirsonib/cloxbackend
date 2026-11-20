@@ -24,7 +24,94 @@ import { AuditService } from '../audit/audit.service';
 import { pickPrimaryFarePaymentEvent } from '../jobs/assignment-status.util';
 import { RevenueSplitService } from './revenue-split.service';
 import type { AuthenticatedPrincipal } from '../../common/guards/jwt-auth.guard';
-import { AppRole, type FinanceQuery } from '../../shared/types';
+import { buildCsv } from '../../shared/csv';
+import { AppRole, AuditAction, type FinanceQuery } from '../../shared/types';
+
+const FINANCE_EXPORT_ROW_LIMIT = 10_000;
+
+const FINANCE_LEDGER_HEADERS = [
+  'date',
+  'jobId',
+  'jobTitle',
+  'entryType',
+  'recipientType',
+  'companyName',
+  'amountExGstCents',
+  'gstCents',
+  'amountIncGstCents',
+  'currency',
+  'status',
+  'stripeRef',
+  'notes',
+] as const;
+
+type FinanceLedgerEntryType = 'SETTLEMENT_LINE' | 'SURCHARGE' | 'PAYMENT_EVENT';
+
+type FinanceLedgerRow = {
+  date: string;
+  jobId: string;
+  jobTitle: string;
+  entryType: FinanceLedgerEntryType;
+  recipientType: string;
+  companyName: string;
+  amountExGstCents: number;
+  gstCents: number;
+  amountIncGstCents: number;
+  currency: string;
+  status: string;
+  stripeRef: string;
+  notes: string;
+};
+
+/** AU GST inclusive → ex + GST (cents). Settlement lines store inclusive cents. */
+function splitIncGstCents(amountIncGstCents: number): {
+  amountExGstCents: number;
+  gstCents: number;
+  amountIncGstCents: number;
+} {
+  const amountExGstCents = Math.round(amountIncGstCents / 1.1);
+  return {
+    amountExGstCents,
+    gstCents: amountIncGstCents - amountExGstCents,
+    amountIncGstCents,
+  };
+}
+
+function formatExportFilename(
+  role: string,
+  query: FinanceQuery,
+  range: { startDate?: Date; endDate: Date },
+): string {
+  const stamp = (d: Date) => d.toISOString().slice(0, 10);
+  if (query.from || query.to) {
+    const from = query.from ? stamp(new Date(query.from)) : 'start';
+    const to = query.to ? stamp(new Date(query.to)) : stamp(range.endDate);
+    return `clox-finance-${role}-${from}-${to}.csv`;
+  }
+  const period = query.period ?? 'month';
+  return `clox-finance-${role}-${period}.csv`;
+}
+
+function ledgerRowsToCsv(rows: FinanceLedgerRow[]): string {
+  return buildCsv(
+    [...FINANCE_LEDGER_HEADERS],
+    rows.map((r) => [
+      r.date,
+      r.jobId,
+      r.jobTitle,
+      r.entryType,
+      r.recipientType,
+      r.companyName,
+      String(r.amountExGstCents),
+      String(r.gstCents),
+      String(r.amountIncGstCents),
+      r.currency,
+      r.status,
+      r.stripeRef,
+      r.notes,
+    ]),
+  );
+}
 
 function parseDateRange(query: FinanceQuery): { startDate?: Date; endDate: Date } {
   const now = new Date();
@@ -1010,6 +1097,485 @@ export class FinanceService {
         pendingCents: pendingSurchargesCents,
       },
       jobSpendHistory,
+    };
+  }
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // 5. PERIOD-FILTERED LEDGER CSV EXPORT (role-scoped)
+  // ───────────────────────────────────────────────────────────────────────────
+
+  private assertExportRowBudget(count: number) {
+    if (count > FINANCE_EXPORT_ROW_LIMIT) {
+      throw new BadRequestException({
+        message: `Export exceeds ${FINANCE_EXPORT_ROW_LIMIT} rows. Narrow the date range and try again.`,
+        code: 'FINANCE_EXPORT_TOO_LARGE',
+        rowCount: count,
+        limit: FINANCE_EXPORT_ROW_LIMIT,
+      });
+    }
+  }
+
+  private async auditFinanceExport(
+    actor: AuthenticatedPrincipal,
+    roleKey: string,
+    query: FinanceQuery,
+    rowCount: number,
+  ) {
+    await this.audit.recordPlatform({
+      action: AuditAction.FINANCE_LEDGER_EXPORTED,
+      actorAdminId: actor.kind === 'admin' ? actor.id : undefined,
+      actorUserId: actor.kind === 'user' ? actor.id : undefined,
+      entityType: 'FinanceExport',
+      entityId: roleKey,
+      metadata: {
+        role: roleKey,
+        period: query.period ?? null,
+        from: query.from ?? null,
+        to: query.to ?? null,
+        rowCount,
+      },
+    });
+  }
+
+  async exportSuperFinanceCsv(
+    actor: AuthenticatedPrincipal,
+    query: FinanceQuery,
+  ): Promise<{ csv: string; filename: string }> {
+    this.ensureDatabase();
+    if (actor.kind !== 'admin' || actor.role !== AdminRole.SUPER_ADMIN) {
+      throw new ForbiddenException('Super Admin required');
+    }
+
+    const range = parseDateRange(query);
+    const dateFilter = range.startDate
+      ? { gte: range.startDate, lte: range.endDate }
+      : { lte: range.endDate };
+
+    const [settlementLines, surcharges, paymentEvents, companies] = await Promise.all([
+      this.prisma.settlementLine.findMany({
+        where: {
+          createdAt: dateFilter,
+          status: { not: SettlementLineStatus.VOID },
+        },
+        include: {
+          job: {
+            select: {
+              id: true,
+              title: true,
+              senderCompanyId: true,
+              assignment: { select: { carrierCompanyId: true } },
+            },
+          },
+        },
+        orderBy: { createdAt: 'asc' },
+        take: FINANCE_EXPORT_ROW_LIMIT + 1,
+      }),
+      this.prisma.surcharge.findMany({
+        where: { createdAt: dateFilter },
+        include: {
+          job: { select: { id: true, title: true, senderCompanyId: true } },
+        },
+        orderBy: { createdAt: 'asc' },
+        take: FINANCE_EXPORT_ROW_LIMIT + 1,
+      }),
+      this.prisma.paymentEvent.findMany({
+        where: { createdAt: dateFilter },
+        include: {
+          job: { select: { id: true, title: true, senderCompanyId: true } },
+        },
+        orderBy: { createdAt: 'asc' },
+        take: FINANCE_EXPORT_ROW_LIMIT + 1,
+      }),
+      this.prisma.company.findMany({
+        select: { id: true, legalName: true, tradingName: true },
+      }),
+    ]);
+
+    this.assertExportRowBudget(
+      settlementLines.length + surcharges.length + paymentEvents.length,
+    );
+
+    const companyMap = new Map(
+      companies.map((c) => [c.id, c.tradingName || c.legalName || c.id]),
+    );
+
+    const rows: FinanceLedgerRow[] = [];
+
+    for (const line of settlementLines) {
+      const amounts = splitIncGstCents(line.amountCents);
+      const carrierId = line.job?.assignment?.carrierCompanyId;
+      const senderId = line.job?.senderCompanyId;
+      const companyName =
+        line.recipientType === SettlementRecipientType.CARRIER && carrierId
+          ? companyMap.get(carrierId) ?? ''
+          : senderId
+            ? companyMap.get(senderId) ?? ''
+            : '';
+      rows.push({
+        date: line.createdAt.toISOString(),
+        jobId: line.jobId ?? line.job?.id ?? '',
+        jobTitle: line.job?.title ?? '',
+        entryType: 'SETTLEMENT_LINE',
+        recipientType: line.recipientType,
+        companyName,
+        ...amounts,
+        currency: line.currency || 'AUD',
+        status: line.status,
+        stripeRef: '',
+        notes: line.sharePercent != null ? `sharePercent=${line.sharePercent}` : '',
+      });
+    }
+
+    for (const s of surcharges) {
+      rows.push({
+        date: s.createdAt.toISOString(),
+        jobId: s.jobId ?? s.job?.id ?? '',
+        jobTitle: s.job?.title ?? '',
+        entryType: 'SURCHARGE',
+        recipientType: s.kind,
+        companyName: s.job?.senderCompanyId
+          ? companyMap.get(s.job.senderCompanyId) ?? ''
+          : '',
+        amountExGstCents: s.amountExGstCents,
+        gstCents: s.amountGstCents,
+        amountIncGstCents: s.amountIncGstCents,
+        currency: s.currency || 'AUD',
+        status: s.status,
+        stripeRef: '',
+        notes: '',
+      });
+    }
+
+    for (const pe of paymentEvents) {
+      rows.push({
+        date: pe.createdAt.toISOString(),
+        jobId: pe.jobId ?? pe.job?.id ?? '',
+        jobTitle: pe.job?.title ?? '',
+        entryType: 'PAYMENT_EVENT',
+        recipientType: pe.type,
+        companyName: pe.job?.senderCompanyId
+          ? companyMap.get(pe.job.senderCompanyId) ?? ''
+          : '',
+        amountExGstCents: pe.amountExGstCents,
+        gstCents: pe.amountGstCents,
+        amountIncGstCents: pe.amountIncGstCents,
+        currency: pe.currency || 'AUD',
+        status: pe.status,
+        stripeRef: pe.stripePaymentIntentId || pe.stripeTransferId || '',
+        notes: '',
+      });
+    }
+
+    rows.sort((a, b) => a.date.localeCompare(b.date));
+    await this.auditFinanceExport(actor, 'super', query, rows.length);
+    return {
+      csv: ledgerRowsToCsv(rows),
+      filename: formatExportFilename('super', query, range),
+    };
+  }
+
+  async exportPartnerFinanceCsv(
+    actor: AuthenticatedPrincipal,
+    query: FinanceQuery,
+  ): Promise<{ csv: string; filename: string }> {
+    this.ensureDatabase();
+    if (actor.kind !== 'admin') {
+      throw new ForbiddenException('Admin user required');
+    }
+    const isState = actor.role === AdminRole.STATE_MASTER;
+    const isLocal = actor.role === AdminRole.LOCAL_BDE;
+    const isSuper = actor.role === AdminRole.SUPER_ADMIN;
+    if (!isState && !isLocal && !isSuper) {
+      throw new ForbiddenException('Partner admin role required');
+    }
+
+    const range = parseDateRange(query);
+    const dateFilter = range.startDate
+      ? { gte: range.startDate, lte: range.endDate }
+      : { lte: range.endDate };
+
+    const adminUser = await this.prisma.adminUser.findUnique({
+      where: { id: actor.id },
+      include: {
+        scopes: { include: { region: true, localTerritory: true } },
+      },
+    });
+    if (!adminUser && !isSuper) {
+      throw new NotFoundException('Admin user not found');
+    }
+
+    const regionIds =
+      adminUser?.scopes.map((s) => s.regionId).filter((id): id is string => Boolean(id)) ??
+      [];
+    const territoryIds =
+      adminUser?.scopes
+        .map((s) => s.localTerritoryId)
+        .filter((id): id is string => Boolean(id)) ?? [];
+
+    const lines = await this.prisma.settlementLine.findMany({
+      where: {
+        createdAt: dateFilter,
+        status: { not: SettlementLineStatus.VOID },
+        ...(isSuper
+          ? {
+              recipientType: {
+                in: [
+                  SettlementRecipientType.STATE_MASTER,
+                  SettlementRecipientType.LOCAL_BDE,
+                ],
+              },
+            }
+          : {
+              OR: [
+                { adminUserId: actor.id },
+                ...(isState && regionIds.length
+                  ? [
+                      {
+                        regionId: { in: regionIds },
+                        recipientType: SettlementRecipientType.STATE_MASTER,
+                      },
+                    ]
+                  : []),
+                ...(isLocal && territoryIds.length
+                  ? [
+                      {
+                        territoryId: { in: territoryIds },
+                        recipientType: SettlementRecipientType.LOCAL_BDE,
+                      },
+                    ]
+                  : []),
+              ],
+            }),
+      },
+      include: {
+        job: { select: { id: true, title: true } },
+      },
+      orderBy: { createdAt: 'asc' },
+      take: FINANCE_EXPORT_ROW_LIMIT + 1,
+    });
+
+    this.assertExportRowBudget(lines.length);
+
+    const rows: FinanceLedgerRow[] = lines.map((line) => {
+      const amounts = splitIncGstCents(line.amountCents);
+      return {
+        date: line.createdAt.toISOString(),
+        jobId: line.jobId ?? line.job?.id ?? '',
+        jobTitle: line.job?.title ?? '',
+        entryType: 'SETTLEMENT_LINE' as const,
+        recipientType: line.recipientType,
+        companyName: '',
+        ...amounts,
+        currency: line.currency || 'AUD',
+        status: line.status,
+        stripeRef: '',
+        notes: line.sharePercent != null ? `sharePercent=${line.sharePercent}` : '',
+      };
+    });
+
+    await this.auditFinanceExport(actor, 'partner', query, rows.length);
+    return {
+      csv: ledgerRowsToCsv(rows),
+      filename: formatExportFilename('partner', query, range),
+    };
+  }
+
+  async exportCarrierFinanceCsv(
+    actor: AuthenticatedPrincipal,
+    query: FinanceQuery,
+  ): Promise<{ csv: string; filename: string }> {
+    this.ensureDatabase();
+
+    let companyId = query.companyId;
+    if (actor.kind === 'user') {
+      const user = await this.prisma.user.findUnique({
+        where: { id: actor.id },
+        select: { companyId: true },
+      });
+      companyId = user?.companyId ?? undefined;
+    } else if (actor.role !== AdminRole.SUPER_ADMIN) {
+      throw new ForbiddenException('Carrier or Super Admin required');
+    }
+    if (!companyId) {
+      throw new BadRequestException('Carrier company could not be resolved');
+    }
+
+    const range = parseDateRange(query);
+    const dateFilter = range.startDate
+      ? { gte: range.startDate, lte: range.endDate }
+      : { lte: range.endDate };
+
+    const company = await this.prisma.company.findUnique({
+      where: { id: companyId },
+      select: { legalName: true, tradingName: true },
+    });
+    const companyName = company?.tradingName || company?.legalName || companyId;
+
+    const [settlementLines, transfers] = await Promise.all([
+      this.prisma.settlementLine.findMany({
+        where: {
+          recipientType: SettlementRecipientType.CARRIER,
+          createdAt: dateFilter,
+          status: { not: SettlementLineStatus.VOID },
+          job: { assignment: { carrierCompanyId: companyId } },
+        },
+        include: { job: { select: { id: true, title: true } } },
+        orderBy: { createdAt: 'asc' },
+        take: FINANCE_EXPORT_ROW_LIMIT + 1,
+      }),
+      this.prisma.paymentEvent.findMany({
+        where: {
+          type: PaymentEventType.TRANSFER,
+          createdAt: dateFilter,
+          metadata: { path: ['companyId'], equals: companyId },
+        },
+        include: { job: { select: { id: true, title: true } } },
+        orderBy: { createdAt: 'asc' },
+        take: FINANCE_EXPORT_ROW_LIMIT + 1,
+      }),
+    ]);
+
+    this.assertExportRowBudget(settlementLines.length + transfers.length);
+
+    const rows: FinanceLedgerRow[] = [];
+    for (const line of settlementLines) {
+      const amounts = splitIncGstCents(line.amountCents);
+      rows.push({
+        date: line.createdAt.toISOString(),
+        jobId: line.jobId ?? line.job?.id ?? '',
+        jobTitle: line.job?.title ?? '',
+        entryType: 'SETTLEMENT_LINE',
+        recipientType: line.recipientType,
+        companyName,
+        ...amounts,
+        currency: line.currency || 'AUD',
+        status: line.status,
+        stripeRef: '',
+        notes: line.sharePercent != null ? `sharePercent=${line.sharePercent}` : '',
+      });
+    }
+    for (const pe of transfers) {
+      rows.push({
+        date: pe.createdAt.toISOString(),
+        jobId: pe.jobId ?? pe.job?.id ?? '',
+        jobTitle: pe.job?.title ?? '',
+        entryType: 'PAYMENT_EVENT',
+        recipientType: pe.type,
+        companyName,
+        amountExGstCents: pe.amountExGstCents,
+        gstCents: pe.amountGstCents,
+        amountIncGstCents: pe.amountIncGstCents,
+        currency: pe.currency || 'AUD',
+        status: pe.status,
+        stripeRef: pe.stripeTransferId || pe.stripePaymentIntentId || '',
+        notes: '',
+      });
+    }
+    rows.sort((a, b) => a.date.localeCompare(b.date));
+
+    await this.auditFinanceExport(actor, 'carrier', query, rows.length);
+    return {
+      csv: ledgerRowsToCsv(rows),
+      filename: formatExportFilename('carrier', query, range),
+    };
+  }
+
+  async exportSenderFinanceCsv(
+    actor: AuthenticatedPrincipal,
+    query: FinanceQuery,
+  ): Promise<{ csv: string; filename: string }> {
+    this.ensureDatabase();
+
+    let companyId = query.companyId;
+    if (actor.kind === 'user') {
+      const user = await this.prisma.user.findUnique({
+        where: { id: actor.id },
+        select: { companyId: true },
+      });
+      companyId = user?.companyId ?? undefined;
+    } else if (actor.role !== AdminRole.SUPER_ADMIN) {
+      throw new ForbiddenException('Sender or Super Admin required');
+    }
+    if (!companyId) {
+      throw new BadRequestException('Sender company could not be resolved');
+    }
+
+    const range = parseDateRange(query);
+    const dateFilter = range.startDate
+      ? { gte: range.startDate, lte: range.endDate }
+      : { lte: range.endDate };
+
+    const company = await this.prisma.company.findUnique({
+      where: { id: companyId },
+      select: { legalName: true, tradingName: true },
+    });
+    const companyName = company?.tradingName || company?.legalName || companyId;
+
+    const [charges, surcharges] = await Promise.all([
+      this.prisma.paymentEvent.findMany({
+        where: {
+          type: PaymentEventType.CHARGE,
+          createdAt: dateFilter,
+          job: { senderCompanyId: companyId },
+        },
+        include: { job: { select: { id: true, title: true } } },
+        orderBy: { createdAt: 'asc' },
+        take: FINANCE_EXPORT_ROW_LIMIT + 1,
+      }),
+      this.prisma.surcharge.findMany({
+        where: {
+          createdAt: dateFilter,
+          job: { senderCompanyId: companyId },
+        },
+        include: { job: { select: { id: true, title: true } } },
+        orderBy: { createdAt: 'asc' },
+        take: FINANCE_EXPORT_ROW_LIMIT + 1,
+      }),
+    ]);
+
+    this.assertExportRowBudget(charges.length + surcharges.length);
+
+    const rows: FinanceLedgerRow[] = [];
+    for (const pe of charges) {
+      rows.push({
+        date: pe.createdAt.toISOString(),
+        jobId: pe.jobId ?? pe.job?.id ?? '',
+        jobTitle: pe.job?.title ?? '',
+        entryType: 'PAYMENT_EVENT',
+        recipientType: pe.type,
+        companyName,
+        amountExGstCents: pe.amountExGstCents,
+        gstCents: pe.amountGstCents,
+        amountIncGstCents: pe.amountIncGstCents,
+        currency: pe.currency || 'AUD',
+        status: pe.status,
+        stripeRef: pe.stripePaymentIntentId || '',
+        notes: '',
+      });
+    }
+    for (const s of surcharges) {
+      rows.push({
+        date: s.createdAt.toISOString(),
+        jobId: s.jobId ?? s.job?.id ?? '',
+        jobTitle: s.job?.title ?? '',
+        entryType: 'SURCHARGE',
+        recipientType: s.kind,
+        companyName,
+        amountExGstCents: s.amountExGstCents,
+        gstCents: s.amountGstCents,
+        amountIncGstCents: s.amountIncGstCents,
+        currency: s.currency || 'AUD',
+        status: s.status,
+        stripeRef: '',
+        notes: '',
+      });
+    }
+    rows.sort((a, b) => a.date.localeCompare(b.date));
+
+    await this.auditFinanceExport(actor, 'sender', query, rows.length);
+    return {
+      csv: ledgerRowsToCsv(rows),
+      filename: formatExportFilename('sender', query, range),
     };
   }
 }

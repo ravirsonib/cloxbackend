@@ -1,0 +1,519 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>CLOX — Hourly Run Sheet (preview)</title>
+    <style>
+      :root {
+        --navy: #1a2f4c;
+        --ink: #17233b;
+        --mute: #5b6b84;
+        --line: #dce2ec;
+        --orange: #f26e22;
+        --surface: #f3f5f9;
+        --white: #ffffff;
+        --danger: #b91c1c;
+        --danger-bg: #fef2f2;
+        --warn-bg: #fff7ed;
+        --warn-border: #fdba74;
+        --warn-ink: #9a3412;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        background: #e8ecf2;
+        color: var(--ink);
+        font-family: "Segoe UI", Helvetica, Arial, sans-serif;
+        font-size: 12px;
+        line-height: 1.45;
+      }
+      .page {
+        width: 210mm;
+        min-height: 297mm;
+        margin: 24px auto;
+        background: var(--white);
+        box-shadow: 0 8px 28px rgba(23, 35, 59, 0.12);
+        display: flex;
+        flex-direction: column;
+      }
+      .header {
+        background: var(--navy);
+        color: var(--white);
+        padding: 14px 22px 12px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+      }
+      .header-brand {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+      }
+      .header-brand img {
+        height: 36px;
+        width: auto;
+        display: block;
+      }
+      .header-brand .tag {
+        font-size: 10px;
+        color: #c9d3e4;
+        margin-top: 2px;
+      }
+      .header-doc {
+        text-align: right;
+      }
+      .header-doc .doc-type {
+        font-size: 13px;
+        font-weight: 700;
+        letter-spacing: 0.02em;
+      }
+      .header-doc .doc-ref {
+        font-size: 10px;
+        color: #c9d3e4;
+        margin-top: 2px;
+      }
+      .accent {
+        height: 3px;
+        background: var(--orange);
+      }
+      .body {
+        padding: 20px 28px 14px;
+        flex: 1;
+      }
+      h1 {
+        margin: 0 0 4px;
+        font-size: 20px;
+        color: var(--navy);
+      }
+      .subtitle {
+        margin: 0 0 16px;
+        color: var(--mute);
+        font-size: 11px;
+      }
+      .section {
+        margin-bottom: 16px;
+      }
+      .section h2 {
+        margin: 0 0 6px;
+        font-size: 11px;
+        color: var(--navy);
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+      }
+      .section .rule {
+        height: 1px;
+        background: var(--line);
+        margin-bottom: 10px;
+      }
+      .meta-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 6px 24px;
+      }
+      .kv {
+        display: grid;
+        grid-template-columns: 118px 1fr;
+        gap: 2px 10px;
+      }
+      .kv .k {
+        color: var(--mute);
+        font-size: 10px;
+      }
+      .kv .v {
+        color: var(--ink);
+        font-size: 11px;
+      }
+      .summary-box {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 10px;
+        margin-top: 4px;
+      }
+      .summary-card {
+        background: var(--surface);
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        padding: 10px 12px;
+      }
+      .summary-card .label {
+        font-size: 9px;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        color: var(--mute);
+        margin-bottom: 4px;
+      }
+      .summary-card .value {
+        font-size: 13px;
+        font-weight: 700;
+        color: var(--navy);
+      }
+      .summary-card .hint {
+        font-size: 10px;
+        color: var(--mute);
+        margin-top: 2px;
+      }
+      .billing-note {
+        margin-top: 10px;
+        padding: 8px 10px;
+        border-left: 3px solid var(--orange);
+        background: #fff8f3;
+        font-size: 11px;
+      }
+      .flag {
+        margin-top: 10px;
+        padding: 8px 10px;
+        border: 1px solid #fecaca;
+        background: var(--danger-bg);
+        color: var(--danger);
+        font-size: 11px;
+        font-weight: 600;
+      }
+      table.stops {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 10px;
+      }
+      table.stops th,
+      table.stops td {
+        border: 1px solid var(--line);
+        padding: 7px 6px;
+        text-align: left;
+        vertical-align: top;
+      }
+      table.stops th {
+        background: var(--surface);
+        color: var(--navy);
+        font-weight: 700;
+        white-space: nowrap;
+      }
+      table.stops td.num {
+        width: 28px;
+        text-align: center;
+        font-weight: 700;
+        color: var(--navy);
+      }
+      table.stops td.time {
+        white-space: nowrap;
+      }
+      table.stops tr.detention td {
+        background: var(--danger-bg);
+      }
+      table.stops tr.detention td.dwell {
+        color: var(--danger);
+        font-weight: 700;
+      }
+      .legend {
+        margin-top: 6px;
+        font-size: 9.5px;
+        color: var(--mute);
+      }
+      .legend .swatch {
+        display: inline-block;
+        width: 10px;
+        height: 10px;
+        background: var(--danger-bg);
+        border: 1px solid #fecaca;
+        vertical-align: -1px;
+        margin-right: 4px;
+      }
+      .break-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 10.5px;
+      }
+      .break-table th,
+      .break-table td {
+        border: 1px solid var(--line);
+        padding: 7px 8px;
+        text-align: left;
+      }
+      .break-table th {
+        background: var(--surface);
+        color: var(--navy);
+        font-weight: 700;
+      }
+      .totals {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 10px;
+        margin-top: 10px;
+      }
+      .sig-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 16px;
+      }
+      .sig-box {
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        padding: 12px;
+        min-height: 110px;
+      }
+      .sig-box .label {
+        font-size: 10px;
+        color: var(--mute);
+        margin-bottom: 8px;
+      }
+      .sig-box .name {
+        font-size: 12px;
+        font-weight: 600;
+        margin-bottom: 10px;
+      }
+      .sig-line {
+        border-bottom: 1px solid var(--ink);
+        height: 42px;
+        margin-bottom: 6px;
+        display: flex;
+        align-items: flex-end;
+        color: var(--mute);
+        font-size: 10px;
+        font-style: italic;
+      }
+      .sig-meta {
+        font-size: 9.5px;
+        color: var(--mute);
+      }
+      .footer {
+        border-top: 1px solid var(--line);
+        padding: 10px 28px 14px;
+        display: flex;
+        justify-content: space-between;
+        gap: 12px;
+        color: var(--mute);
+        font-size: 9px;
+      }
+      .banner {
+        max-width: 210mm;
+        margin: 16px auto 0;
+        padding: 10px 14px;
+        background: var(--warn-bg);
+        border: 1px solid var(--warn-border);
+        border-radius: 8px;
+        color: var(--warn-ink);
+        font-size: 12px;
+      }
+      .banner ul {
+        margin: 6px 0 0;
+        padding-left: 18px;
+      }
+      @media print {
+        body {
+          background: white;
+        }
+        .page {
+          margin: 0;
+          box-shadow: none;
+        }
+        .banner {
+          display: none;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="banner">
+      <strong>Design preview — Hourly Run Sheet only</strong> (PER_KM has no run sheet per docs).
+      Open in a browser; Print → PDF to judge print layout. Approve this before PDFKit is updated.
+      <ul>
+        <li>Source: <code>docs/Clox Run Sheet.pdf</code> → <code>docs/operations/clox-run-sheet.md</code></li>
+        <li>Sample includes: 4h minimum billing note, dwell &gt; 60 min in <strong>RED</strong>, odo vs GPS &gt; 10% flag</li>
+      </ul>
+    </div>
+
+    <article class="page">
+      <header class="header">
+        <div class="header-brand">
+          <img src="logo-clox-light.png" alt="CLOX" />
+          <div>
+            <div class="tag">Freight marketplace · Australia</div>
+          </div>
+        </div>
+        <div class="header-doc">
+          <div class="doc-type">Hourly Run Sheet</div>
+          <div class="doc-ref">CLOX-runsheet-a1b2c3d4 · Job a1b2c3d4</div>
+        </div>
+      </header>
+      <div class="accent"></div>
+
+      <div class="body">
+        <h1>Hourly Run Sheet</h1>
+        <p class="subtitle">
+          Legal record for billing, payroll &amp; NHVR · Sample metro day hire · 19 Nov 2026
+        </p>
+
+        <section class="section">
+          <h2>Trip header</h2>
+          <div class="rule"></div>
+          <div class="meta-grid">
+            <div class="kv"><span class="k">Driver</span><span class="v">Jamie Nguyen</span></div>
+            <div class="kv"><span class="k">Date</span><span class="v">19 Nov 2026</span></div>
+            <div class="kv">
+              <span class="k">Transport company</span>
+              <span class="v">Harbour Freight Pty Ltd</span>
+            </div>
+            <div class="kv"><span class="k">ABN</span><span class="v">51 824 753 556</span></div>
+            <div class="kv"><span class="k">Vehicle rego</span><span class="v">ABC123</span></div>
+            <div class="kv"><span class="k">Job ID</span><span class="v">a1b2c3d4-…</span></div>
+            <div class="kv"><span class="k">Pattern</span><span class="v">A — multi-pickup / multi-drop</span></div>
+            <div class="kv">
+              <span class="k">Site access</span>
+              <span class="v">Easy manoeuvre · Dock available</span>
+            </div>
+          </div>
+        </section>
+
+        <section class="section">
+          <h2>Trip summary</h2>
+          <div class="rule"></div>
+          <div class="summary-box">
+            <div class="summary-card">
+              <div class="label">Total duration</div>
+              <div class="value">3.50 h actual</div>
+              <div class="hint">Billed 4.0 h minimum</div>
+            </div>
+            <div class="summary-card">
+              <div class="label">Total distance</div>
+              <div class="value">42.6 km</div>
+              <div class="hint">First pickup → final drop (GPS)</div>
+            </div>
+            <div class="summary-card">
+              <div class="label">Odometer distance</div>
+              <div class="value">48.0 km</div>
+              <div class="hint">Start 102_450 → End 102_498</div>
+            </div>
+          </div>
+          <div class="billing-note">
+            <strong>4-hour floor:</strong> Total time: 3.50 h ·
+            <strong>Billed time: 4.0 hours (Minimum Engagement)</strong>
+          </div>
+          <div class="flag">
+            FLAG: Odometer vs GPS discrepancy &gt; 10% (48.0 km odo / 42.6 km GPS) — Super Admin review
+          </div>
+        </section>
+
+        <section class="section">
+          <h2>Stops</h2>
+          <div class="rule"></div>
+          <table class="stops">
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>Stop type</th>
+                <th>Address</th>
+                <th>Arrival</th>
+                <th>Departure</th>
+                <th>Dwell / wait</th>
+                <th>Odometer</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td class="num">1</td>
+                <td>Pickup</td>
+                <td>123 Warehouse St, Richmond VIC 3121</td>
+                <td class="time">08:00 AM</td>
+                <td class="time">08:45 AM</td>
+                <td>45 mins</td>
+                <td>102_450 km (manual)</td>
+              </tr>
+              <tr>
+                <td class="num">2</td>
+                <td>Pickup</td>
+                <td>45 Distribution Rd, Port Melbourne VIC 3207</td>
+                <td class="time">09:15 AM</td>
+                <td class="time">09:40 AM</td>
+                <td>25 mins</td>
+                <td>N/A (GPS sync)</td>
+              </tr>
+              <tr class="detention">
+                <td class="num">3</td>
+                <td>Drop-off</td>
+                <td>88 Retail Blvd, South Yarra VIC 3141</td>
+                <td class="time">10:20 AM</td>
+                <td class="time">11:35 AM</td>
+                <td class="dwell">75 mins</td>
+                <td>N/A (GPS sync)</td>
+              </tr>
+              <tr>
+                <td class="num">4</td>
+                <td>Drop-off</td>
+                <td>10 Final Way, Chadstone VIC 3148</td>
+                <td class="time">11:45 AM</td>
+                <td class="time">12:30 PM</td>
+                <td>45 mins</td>
+                <td>102_498 km (final manual)</td>
+              </tr>
+            </tbody>
+          </table>
+          <p class="legend">
+            <span class="swatch"></span>
+            Dwell &gt; 60 minutes flagged in red for potential detention billing (per run-sheet spec).
+          </p>
+        </section>
+
+        <section class="section">
+          <h2>Fatigue &amp; break log</h2>
+          <div class="rule"></div>
+          <table class="break-table">
+            <thead>
+              <tr>
+                <th>Break</th>
+                <th>Start</th>
+                <th>End</th>
+                <th>Duration</th>
+                <th>Location</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Break 1</td>
+                <td>09:45 AM</td>
+                <td>10:00 AM</td>
+                <td>15 mins</td>
+                <td>Port Melbourne (between stop 2–3)</td>
+              </tr>
+            </tbody>
+          </table>
+          <div class="totals">
+            <div class="kv">
+              <span class="k">Total work time</span>
+              <span class="v">03:20</span>
+            </div>
+            <div class="kv">
+              <span class="k">Total rest time</span>
+              <span class="v">00:15</span>
+            </div>
+          </div>
+        </section>
+
+        <section class="section">
+          <h2>Signatures</h2>
+          <div class="rule"></div>
+          <div class="sig-grid">
+            <div class="sig-box">
+              <div class="label">Driver signature (digital capture)</div>
+              <div class="name">Jamie Nguyen</div>
+              <div class="sig-line">[signature image / capture]</div>
+              <div class="sig-meta">Captured at shift complete · device SOG pad</div>
+            </div>
+            <div class="sig-box">
+              <div class="label">Final receiver name (Sign-on-Glass)</div>
+              <div class="name">Alex Morgan</div>
+              <div class="sig-line">[receiver SOG name / mark]</div>
+              <div class="sig-meta">Stop 4 · Chadstone · 12:28 PM</div>
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <footer class="footer">
+        <span>CLOX | Confidential | System-generated hourly run sheet</span>
+        <span>Page 1 · Sample preview for approval</span>
+      </footer>
+    </article>
+  </body>
+</html>

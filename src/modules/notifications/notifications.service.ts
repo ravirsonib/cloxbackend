@@ -1654,9 +1654,18 @@ export class NotificationsService {
     dropAddress: string | null;
     etaLabel: string | null;
     source: 'DRIVER' | 'ETA_AUTO';
+    driverName?: string | null;
+    vehicleRego?: string | null;
+    facePhoto?: {
+      filename: string;
+      content: Buffer;
+      contentType?: string;
+    } | null;
   }) {
     const details: EmailDetailRow[] = [
       { label: 'Job', value: params.jobTitle || params.jobId },
+      { label: 'Driver', value: params.driverName || '—' },
+      { label: 'Vehicle', value: params.vehicleRego || '—' },
       { label: 'Drop suburb', value: params.dropSuburb || '—' },
       { label: 'Drop address', value: params.dropAddress || '—' },
     ];
@@ -1665,6 +1674,12 @@ export class NotificationsService {
       label: 'Source',
       value: params.source === 'DRIVER' ? 'Driver notified early' : 'System ETA alert',
     });
+    if (params.facePhoto) {
+      details.push({
+        label: 'Driver photo',
+        value: `Attached: ${params.facePhoto.filename}`,
+      });
+    }
 
     const targets = new Set<string>();
     for (const e of params.senderEmails) {
@@ -1674,18 +1689,28 @@ export class NotificationsService {
       targets.add(params.receiverEmail.trim().toLowerCase());
     }
 
+    const driverLabel = params.driverName || 'The driver';
     const results = [];
     for (const to of targets) {
       results.push(
         await this.sendBranded({
           to,
           subject: 'CLOX — driver approaching delivery',
-          text: `Driver is approaching for job ${params.jobTitle || params.jobId} (${params.dropSuburb || 'drop'}).`,
+          text: [
+            `${driverLabel} is approaching for job ${params.jobTitle || params.jobId} (${params.dropSuburb || 'drop'}).`,
+            params.vehicleRego ? `Vehicle: ${params.vehicleRego}` : null,
+            params.facePhoto ? `Driver photo attached: ${params.facePhoto.filename}` : null,
+          ]
+            .filter(Boolean)
+            .join('\n'),
           eyebrow: 'Delivery update',
           title: 'Driver approaching',
           intro:
-            'The driver is on the way to the delivery site. Please prepare to receive the load. No action is required in the app for receivers.',
+            `${driverLabel} is on the way to the delivery site` +
+            (params.vehicleRego ? ` in ${params.vehicleRego}` : '') +
+            '. Please prepare to receive the load. A driver photo is attached when available. No action is required in the app for receivers.',
           details,
+          attachments: params.facePhoto ? [params.facePhoto] : undefined,
         }),
       );
     }
@@ -1810,8 +1835,10 @@ export class NotificationsService {
   }
 
   /**
-   * M10 — after trip COMPLETED: tax invoice (+ run sheet) + POD PDFs attached
-   * for sender, receiver, and carrier.
+   * M10 — after trip COMPLETED, role-scoped document emails (PRD + run-sheet spec):
+   * - Sender: tax invoice (+ run sheet if hourly) (+ POD if available)
+   * - Carrier: run sheet only (hourly records)
+   * - Receiver: POD only
    */
   async notifyTripCompletionDocuments(params: {
     senderEmails: string[];
@@ -1819,69 +1846,151 @@ export class NotificationsService {
     receiverEmail?: string | null;
     jobId: string;
     jobTitle: string | null;
-    hasRunSheet: boolean;
     totalIncGstCents: number;
-    attachments?: Array<{
+    taxInvoice?: {
       filename: string;
       content: Buffer;
       contentType?: string;
-    }>;
+    } | null;
+    runSheet?: {
+      filename: string;
+      content: Buffer;
+      contentType?: string;
+    } | null;
+    pod?: {
+      filename: string;
+      content: Buffer;
+      contentType?: string;
+    } | null;
   }) {
-    const docLabel = [
-      'Tax invoice',
-      params.hasRunSheet ? 'hourly run sheet' : null,
-      params.attachments?.some((a) => /pod/i.test(a.filename))
-        ? 'POD package'
-        : null,
-    ]
-      .filter(Boolean)
-      .join(' + ');
-    const details: EmailDetailRow[] = [
-      { label: 'Job', value: params.jobTitle || params.jobId },
-      {
-        label: 'Total (inc GST)',
-        value: `$${(params.totalIncGstCents / 100).toFixed(2)} AUD`,
+    type Attach = {
+      filename: string;
+      content: Buffer;
+      contentType?: string;
+    };
+    const normalize = (emails: Array<string | null | undefined>) => {
+      const set = new Set<string>();
+      for (const e of emails) {
+        if (e?.includes('@')) set.add(e.trim().toLowerCase());
+      }
+      return [...set];
+    };
+
+    const sendPack = async (opts: {
+      to: string[];
+      subject: string;
+      title: string;
+      intro: string;
+      attachments: Attach[];
+      includeTotal: boolean;
+    }) => {
+      if (opts.to.length === 0 || opts.attachments.length === 0) {
+        return { sentTo: [] as string[], results: [] as unknown[] };
+      }
+      const details: EmailDetailRow[] = [
+        { label: 'Job', value: params.jobTitle || params.jobId },
+        ...(opts.includeTotal
+          ? [
+              {
+                label: 'Total (inc GST)',
+                value: `$${(params.totalIncGstCents / 100).toFixed(2)} AUD`,
+              } satisfies EmailDetailRow,
+            ]
+          : []),
+        {
+          label: 'Attachments',
+          value: opts.attachments.map((a) => a.filename).join(', '),
+        },
+      ];
+      const results = [];
+      for (const to of opts.to) {
+        results.push(
+          await this.sendBranded({
+            to,
+            subject: opts.subject,
+            text: [
+              `Trip completed for job ${params.jobTitle || params.jobId}.`,
+              `Documents attached: ${opts.attachments.map((a) => a.filename).join(', ')}.`,
+            ].join('\n'),
+            eyebrow: 'Trip complete',
+            title: opts.title,
+            intro: opts.intro,
+            details,
+            cta: this.loginCta(),
+            attachments: opts.attachments,
+          }),
+        );
+      }
+      return { sentTo: opts.to, results };
+    };
+
+    const senderTo = normalize(params.senderEmails);
+    const carrierTo = normalize(params.carrierEmails);
+    const receiverTo = normalize([params.receiverEmail]);
+
+    const senderAttach: Attach[] = [];
+    if (params.taxInvoice) senderAttach.push(params.taxInvoice);
+    if (params.runSheet) senderAttach.push(params.runSheet);
+    if (params.pod) senderAttach.push(params.pod);
+
+    const carrierAttach: Attach[] = [];
+    if (params.runSheet) carrierAttach.push(params.runSheet);
+
+    const receiverAttach: Attach[] = [];
+    if (params.pod) receiverAttach.push(params.pod);
+
+    const senderDocParts = [
+      'tax invoice',
+      params.runSheet ? 'hourly run sheet' : null,
+      params.pod ? 'proof of delivery' : null,
+    ].filter(Boolean) as string[];
+    const senderDocList =
+      senderDocParts.length <= 1
+        ? senderDocParts[0] ?? 'documents'
+        : senderDocParts.length === 2
+          ? `${senderDocParts[0]} and ${senderDocParts[1]}`
+          : `${senderDocParts.slice(0, -1).join(', ')}, and ${senderDocParts[senderDocParts.length - 1]}`;
+
+    const sender = await sendPack({
+      to: senderTo,
+      subject: 'CLOX — tax invoice · trip complete',
+      title: 'Tax invoice attached',
+      intro: `The trip is complete. Your ${senderDocList} ${
+        senderDocParts.length === 1 ? 'is' : 'are'
+      } attached as PDF files.`,
+      attachments: senderAttach,
+      includeTotal: true,
+    });
+
+    const carrier = await sendPack({
+      to: carrierTo,
+      subject: 'CLOX — hourly run sheet · trip complete',
+      title: 'Hourly run sheet attached',
+      intro:
+        'The trip is complete. The hourly run sheet is attached for your records.',
+      attachments: carrierAttach,
+      includeTotal: false,
+    });
+
+    const receiver = await sendPack({
+      to: receiverTo,
+      subject: 'CLOX — proof of delivery · trip complete',
+      title: 'Proof of delivery attached',
+      intro:
+        'The delivery is complete. Your proof of delivery PDF is attached.',
+      attachments: receiverAttach,
+      includeTotal: false,
+    });
+
+    return {
+      sentTo: [...sender.sentTo, ...carrier.sentTo, ...receiver.sentTo],
+      results: [...sender.results, ...carrier.results, ...receiver.results],
+      byRole: {
+        sender: sender.sentTo,
+        carrier: carrier.sentTo,
+        receiver: receiver.sentTo,
       },
-      { label: 'Documents', value: docLabel || 'Trip documents' },
-      {
-        label: 'Attachments',
-        value: params.attachments?.length
-          ? params.attachments.map((a) => a.filename).join(', ')
-          : 'None',
-      },
-    ];
-    const targets = new Set<string>();
-    for (const e of [...params.senderEmails, ...params.carrierEmails]) {
-      if (e?.includes('@')) targets.add(e.trim().toLowerCase());
-    }
-    if (params.receiverEmail?.includes('@')) {
-      targets.add(params.receiverEmail.trim().toLowerCase());
-    }
-    const results = [];
-    for (const to of targets) {
-      results.push(
-        await this.sendBranded({
-          to,
-          subject: 'CLOX — trip complete · documents attached',
-          text: [
-            `Trip completed for job ${params.jobTitle || params.jobId}.`,
-            `Documents attached: ${
-              params.attachments?.map((a) => a.filename).join(', ') || 'none'
-            }.`,
-          ].join('\n'),
-          eyebrow: 'Trip complete',
-          title: 'Trip documents attached',
-          intro:
-            'The trip is complete. Your tax invoice' +
-            (params.hasRunSheet ? ', hourly run sheet,' : '') +
-            ' and proof of delivery (where available) are attached as PDF files.',
-          details,
-          cta: this.loginCta(),
-          attachments: params.attachments,
-        }),
-      );
-    }
-    return { sentTo: [...targets], results };
+    };
   }
 
   /** M10 Phase D — breakdown / exception report PDF attached */

@@ -1190,6 +1190,23 @@ export class CarrierService {
     const user = await this.requireCarrier(principal);
     const company = user.company!;
     this.assertCanManageFleet(company);
+    const registration = input.registration.toUpperCase();
+    // Prevent duplicate fleet rows (same rego) from double-submit / retry-after-partial-upload.
+    const existing = await this.prisma.vehicle.findFirst({
+      where: {
+        companyId: company.id,
+        registration,
+        status: { not: VehicleStatus.RETIRED },
+      },
+      select: { id: true },
+    });
+    if (existing) {
+      throw new ConflictException({
+        message: `A vehicle with registration ${registration} already exists in your fleet`,
+        code: 'VEHICLE_REGISTRATION_EXISTS',
+        existingVehicleId: existing.id,
+      });
+    }
     // Post-KYB adds need Super Admin approve before bid use; onboarding seed stays ACTIVE.
     const status =
       company.status === CompanyStatus.BID_ELIGIBLE
@@ -1200,7 +1217,7 @@ export class CarrierService {
         companyId: company.id,
         status,
         label: input.label,
-        registration: input.registration.toUpperCase(),
+        registration,
         vehicleClass: input.vehicleClass.toUpperCase(),
         tareKg: input.tareKg,
         gvmKg: input.gvmKg,
@@ -1214,7 +1231,8 @@ export class CarrierService {
       entityId: vehicle.id,
       metadata: { status },
     });
-    return this.getOnboarding(principal);
+    const onboarding = await this.getOnboarding(principal);
+    return { ...onboarding, vehicleId: vehicle.id };
   }
 
   async getVehicle(principal: AuthenticatedPrincipal, vehicleId: string) {

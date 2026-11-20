@@ -47,6 +47,7 @@ import {
   pickPrimaryFarePaymentEvent,
   isAssignmentPendingPayment,
 } from '../jobs/assignment-status.util';
+import { carrierNetPayoutCents } from '../jobs/job-pricing.util';
 import {
   assertCrewNotBusyElsewhere,
   assertDriverAvailabilityForWindow,
@@ -637,28 +638,18 @@ export class PaymentsService {
     });
     if (!job?.senderCompany) throw new NotFoundException('Job/sender not found');
 
-    const feeApplied = this.revenueSplit
-      ? await this.revenueSplit.resolveSenderFee({
-          baseIncGstCents: params.amountIncGstCents,
-          senderCompanyId: job.senderCompanyId,
-        })
-      : {
-          ...applySenderPlatformFee({
-            baseIncGstCents: params.amountIncGstCents,
-            feePercent: 0,
-            mode: 'EXCLUSIVE',
-          }),
-          senderFeeOverrideId: null as string | null,
-        };
-    const amounts = splitIncGst(feeApplied.chargeIncGstCents);
+    // Product: CLOX platform fee applies to freight only. Surcharges charge at
+    // face value and settle 100% to the carrier (no sender fee top-up).
+    const amounts = splitIncGst(params.amountIncGstCents);
     const chargeNow = params.chargeNow !== false;
     const feeMeta = {
-      baseIncGstCents: feeApplied.baseIncGstCents,
-      senderFeePercent: feeApplied.feePercent,
-      senderFeeMode: feeApplied.mode,
-      senderFeeIncGstCents: feeApplied.feeIncGstCents,
-      senderFeeOverrideId: feeApplied.senderFeeOverrideId,
-      settlementGrossIncGstCents: feeApplied.chargeIncGstCents,
+      baseIncGstCents: params.amountIncGstCents,
+      senderFeePercent: 0,
+      senderFeeMode: 'EXCLUSIVE' as const,
+      senderFeeIncGstCents: 0,
+      senderFeeOverrideId: null as string | null,
+      settlementGrossIncGstCents: params.amountIncGstCents,
+      surchargeSettlement: 'CARRIER_100',
     };
 
     const created = await this.prisma.$transaction(async (tx) => {
@@ -891,9 +882,9 @@ export class PaymentsService {
   }
 
   /**
-   * Accrue 70/30 SettlementLines for a paid surcharge (same policy as base fare).
+   * Accrue SettlementLines for a paid surcharge — 100% to carrier.
+   * No CLOX / admin pool share; no sender platform fee on surcharges.
    * Idempotent via surcharge.metadata.settlementAccrued.
-   * Spec: docs/payments/stripe-payment-specification.md §4 / §6.4.
    */
   private async accrueSurchargeSettlementLines(
     tx: Prisma.TransactionClient,
@@ -925,78 +916,17 @@ export class PaymentsService {
       return false;
     }
 
-    const job = await tx.job.findUnique({
-      where: { id: surcharge.jobId },
-      select: {
-        originRegionId: true,
-        originTerritoryId: true,
-        senderCompanyId: true,
-        assignment: { select: { carrierCompanyId: true } },
-      },
-    });
-
-    const resolved = this.revenueSplit
-      ? await this.revenueSplit.resolveForJob({
-          grossIncGstCents: surcharge.amountIncGstCents,
-          originRegionId: job?.originRegionId ?? null,
-          originTerritoryId: job?.originTerritoryId ?? null,
-          senderCompanyId: job?.senderCompanyId ?? null,
-          carrierCompanyId: job?.assignment?.carrierCompanyId ?? null,
-        })
-      : null;
-
-    if (resolved) {
-      await tx.settlementLine.createMany({
-        data: resolved.lines.map((line) => ({
+    await tx.settlementLine.createMany({
+      data: [
+        {
           jobId: surcharge.jobId,
-          recipientType: line.recipientType,
-          sharePercent: line.sharePercent,
-          amountCents: line.amountCents,
+          recipientType: SettlementRecipientType.CARRIER,
+          sharePercent: 100,
+          amountCents: surcharge.amountIncGstCents,
           status: SettlementLineStatus.ACCRUED,
-          regionId: line.regionId,
-          territoryId: line.territoryId,
-          policyVersionId: resolved.policyVersionId,
-          overrideId: resolved.overrideId,
-          adminPackageId: resolved.adminPackageId,
-          adminUserId: line.adminUserId,
-        })),
-      });
-    } else {
-      // Specs / fallback when RevenueSplitService not injected — same as fare lock.
-      const staged = allocateTwoStage(surcharge.amountIncGstCents, 70, DEFAULT_CLOX_POOL);
-      await tx.settlementLine.createMany({
-        data: [
-          {
-            jobId: surcharge.jobId,
-            recipientType: SettlementRecipientType.CARRIER,
-            sharePercent: staged.grossPercents.carrierPercent,
-            amountCents: staged.carrier,
-            status: SettlementLineStatus.ACCRUED,
-          },
-          {
-            jobId: surcharge.jobId,
-            recipientType: SettlementRecipientType.SUPER_ADMIN,
-            sharePercent: staged.grossPercents.superPercent,
-            amountCents: staged.superShare,
-            status: SettlementLineStatus.ACCRUED,
-          },
-          {
-            jobId: surcharge.jobId,
-            recipientType: SettlementRecipientType.STATE_MASTER,
-            sharePercent: staged.grossPercents.statePercent,
-            amountCents: staged.stateShare,
-            status: SettlementLineStatus.ACCRUED,
-          },
-          {
-            jobId: surcharge.jobId,
-            recipientType: SettlementRecipientType.LOCAL_BDE,
-            sharePercent: staged.grossPercents.localPercent,
-            amountCents: staged.localShare,
-            status: SettlementLineStatus.ACCRUED,
-          },
-        ],
-      });
-    }
+        },
+      ],
+    });
 
     await tx.surcharge.update({
       where: { id: surcharge.id },
@@ -1005,6 +935,7 @@ export class PaymentsService {
           ...meta,
           settlementAccrued: true,
           settlementAccruedAt: new Date().toISOString(),
+          surchargeSettlement: 'CARRIER_100',
         },
       },
     });
@@ -2220,12 +2151,23 @@ export class PaymentsService {
       take: 50,
     });
 
+    const carrierPercent = this.revenueSplit
+      ? (
+          await this.revenueSplit.resolvePercents({
+            referredByAdminUserId: null,
+            carrierCompanyId: user.companyId,
+            at: new Date(),
+          })
+        ).percents.carrierPercent
+      : 70;
+
     return rows.map((a) => {
       const tripActive =
         !!a.trip &&
         a.trip.status !== TripStatus.COMPLETED &&
         a.trip.status !== TripStatus.CANCELLED;
       const openTripException = a.tripExceptions?.[0] ?? null;
+      const amountIncGstCents = a.proposal.amountIncGstCents;
       return {
         id: a.id,
         status: a.status,
@@ -2237,7 +2179,10 @@ export class PaymentsService {
         trip: a.trip
           ? { id: a.trip.id, status: a.trip.status }
           : null,
-        amountIncGstCents: a.proposal.amountIncGstCents,
+        amountIncGstCents,
+        /** Expected carrier net from accepted bid (same base as settlement / earnings). */
+        netToCarrierCents: carrierNetPayoutCents(amountIncGstCents, carrierPercent),
+        carrierPercent,
         etaMinutes: a.proposal.etaMinutes,
         tripBlockedUntilPaid: isAssignmentPendingPayment(a.status),
         /** Direct assign-board reassign; blocked while a trip exception needs Exceptions → sender approve. */

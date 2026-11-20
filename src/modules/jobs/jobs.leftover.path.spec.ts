@@ -58,7 +58,12 @@ function mapJobFields(overrides: Record<string, unknown> = {}) {
 describe('JobsService leftover list/get/publish/bidding paths', () => {
   const audit = { recordPlatform: jest.fn() };
   const senderService = {
-    getBookingEligibility: jest.fn().mockResolvedValue({ canBook: true, goNoGo: {} }),
+    getBookingEligibility: jest.fn().mockResolvedValue({
+      canPublishLive: true,
+      canBook: true,
+      goNoGo: {},
+      blockers: [],
+    }),
   };
 
   function makeService(prisma: Record<string, unknown>) {
@@ -72,7 +77,12 @@ describe('JobsService leftover list/get/publish/bidding paths', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
-    senderService.getBookingEligibility.mockResolvedValue({ canBook: true, goNoGo: {} });
+    senderService.getBookingEligibility.mockResolvedValue({
+      canPublishLive: true,
+      canBook: true,
+      goNoGo: {},
+      blockers: [],
+    });
   });
 
   it('listSenderJobs rejects non-sender and missing company', async () => {
@@ -293,8 +303,10 @@ describe('JobsService leftover list/get/publish/bidding paths', () => {
 
   it('publishJob rejects when sender not booking-ready or missing receiver/disclaimer', async () => {
     senderService.getBookingEligibility.mockResolvedValueOnce({
+      canPublishLive: false,
       canBook: false,
       goNoGo: { payment: false },
+      blockers: [],
     });
     await expect(
       makeService({ isConnected: () => true }).publishJob(sender, 'job-1'),

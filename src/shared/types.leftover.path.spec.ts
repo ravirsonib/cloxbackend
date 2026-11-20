@@ -147,6 +147,7 @@ describe('shared/types leftover schema paths', () => {
       postcode: '3000',
       lat: -37.8,
       lng: 144.9,
+      weightKg: 100,
     });
 
     // PER_KM with 3 stops

@@ -1,4 +1,4 @@
-import { ForbiddenException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import {
   AdminRole,
@@ -14,7 +14,7 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { FinanceService } from './finance.service';
 import type { AuthenticatedPrincipal } from '../../common/guards/jwt-auth.guard';
-import { AppRole } from '../../shared/types';
+import { AppRole, AuditAction } from '../../shared/types';
 
 describe('FinanceService', () => {
   let service: FinanceService;
@@ -25,11 +25,12 @@ describe('FinanceService', () => {
     paymentEvent: { findMany: jest.Mock };
     job: { findMany: jest.Mock };
     region: { findMany: jest.Mock };
-    company: { findMany: jest.Mock };
+    company: { findMany: jest.Mock; findUnique: jest.Mock };
     adminUser: { findUnique: jest.Mock };
     user: { findUnique: jest.Mock };
     assignment: { findMany: jest.Mock };
   };
+  let audit: { recordPlatform: jest.Mock; recordActor: jest.Mock };
 
   const superAdmin: AuthenticatedPrincipal = {
     id: 'admin-super-1',
@@ -75,17 +76,18 @@ describe('FinanceService', () => {
       paymentEvent: { findMany: jest.fn() },
       job: { findMany: jest.fn() },
       region: { findMany: jest.fn() },
-      company: { findMany: jest.fn() },
+      company: { findMany: jest.fn(), findUnique: jest.fn() },
       adminUser: { findUnique: jest.fn() },
       user: { findUnique: jest.fn() },
       assignment: { findMany: jest.fn() },
     };
+    audit = { recordPlatform: jest.fn(), recordActor: jest.fn() };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         FinanceService,
         { provide: PrismaService, useValue: prisma },
-        { provide: AuditService, useValue: { recordPlatform: jest.fn(), recordActor: jest.fn() } },
+        { provide: AuditService, useValue: audit },
       ],
     }).compile();
 
@@ -489,6 +491,196 @@ describe('FinanceService', () => {
       expect(result.summary.totalSpendIncGstCents).toBe(2_800_000);
       expect(result.jobSpendHistory[0].baseFareIncGstCents).toBe(2_800_000);
       expect(result.jobSpendHistory[0].totalPaidCents).toBe(2_800_000);
+    });
+  });
+
+  describe('export*FinanceCsv', () => {
+    it('exportSuperFinanceCsv emits stable header, escapes fields, and applies date filter', async () => {
+      prisma.settlementLine.findMany.mockResolvedValue([
+        {
+          id: 'sl-1',
+          createdAt: new Date('2026-10-15T00:00:00.000Z'),
+          amountCents: 11000,
+          currency: 'AUD',
+          status: SettlementLineStatus.ACCRUED,
+          recipientType: SettlementRecipientType.CARRIER,
+          sharePercent: 70,
+          jobId: 'job-1',
+          job: {
+            id: 'job-1',
+            title: 'Load, "Metro"',
+            senderCompanyId: 'comp-s1',
+            assignment: { carrierCompanyId: 'comp-c1' },
+          },
+        },
+      ]);
+      prisma.surcharge.findMany.mockResolvedValue([]);
+      prisma.paymentEvent.findMany.mockResolvedValue([]);
+      prisma.company.findMany.mockResolvedValue([
+        { id: 'comp-s1', legalName: 'Sender Co', tradingName: 'Sender Co' },
+        { id: 'comp-c1', legalName: 'Carrier Co', tradingName: 'Carrier Co' },
+      ]);
+
+      const { csv, filename } = await service.exportSuperFinanceCsv(superAdmin, {
+        from: '2026-10-01',
+        to: '2026-10-31',
+      });
+
+      expect(filename).toBe('clox-finance-super-2026-10-01-2026-10-31.csv');
+      expect(csv.split('\n')[0]).toBe(
+        'date,jobId,jobTitle,entryType,recipientType,companyName,amountExGstCents,gstCents,amountIncGstCents,currency,status,stripeRef,notes',
+      );
+      expect(csv).toContain('"Load, ""Metro"""');
+      expect(csv).toContain('SETTLEMENT_LINE');
+      expect(prisma.settlementLine.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            createdAt: {
+              gte: new Date('2026-10-01'),
+              lte: new Date('2026-10-31'),
+            },
+          }),
+        }),
+      );
+      expect(audit.recordPlatform).toHaveBeenCalledWith(
+        expect.objectContaining({
+          action: AuditAction.FINANCE_LEDGER_EXPORTED,
+          actorAdminId: superAdmin.id,
+          entityId: 'super',
+        }),
+      );
+    });
+
+    it('rejects non-super for super export and partner role for partner export', async () => {
+      await expect(
+        service.exportSuperFinanceCsv(stateAdmin, { period: 'month' }),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+
+      await expect(
+        service.exportPartnerFinanceCsv(carrierPrincipal, { period: 'month' }),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+    });
+
+    it('exportPartnerFinanceCsv scopes to admin commission lines', async () => {
+      prisma.adminUser.findUnique.mockResolvedValue({
+        id: stateAdmin.id,
+        scopes: [{ regionId: 'reg-vic', region: { code: 'VIC' }, localTerritoryId: null }],
+      });
+      prisma.settlementLine.findMany.mockResolvedValue([
+        {
+          id: 'sl-p1',
+          createdAt: new Date('2026-10-10T00:00:00.000Z'),
+          amountCents: 5500,
+          currency: 'AUD',
+          status: SettlementLineStatus.ACCRUED,
+          recipientType: SettlementRecipientType.STATE_MASTER,
+          sharePercent: 10,
+          jobId: 'job-2',
+          job: { id: 'job-2', title: 'Partner job' },
+        },
+      ]);
+
+      const { csv, filename } = await service.exportPartnerFinanceCsv(stateAdmin, {
+        period: 'month',
+      });
+
+      expect(filename).toBe('clox-finance-partner-month.csv');
+      expect(csv).toContain('STATE_MASTER');
+      expect(csv).toContain('sharePercent=10');
+      expect(prisma.settlementLine.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            OR: expect.arrayContaining([
+              { adminUserId: stateAdmin.id },
+              expect.objectContaining({
+                regionId: { in: ['reg-vic'] },
+                recipientType: SettlementRecipientType.STATE_MASTER,
+              }),
+            ]),
+          }),
+        }),
+      );
+    });
+
+    it('exportCarrierFinanceCsv requires company and includes CARRIER lines', async () => {
+      prisma.user.findUnique.mockResolvedValue({
+        id: carrierPrincipal.id,
+        companyId: 'comp-c1',
+      });
+      prisma.company.findUnique.mockResolvedValue({
+        legalName: 'Express Freight',
+        tradingName: 'Express',
+      });
+      prisma.settlementLine.findMany.mockResolvedValue([
+        {
+          id: 'sl-c1',
+          createdAt: new Date('2026-10-12T00:00:00.000Z'),
+          amountCents: 22000,
+          currency: 'AUD',
+          status: SettlementLineStatus.ACCRUED,
+          recipientType: SettlementRecipientType.CARRIER,
+          sharePercent: 70,
+          jobId: 'job-3',
+          job: { id: 'job-3', title: 'Carrier haul' },
+        },
+      ]);
+      prisma.paymentEvent.findMany.mockResolvedValue([]);
+
+      const { csv } = await service.exportCarrierFinanceCsv(carrierPrincipal, {
+        period: 'week',
+      });
+
+      expect(csv).toContain('CARRIER');
+      expect(csv).toContain('Express');
+      expect(prisma.settlementLine.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            recipientType: SettlementRecipientType.CARRIER,
+            job: { assignment: { carrierCompanyId: 'comp-c1' } },
+          }),
+        }),
+      );
+    });
+
+    it('exportSenderFinanceCsv rejects missing company and exports charges', async () => {
+      prisma.user.findUnique.mockResolvedValue({ id: senderPrincipal.id, companyId: null });
+      await expect(
+        service.exportSenderFinanceCsv(senderPrincipal, { period: 'month' }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+
+      prisma.user.findUnique.mockResolvedValue({
+        id: senderPrincipal.id,
+        companyId: 'comp-s1',
+      });
+      prisma.company.findUnique.mockResolvedValue({
+        legalName: 'Big Retail',
+        tradingName: 'Big Retail',
+      });
+      prisma.paymentEvent.findMany.mockResolvedValue([
+        {
+          id: 'pe-1',
+          createdAt: new Date('2026-10-05T00:00:00.000Z'),
+          type: PaymentEventType.CHARGE,
+          status: PaymentEventStatus.SUCCEEDED,
+          amountExGstCents: 10000,
+          amountGstCents: 1000,
+          amountIncGstCents: 11000,
+          currency: 'AUD',
+          stripePaymentIntentId: 'pi_test',
+          jobId: 'job-4',
+          job: { id: 'job-4', title: 'Sender load' },
+        },
+      ]);
+      prisma.surcharge.findMany.mockResolvedValue([]);
+
+      const { csv, filename } = await service.exportSenderFinanceCsv(senderPrincipal, {
+        period: 'year',
+      });
+
+      expect(filename).toBe('clox-finance-sender-year.csv');
+      expect(csv).toContain('PAYMENT_EVENT');
+      expect(csv).toContain('pi_test');
+      expect(csv).toContain('11000');
     });
   });
 });

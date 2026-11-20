@@ -55,6 +55,10 @@ import {
   recommendVehicleClass,
 } from './job-pricing.util';
 import { estimateRoute, orderStopsTspObjects, routeFromDistanceKm } from './routing.mock';
+import {
+  buildStopLoadProfile,
+  classWeightKgFromProfile,
+} from './job-stop-load.util';
 import { RateFloorService } from '../rate-floor/rate-floor.service';
 
 /** Soft cap so one unverified sender cannot flood DRAFT rows. */
@@ -524,6 +528,7 @@ export class JobsService {
       lng: { toNumber(): number } | number | null;
       receiverName: string | null;
       receiverEmail: string | null;
+      weightKg?: number | null;
     }>;
     proposals?: Array<{
       id: string;
@@ -616,6 +621,26 @@ export class JobsService {
       publishRequestedAt: job.publishRequestedAt ?? null,
       createdAt: job.createdAt,
       openProposalCount,
+      loadProfile: (() => {
+        const profile = buildStopLoadProfile(
+          (job.stops ?? []).map((s) => ({
+            sequence: s.sequence,
+            stopType: s.stopType,
+            weightKg: s.weightKg ?? null,
+          })),
+        );
+        if (!profile.hasStopWeights) return null;
+        return {
+          peakOnboardKg: profile.peakOnboardKg,
+          totalPickupKg: profile.totalPickupKg,
+          segments: profile.segments.map((seg) => ({
+            sequence: seg.sequence,
+            stopType: seg.stopType,
+            weightKg: seg.weightKg,
+            onboardKgAfter: seg.onboardKgAfter,
+          })),
+        };
+      })(),
       stops: (job.stops ?? []).map((s) => ({
         id: s.id,
         sequence: s.sequence,
@@ -629,6 +654,7 @@ export class JobsService {
         lng: s.lng == null ? null : typeof s.lng === 'number' ? s.lng : s.lng.toNumber(),
         receiverName: s.receiverName,
         receiverEmail: s.receiverEmail,
+        weightKg: s.weightKg ?? null,
       })),
       proposals: (job.proposals ?? []).map((p, idx) => {
         const carrierName =
@@ -1053,16 +1079,34 @@ export class JobsService {
       }
     }
 
+    const loadProfile = buildStopLoadProfile(input.stops);
+    if (loadProfile.hasStopWeights && !loadProfile.ok) {
+      throw new BadRequestException({
+        message: loadProfile.errors[0] ?? 'Invalid stop load weights',
+        code: 'STOP_LOAD_INVALID',
+        errors: loadProfile.errors,
+      });
+    }
+    const deadWeightKg = loadProfile.hasStopWeights
+      ? loadProfile.totalPickupKg
+      : input.deadWeightKg;
+    const volumetricKg =
+      (input.lengthCm * input.widthCm * input.heightCm) / 4000;
     const chargeable = chargeableWeightKg({
-      deadWeightKg: input.deadWeightKg,
+      deadWeightKg,
       lengthCm: input.lengthCm,
       widthCm: input.widthCm,
       heightCm: input.heightCm,
     });
+    const classWeightKg = classWeightKgFromProfile(
+      loadProfile,
+      volumetricKg,
+      deadWeightKg,
+    );
     const vehicleClasses = await this.getActiveVehicleClasses();
     const rankMap = Object.fromEntries(vehicleClasses.map((c) => [c.code, c.rank]));
     const recommended = recommendVehicleClass(
-      chargeable,
+      classWeightKg,
       {
         lengthCm: input.lengthCm,
         widthCm: input.widthCm,
@@ -1073,10 +1117,11 @@ export class JobsService {
     const minClass = input.minVehicleClass ?? recommended;
     if (!isVehicleClassAdequate(minClass, recommended, rankMap)) {
       throw new BadRequestException({
-        message: `Vehicle class ${minClass} is undersized for chargeable ${chargeable.toFixed(1)} kg (min ${recommended})`,
+        message: `Vehicle class ${minClass} is undersized for peak/chargeable ${classWeightKg.toFixed(1)} kg (min ${recommended})`,
         code: 'VEHICLE_CLASS_UNDERSIZE',
         recommended,
         chargeableWeightKg: chargeable,
+        peakOnboardKg: loadProfile.hasStopWeights ? loadProfile.peakOnboardKg : null,
       });
     }
 
@@ -1162,7 +1207,7 @@ export class JobsService {
         receiverAltEmail: input.receiverAltEmail ?? null,
         receiverAltPhone: input.receiverAltPhone ?? null,
         pickupAt: new Date(input.pickupAt),
-        deadWeightKg: input.deadWeightKg,
+        deadWeightKg,
         lengthCm: input.lengthCm,
         widthCm: input.widthCm,
         heightCm: input.heightCm,
@@ -1208,6 +1253,7 @@ export class JobsService {
             lng: s.lng,
             receiverName: s.receiverName,
             receiverEmail: s.receiverEmail,
+            weightKg: s.weightKg ?? null,
           })),
         },
       },
@@ -1318,16 +1364,34 @@ export class JobsService {
       }
     }
 
+    const loadProfile = buildStopLoadProfile(input.stops);
+    if (loadProfile.hasStopWeights && !loadProfile.ok) {
+      throw new BadRequestException({
+        message: loadProfile.errors[0] ?? 'Invalid stop load weights',
+        code: 'STOP_LOAD_INVALID',
+        errors: loadProfile.errors,
+      });
+    }
+    const deadWeightKg = loadProfile.hasStopWeights
+      ? loadProfile.totalPickupKg
+      : input.deadWeightKg;
+    const volumetricKg =
+      (input.lengthCm * input.widthCm * input.heightCm) / 4000;
     const chargeable = chargeableWeightKg({
-      deadWeightKg: input.deadWeightKg,
+      deadWeightKg,
       lengthCm: input.lengthCm,
       widthCm: input.widthCm,
       heightCm: input.heightCm,
     });
+    const classWeightKg = classWeightKgFromProfile(
+      loadProfile,
+      volumetricKg,
+      deadWeightKg,
+    );
     const vehicleClasses = await this.getActiveVehicleClasses();
     const rankMap = Object.fromEntries(vehicleClasses.map((c) => [c.code, c.rank]));
     const recommended = recommendVehicleClass(
-      chargeable,
+      classWeightKg,
       {
         lengthCm: input.lengthCm,
         widthCm: input.widthCm,
@@ -1338,10 +1402,11 @@ export class JobsService {
     const minClass = input.minVehicleClass ?? recommended;
     if (!isVehicleClassAdequate(minClass, recommended, rankMap)) {
       throw new BadRequestException({
-        message: `Vehicle class ${minClass} is undersized for chargeable ${chargeable.toFixed(1)} kg (min ${recommended})`,
+        message: `Vehicle class ${minClass} is undersized for peak/chargeable ${classWeightKg.toFixed(1)} kg (min ${recommended})`,
         code: 'VEHICLE_CLASS_UNDERSIZE',
         recommended,
         chargeableWeightKg: chargeable,
+        peakOnboardKg: loadProfile.hasStopWeights ? loadProfile.peakOnboardKg : null,
       });
     }
 
@@ -1424,7 +1489,7 @@ export class JobsService {
         receiverAltEmail: input.receiverAltEmail ?? null,
         receiverAltPhone: input.receiverAltPhone ?? null,
         pickupAt: new Date(input.pickupAt),
-        deadWeightKg: input.deadWeightKg,
+        deadWeightKg,
         lengthCm: input.lengthCm,
         widthCm: input.widthCm,
         heightCm: input.heightCm,
@@ -1471,6 +1536,7 @@ export class JobsService {
             lng: s.lng,
             receiverName: s.receiverName,
             receiverEmail: s.receiverEmail,
+            weightKg: s.weightKg ?? null,
           })),
         },
       },
@@ -1710,12 +1776,94 @@ export class JobsService {
       throw new BadRequestException('Site access assessment required');
     }
 
+    // W3.2 — re-check hard floor at publish (fuel/version may have moved since draft).
+    const config = await this.getPricingConfig();
+    const pickupState =
+      job.stops.find((s) => s.stopType === 'PICKUP')?.state ??
+      job.stops[0]?.state ??
+      null;
+    const vehicleClassCode =
+      job.pricingVehicleClass ?? job.minVehicleClass ?? job.recommendedVehicleClass;
+    const offeredIncGstCents = job.estimateIncGstCents ?? 0;
+    const floorUpdate: {
+      rateFloorVersionId?: string | null;
+      rateFloorExGstCents?: number | null;
+      rateFloorIncGstCents?: number | null;
+      rateFloorBreakdown?: object;
+      estimateExGstCents?: number;
+      estimateGstCents?: number;
+      estimateIncGstCents?: number;
+    } = {};
+
+    if (vehicleClassCode && (job.pricingModel === 'PER_KM' || job.pricingModel === 'HOURLY')) {
+      const floored = await this.withHardFloorEstimate({
+        marketEstimateIncGstCents: offeredIncGstCents,
+        gstPercent: config.gstPercent,
+        vehicleClassCode,
+        pricingModel: job.pricingModel,
+        distanceKm: job.routeDistanceKm,
+        billableHours: job.billableHours,
+        at: job.pickupAt,
+        pickupState,
+        requiresReefer: job.requiresReefer,
+        requiresDg: job.requiresDg,
+        backhaul: job.isBackhaul ?? false,
+      });
+      floorUpdate.rateFloorVersionId = floored.rateFloorVersionId;
+      floorUpdate.rateFloorExGstCents = floored.rateFloorExGstCents;
+      floorUpdate.rateFloorIncGstCents = floored.rateFloorIncGstCents;
+      if (floored.rateFloorBreakdown != null) {
+        floorUpdate.rateFloorBreakdown = floored.rateFloorBreakdown as object;
+      }
+      floorUpdate.estimateExGstCents = floored.estimate.amountExGstCents;
+      floorUpdate.estimateGstCents = floored.estimate.amountGstCents;
+      floorUpdate.estimateIncGstCents = floored.estimate.amountIncGstCents;
+
+      if (this.rateFloor && floored.hardFloor && floored.rateFloorVersionId) {
+        const fuelIndexId =
+          typeof floored.hardFloor.breakdown?.fuelIndexId === 'string'
+            ? floored.hardFloor.breakdown.fuelIndexId
+            : null;
+        const belowFloor = offeredIncGstCents < floored.hardFloor.floorIncGstCents;
+        await this.rateFloor.recordCheck({
+          jobId: job.id,
+          actorUserId: user.id,
+          versionId: floored.rateFloorVersionId,
+          fuelIndexId,
+          inputs: {
+            vehicleClassCode,
+            pricingModel: job.pricingModel,
+            distanceKm: job.routeDistanceKm,
+            billableHours: job.billableHours,
+            source: 'JOB_PUBLISH',
+            offeredIncGstCents,
+          },
+          breakdown: floored.hardFloor.breakdown,
+          floorExGstCents: floored.hardFloor.floorExGstCents,
+          floorIncGstCents: floored.hardFloor.floorIncGstCents,
+          offeredIncGstCents,
+          result: belowFloor ? 'REJECT' : 'PASS',
+        });
+        if (belowFloor) {
+          const minAud = (floored.hardFloor.floorIncGstCents / 100).toFixed(2);
+          throw new BadRequestException({
+            message: `Cannot publish below hard floor (A$${minAud} inc GST)`,
+            code: 'PRICE_BELOW_FLOOR',
+            floorExGstCents: floored.hardFloor.floorExGstCents,
+            floorIncGstCents: floored.hardFloor.floorIncGstCents,
+            versionId: floored.rateFloorVersionId,
+          });
+        }
+      }
+    }
+
     await this.prisma.job.update({
       where: { id: job.id },
       data: {
         status: JobStatus.PUBLISHED,
         publishedAt: new Date(),
         publishRequestedAt: null,
+        ...floorUpdate,
       },
     });
 
@@ -1731,7 +1879,11 @@ export class JobsService {
       actorUserId: user.id,
       entityType: 'Job',
       entityId: job.id,
-      metadata: { transition: 'DRAFT→PUBLISHED→BIDDING' },
+      metadata: {
+        transition: 'DRAFT→PUBLISHED→BIDDING',
+        rateFloorVersionId: floorUpdate.rateFloorVersionId ?? null,
+        rateFloorIncGstCents: floorUpdate.rateFloorIncGstCents ?? null,
+      },
     });
 
     void this.notifyEligibleCarriersOfPublish(job.id).catch((error: unknown) => {

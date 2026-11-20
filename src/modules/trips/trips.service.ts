@@ -15,6 +15,8 @@ import {
   JobPricingModel,
   JobStatus,
   NotificationType,
+  PaymentEventStatus,
+  PaymentEventType,
   PlatformRole,
   Prisma,
   SurchargeKind,
@@ -51,6 +53,7 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { InAppNotificationsService } from '../notifications/in-app-notifications.service';
 import { NotificationsService } from '../notifications/notifications.service';
+import { NhvrService } from '../nhvr/nhvr.service';
 import { PaymentsService } from '../payments/payments.service';
 import {
   DEFAULT_GEOFENCE_POLICY,
@@ -59,6 +62,7 @@ import {
   isInsideRadius,
   massSurchargeIncGstCents,
   parseGeofencePolicy,
+  splitIncGst,
   waitOverageMinutes,
   waitingSurchargeIncGstCents,
   type GeofencePolicy,
@@ -100,6 +104,8 @@ export class TripsService {
     private readonly payments: PaymentsService,
     private readonly notifications: NotificationsService,
     @Optional() private readonly inbox?: InAppNotificationsService,
+    /** EWD diary sync on break (NhvrModule). Optional so legacy path specs keep working. */
+    @Optional() private readonly nhvr?: NhvrService,
   ) {}
 
   private ensureDatabase() {
@@ -1340,6 +1346,16 @@ export class TripsService {
     if (!trip.startedAt) {
       throw new BadRequestException('Trip not started');
     }
+    // D3: same choke-point as diary — trip break also logs REST/WORK in EWD.
+    if (this.nhvr) {
+      const rego = trip.assignment?.vehicle?.registration ?? undefined;
+      const odo =
+        trip.odometerStartKm != null ? Math.round(Number(trip.odometerStartKm)) : undefined;
+      await this.nhvr.syncFromTripBreak(principal.id, input.onBreak, {
+        vehicleRego: rego,
+        odometer: odo,
+      });
+    }
     const updated = await this.prisma.trip.update({
       where: { id: trip.id },
       data: {
@@ -1353,14 +1369,14 @@ export class TripsService {
       actorUserId: user.id,
       entityType: 'Trip',
       entityId: trip.id,
-      metadata: { onBreak: input.onBreak },
+      metadata: { onBreak: input.onBreak, ewdSynced: Boolean(this.nhvr) },
     });
     if (input.onBreak) {
       void this.emitTripInbox({
         tripId: trip.id,
         type: NotificationType.TRIP_BREAK,
         title: 'Driver on break',
-        body: 'Live tracking is paused while the driver is on break.',
+        body: 'Live tracking is paused while the driver is on break. Work diary logged REST.',
       });
     }
     return this.mapTrip(updated);
@@ -1703,6 +1719,357 @@ export class TripsService {
     }
   }
 
+  /**
+   * Hourly run sheet PDF — layout aligned to
+   * `templates/hourly-run-sheet.preview.html` / `docs/operations/clox-run-sheet.md`.
+   */
+  private async buildHourlyRunSheetPdf(params: {
+    trip: {
+      id: string;
+      jobId: string;
+      startedAt: Date | null;
+      completedAt: Date | null;
+      onBreak: boolean;
+      breakStartedAt: Date | null;
+      job: {
+        title: string | null;
+        billableHours: number | null;
+        hourlyPattern: string | null;
+        routeDistanceKm: number | null;
+        siteManeuverability: string | null;
+        siteFacility: string | null;
+        stops: Array<{
+          id: string;
+          stopType: string;
+          addressLine: string | null;
+          suburb: string | null;
+          state: string | null;
+          postcode: string | null;
+        }>;
+      };
+      stopProgress: Array<{
+        jobStopId: string;
+        enteredAt: Date | null;
+        exitedAt: Date | null;
+        waitOverageMinutes: number;
+        signerName: string | null;
+        signatureStorageKey: string | null;
+        signedAt: Date | null;
+      }>;
+      assignment: {
+        driver: { id: string } | null;
+        vehicle: { registration: string | null; label: string | null } | null;
+      } | null;
+    } & TripOdometerFields;
+    driverName: string;
+    carrier: { legalName: string | null; tradingName: string | null; abn: string | null } | null;
+    completedDate: string;
+  }): Promise<Buffer> {
+    const { trip, driverName, carrier, completedDate } = params;
+    const byStop = new Map(trip.stopProgress.map((p) => [p.jobStopId, p]));
+    const odo = this.asTripOdometer(trip);
+    const stopCount = trip.job.stops.length;
+    const dangerRowIndexes: number[] = [];
+
+    const tableRows = trip.job.stops.map((stop, index) => {
+      const p = byStop.get(stop.id);
+      const arrive = p?.enteredAt ? formatPodDateTime(p.enteredAt) : '-';
+      const depart = p?.exitedAt ? formatPodDateTime(p.exitedAt) : '-';
+      let dwellMins: number | null = null;
+      if (p?.enteredAt && p?.exitedAt) {
+        dwellMins = Math.max(
+          0,
+          Math.round((p.exitedAt.getTime() - p.enteredAt.getTime()) / 60_000),
+        );
+      }
+      const dwell =
+        dwellMins != null
+          ? `${dwellMins} mins`
+          : p?.waitOverageMinutes
+            ? `${p.waitOverageMinutes}m overage`
+            : '-';
+      if (dwellMins != null && dwellMins > 60) {
+        dangerRowIndexes.push(index);
+      }
+      const addr =
+        [
+          stop.addressLine,
+          [stop.suburb, stop.state, stop.postcode].filter(Boolean).join(' '),
+        ]
+          .filter(Boolean)
+          .join(', ') || '-';
+      let odoCell = 'N/A (GPS sync)';
+      if (index === 0) {
+        odoCell =
+          odo.odometerStartKm != null
+            ? `${odo.odometerStartKm} km (manual)`
+            : 'not captured (manual)';
+      } else if (index === stopCount - 1) {
+        odoCell =
+          odo.odometerEndKm != null
+            ? `${odo.odometerEndKm} km (final manual)`
+            : 'not captured (final manual)';
+      }
+      return [
+        String(index + 1),
+        stop.stopType,
+        addr,
+        arrive,
+        depart,
+        dwell,
+        odoCell,
+      ];
+    });
+
+    const firstArrive = trip.job.stops
+      .map((s) => byStop.get(s.id)?.enteredAt)
+      .find((d): d is Date => Boolean(d));
+    const lastArrive = [...trip.job.stops]
+      .reverse()
+      .map((s) => byStop.get(s.id)?.enteredAt)
+      .find((d): d is Date => Boolean(d));
+    let actualHours: number | null = null;
+    if (firstArrive && lastArrive) {
+      actualHours = Math.max(
+        0,
+        (lastArrive.getTime() - firstArrive.getTime()) / (1000 * 60 * 60),
+      );
+    }
+    const billedHours = Math.max(4, trip.job.billableHours ?? actualHours ?? 4);
+    const floorNote =
+      actualHours != null && actualHours < 4
+        ? `4-hour floor: Total time: ${actualHours.toFixed(2)} h · Billed time: 4.0 hours (Minimum Engagement).`
+        : `Billed hours: ${billedHours.toFixed(1)} (4.0 hour floor applies).`;
+
+    const odoDelta =
+      odo.odometerStartKm != null && odo.odometerEndKm != null
+        ? odo.odometerEndKm - odo.odometerStartKm
+        : null;
+    const gpsKm = odo.odometerGpsDistanceKm;
+    const distanceLabel =
+      gpsKm != null
+        ? `${gpsKm.toFixed(1)} km (GPS)`
+        : odoDelta != null
+          ? `${odoDelta.toFixed(1)} km (odometer)`
+          : trip.job.routeDistanceKm != null
+            ? `${trip.job.routeDistanceKm} km (planned)`
+            : '-';
+
+    const callouts: Array<{ tone: 'billing' | 'flag'; text: string }> = [
+      { tone: 'billing', text: floorNote },
+    ];
+    if (odo.odometerDiscrepancyFlag) {
+      const odoPart =
+        odoDelta != null ? `${odoDelta.toFixed(1)} km odo` : 'odo n/a';
+      const gpsPart = gpsKm != null ? `${gpsKm.toFixed(1)} km GPS` : 'GPS n/a';
+      callouts.push({
+        tone: 'flag',
+        text: `FLAG: Odometer vs GPS discrepancy > 10% (${odoPart} / ${gpsPart}) — Super Admin review`,
+      });
+    }
+
+    const driverId = trip.assignment?.driver?.id;
+    const windowStart = trip.startedAt ?? firstArrive;
+    const windowEnd = trip.completedAt ?? lastArrive ?? new Date();
+    const breakTableRows: string[][] = [];
+    let totalWorkLabel = '-';
+    let totalRestLabel = '-';
+
+    if (driverId && windowStart) {
+      try {
+        const records = await this.prisma.ewdWorkRestRecord.findMany({
+          where: {
+            driverId,
+            startTime: { gte: windowStart, lte: windowEnd },
+          },
+          orderBy: { startTime: 'asc' },
+        });
+        let workMins = 0;
+        let restMins = 0;
+        let breakIndex = 0;
+        for (const rec of records) {
+          const mins =
+            rec.durationMinutes ??
+            (rec.endTime
+              ? Math.max(
+                  0,
+                  Math.round(
+                    (rec.endTime.getTime() - rec.startTime.getTime()) / 60_000,
+                  ),
+                )
+              : null);
+          if (rec.activity === 'WORK') {
+            workMins += mins ?? 0;
+          } else if (rec.activity === 'REST') {
+            restMins += mins ?? 0;
+            breakIndex += 1;
+            breakTableRows.push([
+              `Break ${breakIndex}`,
+              formatPodDateTime(rec.startTime),
+              rec.endTime ? formatPodDateTime(rec.endTime) : 'open',
+              mins != null ? `${mins} mins` : '-',
+              rec.locationStart || rec.locationEnd || '-',
+            ]);
+          }
+        }
+        if (workMins > 0 || restMins > 0) {
+          totalWorkLabel = formatHhMm(workMins);
+          totalRestLabel = formatHhMm(restMins);
+        }
+      } catch (err) {
+        this.logger.warn(
+          `Run sheet EWD break lookup failed trip=${trip.id}: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+    }
+
+    if (breakTableRows.length === 0) {
+      if (trip.onBreak && trip.breakStartedAt) {
+        breakTableRows.push([
+          'Break 1',
+          formatPodDateTime(trip.breakStartedAt),
+          'open',
+          '-',
+          '-',
+        ]);
+      } else {
+        breakTableRows.push(['—', 'No breaks recorded', '-', '-', '-']);
+      }
+    }
+
+    const signedStops = [...trip.stopProgress]
+      .filter((p) => p.signerName)
+      .sort((a, b) => {
+        const at = a.signedAt?.getTime() ?? 0;
+        const bt = b.signedAt?.getTime() ?? 0;
+        return bt - at;
+      });
+    const finalSigned = signedStops[0];
+    const signer = finalSigned?.signerName ?? '-';
+    const signatureImages: BrandedPdfImage[] = [];
+    if (finalSigned?.signatureStorageKey) {
+      const sigFile = await this.readStoredArtifact(finalSigned.signatureStorageKey);
+      if (sigFile) {
+        signatureImages.push({
+          caption: `Final receiver SOG | ${signer}`,
+          buffer: sigFile.buffer,
+          fitWidth: 220,
+          fitHeight: 90,
+        });
+      }
+    }
+
+    const jobShort = trip.jobId.slice(0, 8);
+    return buildBrandedPdf({
+      documentTitle: 'Hourly Run Sheet',
+      subtitle: `Job ${jobShort} | ${completedDate}`,
+      headerRef: `CLOX-runsheet-${jobShort} | Job ${jobShort}`,
+      logo: loadCloxLogoBuffer(),
+      footerNote: 'CLOX | Confidential | System-generated hourly run sheet',
+      sections: [
+        {
+          title: 'Trip header',
+          rows: [
+            { label: 'Driver', value: driverName },
+            { label: 'Date', value: completedDate },
+            {
+              label: 'Transport company',
+              value: carrier?.legalName || carrier?.tradingName || '-',
+            },
+            { label: 'ABN', value: carrier?.abn || '-' },
+            {
+              label: 'Vehicle rego',
+              value: trip.assignment?.vehicle?.registration || '-',
+            },
+            { label: 'Job ID', value: trip.jobId },
+            { label: 'Pattern', value: trip.job.hourlyPattern || '-' },
+            {
+              label: 'Site access',
+              value: `${trip.job.siteManeuverability || '-'} / ${trip.job.siteFacility || '-'}`,
+            },
+          ],
+        },
+        {
+          title: 'Trip summary',
+          rows: [
+            {
+              label: 'Total duration',
+              value:
+                actualHours != null
+                  ? `${actualHours.toFixed(2)} h actual · billed ${billedHours.toFixed(1)} h`
+                  : `Billed ${billedHours.toFixed(1)} h`,
+            },
+            { label: 'Total distance', value: distanceLabel },
+            {
+              label: 'Odometer',
+              value: [
+                odo.odometerStartKm != null
+                  ? `start ${odo.odometerStartKm} km`
+                  : 'start n/a',
+                odo.odometerEndKm != null
+                  ? `end ${odo.odometerEndKm} km`
+                  : 'end n/a',
+                odoDelta != null ? `delta ${odoDelta.toFixed(1)} km` : null,
+              ]
+                .filter(Boolean)
+                .join(' · '),
+            },
+          ],
+          callouts,
+        },
+        {
+          title: 'Stops',
+          table: {
+            headers: [
+              '#',
+              'Type',
+              'Address',
+              'Arrival',
+              'Departure',
+              'Dwell / wait',
+              'Odometer',
+            ],
+            rows: tableRows,
+            dangerRowIndexes,
+          },
+          paragraphs:
+            dangerRowIndexes.length > 0
+              ? [
+                  'Dwell > 60 minutes flagged in red for potential detention billing.',
+                ]
+              : undefined,
+        },
+        {
+          title: 'Fatigue & break log',
+          table: {
+            headers: ['Break', 'Start', 'End', 'Duration', 'Location'],
+            rows: breakTableRows,
+          },
+          rows: [
+            { label: 'Total work time', value: totalWorkLabel },
+            { label: 'Total rest time', value: totalRestLabel },
+          ],
+        },
+        {
+          title: 'Signatures',
+          rows: [
+            {
+              label: 'Driver signature',
+              value: `${driverName} (digital capture on device — see diary/SOG if stored)`,
+            },
+            {
+              label: 'Final receiver (SOG)',
+              value: signer,
+            },
+          ],
+          images: signatureImages,
+        },
+      ],
+    });
+  }
+
   /** M10 Phase D — tax invoice + hourly run sheet after COMPLETED. */
   private async generateCompletionDocuments(tripId: string, actorUserId?: string) {
     const trip = await this.prisma.trip.findUnique({
@@ -1759,21 +2126,63 @@ export class TripsService {
     if (trip.taxInvoiceStorageKey) return;
 
     const proposal = trip.assignment?.proposal;
-    const surchargeInc = trip.surcharges
-      .filter((s) => s.status === SurchargeStatus.PAID)
-      .reduce((sum, s) => sum + s.amountIncGstCents, 0);
-    const surchargeEx = trip.surcharges
-      .filter((s) => s.status === SurchargeStatus.PAID)
-      .reduce((sum, s) => sum + s.amountExGstCents, 0);
-    const surchargeGst = trip.surcharges
-      .filter((s) => s.status === SurchargeStatus.PAID)
-      .reduce((sum, s) => sum + s.amountGstCents, 0);
-    const baseEx = proposal?.amountExGstCents ?? trip.job.estimateExGstCents ?? 0;
-    const baseGst = proposal?.amountGstCents ?? trip.job.estimateGstCents ?? 0;
-    const baseInc = proposal?.amountIncGstCents ?? trip.job.estimateIncGstCents ?? 0;
-    const totalEx = baseEx + surchargeEx;
-    const totalGst = baseGst + surchargeGst;
-    const totalInc = baseInc + surchargeInc;
+    const paidSurcharges = trip.surcharges.filter(
+      (s) => s.status === SurchargeStatus.PAID,
+    );
+
+    /** Prefer snapshotted PaymentEvent amounts (per-sender fee already applied at charge). */
+    const chargeEvent = await this.prisma.paymentEvent.findFirst({
+      where: {
+        jobId: trip.jobId,
+        type: PaymentEventType.CHARGE,
+        status: PaymentEventStatus.SUCCEEDED,
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+    const fareSnap = parseSenderFeeSnapshot(
+      chargeEvent?.metadata,
+      chargeEvent?.amountIncGstCents ??
+        proposal?.amountIncGstCents ??
+        trip.job.estimateIncGstCents ??
+        0,
+    );
+    const freightBaseInc =
+      fareSnap.baseIncGstCents > 0
+        ? fareSnap.baseIncGstCents
+        : (proposal?.amountIncGstCents ?? trip.job.estimateIncGstCents ?? 0);
+    const freightBase = splitIncGst(freightBaseInc);
+    const freightFeeInc =
+      fareSnap.mode === 'EXCLUSIVE' ? fareSnap.feeIncGstCents : 0;
+    const freightFee = splitIncGst(freightFeeInc);
+
+    /** Surcharges are carrier-bound on the invoice (no CLOX fee line). */
+    const surchargeEx = paidSurcharges.reduce(
+      (sum, s) => sum + s.amountExGstCents,
+      0,
+    );
+    const surchargeGst = paidSurcharges.reduce(
+      (sum, s) => sum + s.amountGstCents,
+      0,
+    );
+    const surchargeInc = paidSurcharges.reduce(
+      (sum, s) => sum + s.amountIncGstCents,
+      0,
+    );
+
+    const totalInc =
+      (chargeEvent?.amountIncGstCents ??
+        freightBase.amountIncGstCents + freightFee.amountIncGstCents) +
+      surchargeInc;
+    const total = splitIncGst(totalInc);
+
+    const feePercent = fareSnap.feePercent;
+    const feeMode = fareSnap.mode;
+    const feeDisclosure =
+      feePercent > 0
+        ? feeMode === 'EXCLUSIVE'
+          ? `CLOX platform fee ${feePercent}% exclusive applied on freight at payment.`
+          : `CLOX platform fee ${feePercent}% inclusive — listed freight is all-in; fee is disclosure only.`
+        : 'No CLOX platform fee on this freight charge.';
 
     const sender = trip.job.senderCompany;
     const carrier = trip.assignment?.carrierCompany;
@@ -1797,9 +2206,47 @@ export class TripsService {
 
     const invoiceRef = `INV-${trip.jobId.slice(0, 8).toUpperCase()}`;
     const completedDate = (trip.completedAt ?? new Date()).toISOString().slice(0, 10);
+    /** Matches approved `templates/tax-invoice.preview.html` amounts table. */
+    const amountTableRows: string[][] = [
+      [
+        'Freight base (accepted bid)',
+        formatAudCents(freightBase.amountExGstCents),
+        formatAudCents(freightBase.amountGstCents),
+        formatAudCents(freightBase.amountIncGstCents),
+      ],
+    ];
+    const accentRowIndexes: number[] = [];
+    if (feeMode === 'EXCLUSIVE' && freightFee.amountIncGstCents > 0) {
+      accentRowIndexes.push(amountTableRows.length);
+      amountTableRows.push([
+        `CLOX platform fee ${feePercent}% exclusive`,
+        formatAudCents(freightFee.amountExGstCents),
+        formatAudCents(freightFee.amountGstCents),
+        formatAudCents(freightFee.amountIncGstCents),
+      ]);
+    }
+    if (surchargeInc > 0) {
+      amountTableRows.push([
+        'Paid surcharges (carrier)',
+        formatAudCents(surchargeEx),
+        formatAudCents(surchargeGst),
+        formatAudCents(surchargeInc),
+      ]);
+    }
+    amountTableRows.push([
+      'Total charged',
+      formatAudCents(total.amountExGstCents),
+      formatAudCents(total.amountGstCents),
+      formatAudCents(total.amountIncGstCents),
+    ]);
+
+    const carrierName =
+      carrier?.legalName || carrier?.tradingName || 'Carrier';
+    const vehicleRego = trip.assignment?.vehicle?.registration || '-';
+
     const invoicePdf = await buildBrandedPdf({
       documentTitle: 'Tax Invoice',
-      subtitle: `${invoiceRef} | ${completedDate}`,
+      subtitle: `${invoiceRef} | ${completedDate} | AUD | What the sender paid`,
       headerRef: `${invoiceRef} | Job ${trip.jobId.slice(0, 8)}`,
       logo: loadCloxLogoBuffer(),
       footerNote: 'CLOX | Confidential | System-generated tax invoice',
@@ -1811,54 +2258,47 @@ export class TripsService {
             { label: 'Job', value: trip.job.title || trip.jobId },
             { label: 'Date', value: completedDate },
             { label: 'Pricing model', value: trip.job.pricingModel },
+            {
+              label: 'CLOX platform fee',
+              value:
+                feePercent > 0
+                  ? `${feePercent}% ${feeMode.toLowerCase()} (freight only)`
+                  : 'none',
+            },
           ],
         },
         {
-          title: 'Bill to',
+          title: 'Parties',
           rows: [
-            { label: 'Name', value: billTo },
+            { label: 'Bill to (sender)', value: billTo },
             { label: 'Address', value: billAddress || '-' },
             { label: 'Sender ABN', value: sender?.abn || '-' },
-          ],
-        },
-        {
-          title: 'Supplier',
-          rows: [
-            {
-              label: 'Carrier',
-              value: carrier?.legalName || carrier?.tradingName || 'Carrier',
-            },
+            { label: 'Supplier (carrier)', value: carrierName },
             { label: 'Carrier ABN', value: carrier?.abn || '-' },
-            { label: 'Driver', value: driverName },
             {
-              label: 'Vehicle',
-              value: trip.assignment?.vehicle?.registration || '-',
+              label: 'Driver / vehicle',
+              value: `${driverName} · ${vehicleRego}`,
             },
           ],
         },
         {
-          title: 'Amounts (AUD)',
-          rows: [
-            { label: 'Freight (ex GST)', value: formatAudCents(baseEx) },
-            { label: 'Freight GST', value: formatAudCents(baseGst) },
-            { label: 'Freight (inc GST)', value: formatAudCents(baseInc) },
-            {
-              label: 'Paid surcharges (ex GST)',
-              value: formatAudCents(surchargeEx),
-            },
-            {
-              label: 'Paid surcharges GST',
-              value: formatAudCents(surchargeGst),
-            },
-            { label: 'Total ex GST', value: formatAudCents(totalEx) },
-            { label: 'Total GST', value: formatAudCents(totalGst) },
-            { label: 'Total inc GST', value: formatAudCents(totalInc) },
-          ],
+          title: 'Amounts (AUD) — what sender paid',
+          table: {
+            headers: ['Description', 'Ex GST', 'GST', 'Inc GST'],
+            rows: amountTableRows,
+            accentRowIndexes,
+          },
         },
         {
           title: 'Notes',
           paragraphs: [
-            'This is a system-generated tax invoice summary from CLOX. Retain for your records.',
+            ...(feeMode === 'INCLUSIVE' && feePercent > 0
+              ? [
+                  `Inclusive disclosure: listed freight includes ~${formatAudCents(fareSnap.feeIncGstCents)} CLOX platform fee (${feePercent}%).`,
+                ]
+              : []),
+            feeDisclosure,
+            'Paid surcharges are carrier amounts (no CLOX platform fee line).',
           ],
         },
       ],
@@ -1875,126 +2315,11 @@ export class TripsService {
     let runSheetKey: string | null = null;
     let runSheetPdf: Buffer | null = null;
     if (trip.job.pricingModel === JobPricingModel.HOURLY) {
-      const byStop = new Map(trip.stopProgress.map((p) => [p.jobStopId, p]));
-      const tableRows = trip.job.stops.map((stop, index) => {
-        const p = byStop.get(stop.id);
-        const arrive = p?.enteredAt
-          ? p.enteredAt.toISOString().replace('T', ' ').slice(0, 16)
-          : '-';
-        const depart = p?.exitedAt
-          ? p.exitedAt.toISOString().replace('T', ' ').slice(0, 16)
-          : '-';
-        const dwell =
-          p?.waitOverageMinutes != null ? `${p.waitOverageMinutes}m` : '-';
-        const addr = [stop.suburb, stop.state].filter(Boolean).join(', ') || '-';
-        return [
-          String(index + 1),
-          stop.stopType,
-          addr,
-          arrive,
-          depart,
-          dwell,
-        ];
-      });
-      const firstArrive = trip.job.stops
-        .map((s) => byStop.get(s.id)?.enteredAt)
-        .find((d): d is Date => Boolean(d));
-      const lastArrive = [...trip.job.stops]
-        .reverse()
-        .map((s) => byStop.get(s.id)?.enteredAt)
-        .find((d): d is Date => Boolean(d));
-      let actualHours: number | null = null;
-      if (firstArrive && lastArrive) {
-        actualHours = Math.max(
-          0,
-          (lastArrive.getTime() - firstArrive.getTime()) / (1000 * 60 * 60),
-        );
-      }
-      const billedHours = Math.max(4, trip.job.billableHours ?? actualHours ?? 4);
-      const floorNote =
-        actualHours != null && actualHours < 4
-          ? `Total time: ${actualHours.toFixed(2)}h | Billed: 4.0 hours (minimum engagement).`
-          : `Billed hours: ${billedHours.toFixed(1)} (4.0 hour floor applies).`;
-
-      const signer =
-        trip.stopProgress.find((p) => p.signerName)?.signerName ?? '-';
-      const jobShortInv = trip.jobId.slice(0, 8);
-      runSheetPdf = await buildBrandedPdf({
-        documentTitle: 'Hourly Run Sheet',
-        subtitle: `Job ${jobShortInv} | ${completedDate}`,
-        headerRef: `CLOX-runsheet-${jobShortInv} | Job ${jobShortInv}`,
-        logo: loadCloxLogoBuffer(),
-        footerNote: 'CLOX | Confidential | System-generated hourly run sheet',
-        sections: [
-          {
-            title: 'Trip header',
-            rows: [
-              { label: 'Job ID', value: trip.jobId },
-              { label: 'Date', value: completedDate },
-              { label: 'Driver', value: driverName },
-              {
-                label: 'Transport company',
-                value: carrier?.legalName || '-',
-              },
-              { label: 'ABN', value: carrier?.abn || '-' },
-              {
-                label: 'Vehicle rego',
-                value: trip.assignment?.vehicle?.registration || '-',
-              },
-              { label: 'Pattern', value: trip.job.hourlyPattern || '-' },
-              {
-                label: 'Route distance (planned)',
-                value: `${trip.job.routeDistanceKm ?? '-'} km`,
-              },
-              {
-                label: 'Site access',
-                value: `${trip.job.siteManeuverability || '-'} / ${trip.job.siteFacility || '-'}`,
-              },
-            ],
-          },
-          {
-            title: 'Stops',
-            table: {
-              headers: ['#', 'Type', 'Suburb', 'Arrival', 'Departure', 'Wait'],
-              rows: tableRows,
-            },
-            paragraphs: [
-              (() => {
-                const odo = this.asTripOdometer(trip);
-                const start = odo.odometerStartKm;
-                const end = odo.odometerEndKm;
-                const gps = odo.odometerGpsDistanceKm;
-                const delta =
-                  start != null && end != null ? (end - start).toFixed(1) : null;
-                const parts = [
-                  `Start odometer: ${start != null ? `${start} km` : 'not captured'}`,
-                  `End odometer: ${end != null ? `${end} km` : 'not captured'}`,
-                  delta != null ? `Odo distance: ${delta} km` : null,
-                  gps != null ? `GPS path: ${gps.toFixed(1)} km` : null,
-                  odo.odometerDiscrepancyFlag
-                    ? 'FLAG: odometer vs GPS discrepancy > 10% — Super Admin review'
-                    : null,
-                ].filter(Boolean);
-                return parts.join(' | ');
-              })(),
-            ],
-          },
-          {
-            title: 'Fatigue / break log',
-            rows: [
-              {
-                label: 'Break at completion',
-                value: trip.onBreak ? 'yes' : 'no',
-              },
-              {
-                label: 'Break started',
-                value: trip.breakStartedAt?.toISOString() ?? '-',
-              },
-              { label: 'Billing note', value: floorNote },
-              { label: 'Final receiver (SOG)', value: signer },
-            ],
-          },
-        ],
+      runSheetPdf = await this.buildHourlyRunSheetPdf({
+        trip,
+        driverName,
+        carrier,
+        completedDate,
       });
       const runSheetArtifact = await writeTripArtifact({
         rootDir: this.storageRoot(),
@@ -2042,46 +2367,45 @@ export class TripsService {
     ];
     const receiverEmail = trip.job.receiverEmail ?? null;
 
-    const attachments: Array<{
+    let podAttachment: {
       filename: string;
       content: Buffer;
       contentType: string;
-    }> = [
-      {
-        filename: `CLOX-tax-invoice-${invoiceRef}.pdf`,
-        content: invoicePdf,
-        contentType: 'application/pdf',
-      },
-    ];
-    if (runSheetPdf) {
-      attachments.push({
-        filename: `CLOX-run-sheet-${trip.jobId.slice(0, 8)}.pdf`,
-        content: runSheetPdf,
-        contentType: 'application/pdf',
-      });
-    }
+    } | null = null;
     if (trip.podStorageKey) {
       try {
         const podBuf = await readFile(join(this.storageRoot(), trip.podStorageKey));
-        attachments.push({
+        podAttachment = {
           filename: `CLOX-POD-${trip.jobId.slice(0, 8)}.pdf`,
           content: podBuf,
           contentType: 'application/pdf',
-        });
+        };
       } catch {
         // POD already emailed at finalize; skip if file missing.
       }
     }
 
+    // PRD / run-sheet spec: invoice → sender; run sheet → sender + carrier; POD → receiver (+ sender).
     await this.notifications.notifyTripCompletionDocuments({
       senderEmails,
       carrierEmails,
       receiverEmail,
       jobId: trip.jobId,
       jobTitle: trip.job.title,
-      hasRunSheet: Boolean(runSheetKey),
       totalIncGstCents: totalInc,
-      attachments,
+      taxInvoice: {
+        filename: `CLOX-tax-invoice-${invoiceRef}.pdf`,
+        content: invoicePdf,
+        contentType: 'application/pdf',
+      },
+      runSheet: runSheetPdf
+        ? {
+            filename: `CLOX-run-sheet-${trip.jobId.slice(0, 8)}.pdf`,
+            content: runSheetPdf,
+            contentType: 'application/pdf',
+          }
+        : null,
+      pod: podAttachment,
     });
   }
 
@@ -2253,6 +2577,7 @@ export class TripsService {
                 user: { select: { name: true, email: true } },
               },
             },
+            vehicle: { select: { registration: true, label: true } },
           },
         },
       },
@@ -2280,6 +2605,28 @@ export class TripsService {
       carrier.tradingName || carrier.legalName || '—';
     const driverUser = trip.assignment.driver?.user;
     const driverName = driverUser?.name || driverUser?.email || '—';
+    const vehicleRego =
+      trip.assignment.vehicle?.registration ||
+      trip.assignment.vehicle?.label ||
+      null;
+    const driverId = trip.assignment.driver?.id;
+    const facePhoto = driverId
+      ? await this.prisma.complianceDocument.findFirst({
+          where: {
+            driverId,
+            docType: 'SELFIE',
+            status: { in: ['UPLOADED', 'UNDER_REVIEW', 'APPROVED'] },
+            storageKey: { not: null },
+          },
+          orderBy: { createdAt: 'desc' },
+          select: {
+            id: true,
+            storageKey: true,
+            mimeType: true,
+            originalFilename: true,
+          },
+        })
+      : null;
 
     return {
       trip,
@@ -2293,6 +2640,8 @@ export class TripsService {
       jobId: trip.jobId,
       carrierName,
       driverName,
+      vehicleRego,
+      facePhoto,
     };
   }
 
@@ -2440,6 +2789,31 @@ export class TripsService {
     const parties = await this.resolveNotifyParties(params.tripId, params.jobStopId);
     let sentTo: string[] = [];
     try {
+      let facePhotoAttachment:
+        | { filename: string; content: Buffer; contentType: string }
+        | null = null;
+      const face = parties.facePhoto;
+      if (face?.storageKey) {
+        try {
+          const buf = await readFile(join(this.storageRoot(), face.storageKey));
+          const mime = face.mimeType || 'image/jpeg';
+          const ext =
+            mime.includes('png')
+              ? '.png'
+              : mime.includes('webp')
+                ? '.webp'
+                : '.jpg';
+          facePhotoAttachment = {
+            filename:
+              face.originalFilename ||
+              `CLOX-driver-photo-${parties.jobId.slice(0, 8)}${ext}`,
+            content: buf,
+            contentType: mime,
+          };
+        } catch {
+          // Photo missing on disk — still send text identity.
+        }
+      }
       const mail = await this.notifications.notifyTripApproaching({
         senderEmails: parties.senderEmails,
         receiverEmail: parties.receiverEmail,
@@ -2449,6 +2823,9 @@ export class TripsService {
         dropAddress: parties.dropAddress,
         etaLabel: params.etaLabel,
         source: params.source,
+        driverName: parties.driverName,
+        vehicleRego: parties.vehicleRego,
+        facePhoto: facePhotoAttachment,
       });
       sentTo = mail.sentTo;
     } catch {
@@ -3130,4 +3507,59 @@ export class TripsService {
       return null;
     }
   }
+}
+
+/** Format minutes as HH:MM for run-sheet work/rest totals. */
+function formatHhMm(totalMinutes: number): string {
+  const mins = Math.max(0, Math.round(totalMinutes));
+  const h = Math.floor(mins / 60);
+  const m = mins % 60;
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+}
+
+/**
+ * Read sender platform-fee fields snapshotted onto PaymentEvent / Surcharge metadata
+ * at charge time (national % or CompanySenderFeeOverride — never re-resolve at invoice).
+ */
+function parseSenderFeeSnapshot(
+  metadata: unknown,
+  fallbackChargeIncGstCents: number,
+): {
+  baseIncGstCents: number;
+  feeIncGstCents: number;
+  feePercent: number;
+  mode: 'EXCLUSIVE' | 'INCLUSIVE';
+  overrideId: string | null;
+  chargeIncGstCents: number;
+} {
+  const meta =
+    metadata && typeof metadata === 'object' && !Array.isArray(metadata)
+      ? (metadata as Record<string, unknown>)
+      : {};
+  const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+  const baseIncGstCents =
+    num(meta.baseIncGstCents) ?? fallbackChargeIncGstCents;
+  const feeIncGstCents = num(meta.senderFeeIncGstCents) ?? 0;
+  const feePercent = Math.max(0, Math.trunc(num(meta.senderFeePercent) ?? 0));
+  const mode =
+    meta.senderFeeMode === 'INCLUSIVE' || meta.senderFeeMode === 'EXCLUSIVE'
+      ? meta.senderFeeMode
+      : 'EXCLUSIVE';
+  const overrideId =
+    typeof meta.senderFeeOverrideId === 'string' && meta.senderFeeOverrideId
+      ? meta.senderFeeOverrideId
+      : null;
+  const chargeIncGstCents =
+    num(meta.settlementGrossIncGstCents) ??
+    (mode === 'EXCLUSIVE'
+      ? baseIncGstCents + feeIncGstCents
+      : baseIncGstCents);
+  return {
+    baseIncGstCents,
+    feeIncGstCents,
+    feePercent,
+    mode,
+    overrideId,
+    chargeIncGstCents,
+  };
 }

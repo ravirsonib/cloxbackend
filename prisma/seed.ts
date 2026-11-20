@@ -452,7 +452,7 @@ async function seedPilotJobAndTrip(vicRegionId: string, carrierCompanyId: string
 
   await prisma.jobStop.upsert({
     where: { id: pickupStopId },
-    update: {},
+    update: { weightKg: 1500 },
     create: {
       id: pickupStopId,
       jobId,
@@ -465,12 +465,13 @@ async function seedPilotJobAndTrip(vicRegionId: string, carrierCompanyId: string
       postcode: '3000',
       lat: -37.8136,
       lng: 144.9631,
+      weightKg: 1500,
     },
   });
 
   await prisma.jobStop.upsert({
     where: { id: dropoffStopId },
-    update: {},
+    update: { weightKg: 1500 },
     create: {
       id: dropoffStopId,
       jobId,
@@ -485,6 +486,7 @@ async function seedPilotJobAndTrip(vicRegionId: string, carrierCompanyId: string
       lng: 144.9961,
       receiverName: 'Jamie Receiver',
       receiverEmail: 'receiver.qa@yopmail.com',
+      weightKg: 1500,
     },
   });
 

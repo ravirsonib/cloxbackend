@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>CLOX — Tax Invoice (preview)</title>
+    <style>
+      :root {
+        --navy: #1a2f4c;
+        --ink: #17233b;
+        --mute: #5b6b84;
+        --line: #dce2ec;
+        --orange: #f26e22;
+        --surface: #f3f5f9;
+        --white: #ffffff;
+        --warn-bg: #fff7ed;
+        --warn-border: #fdba74;
+        --warn-ink: #9a3412;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        background: #e8ecf2;
+        color: var(--ink);
+        font-family: "Segoe UI", Helvetica, Arial, sans-serif;
+        font-size: 12px;
+        line-height: 1.45;
+      }
+      .page {
+        width: 210mm;
+        min-height: 297mm;
+        margin: 24px auto;
+        background: var(--white);
+        box-shadow: 0 8px 28px rgba(23, 35, 59, 0.12);
+        display: flex;
+        flex-direction: column;
+      }
+      .header {
+        background: var(--navy);
+        color: var(--white);
+        padding: 14px 22px 12px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+      }
+      .header-brand {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+      }
+      .header-brand img {
+        height: 36px;
+        width: auto;
+        display: block;
+      }
+      .header-brand .tag {
+        font-size: 10px;
+        color: #c9d3e4;
+        margin-top: 2px;
+      }
+      .header-doc {
+        text-align: right;
+      }
+      .header-doc .doc-type {
+        font-size: 13px;
+        font-weight: 700;
+        letter-spacing: 0.02em;
+      }
+      .header-doc .doc-ref {
+        font-size: 10px;
+        color: #c9d3e4;
+        margin-top: 2px;
+      }
+      .accent {
+        height: 3px;
+        background: var(--orange);
+      }
+      .body {
+        padding: 20px 28px 14px;
+        flex: 1;
+      }
+      h1 {
+        margin: 0 0 4px;
+        font-size: 20px;
+        color: var(--navy);
+      }
+      .subtitle {
+        margin: 0 0 16px;
+        color: var(--mute);
+        font-size: 11px;
+      }
+      .section {
+        margin-bottom: 16px;
+      }
+      .section h2 {
+        margin: 0 0 6px;
+        font-size: 11px;
+        color: var(--navy);
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+      }
+      .section .rule {
+        height: 1px;
+        background: var(--line);
+        margin-bottom: 10px;
+      }
+      .parties {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 16px;
+      }
+      .party-box {
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        padding: 12px;
+        background: var(--surface);
+      }
+      .party-box .role {
+        font-size: 9px;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        color: var(--mute);
+        margin-bottom: 6px;
+      }
+      .party-box .name {
+        font-size: 13px;
+        font-weight: 700;
+        color: var(--navy);
+        margin-bottom: 6px;
+      }
+      .party-box .line {
+        font-size: 11px;
+        color: var(--ink);
+        margin-bottom: 2px;
+      }
+      .meta-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 6px 24px;
+      }
+      .kv {
+        display: grid;
+        grid-template-columns: 140px 1fr;
+        gap: 2px 10px;
+      }
+      .kv .k {
+        color: var(--mute);
+        font-size: 10px;
+      }
+      .kv .v {
+        color: var(--ink);
+        font-size: 11px;
+      }
+      table.amounts {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 11px;
+      }
+      table.amounts th,
+      table.amounts td {
+        border: 1px solid var(--line);
+        padding: 8px 10px;
+        text-align: left;
+      }
+      table.amounts th {
+        background: var(--surface);
+        color: var(--navy);
+        font-weight: 700;
+      }
+      table.amounts td.num,
+      table.amounts th.num {
+        text-align: right;
+        white-space: nowrap;
+      }
+      table.amounts tr.fee td {
+        background: #fff8f3;
+      }
+      table.amounts tr.total td {
+        font-weight: 700;
+        background: var(--surface);
+      }
+      .note {
+        font-size: 10px;
+        color: var(--mute);
+        margin-top: 8px;
+      }
+      .footer {
+        border-top: 1px solid var(--line);
+        padding: 10px 28px 14px;
+        display: flex;
+        justify-content: space-between;
+        gap: 12px;
+        color: var(--mute);
+        font-size: 9px;
+      }
+      .banner {
+        max-width: 210mm;
+        margin: 16px auto 0;
+        padding: 10px 14px;
+        background: var(--warn-bg);
+        border: 1px solid var(--warn-border);
+        border-radius: 8px;
+        color: var(--warn-ink);
+        font-size: 12px;
+      }
+      .banner ul {
+        margin: 6px 0 0;
+        padding-left: 18px;
+      }
+      .alt {
+        max-width: 210mm;
+        margin: 12px auto 24px;
+        padding: 12px 14px;
+        background: #f8fafc;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        font-size: 12px;
+        color: var(--ink);
+      }
+      .alt h3 {
+        margin: 0 0 6px;
+        font-size: 12px;
+        color: var(--navy);
+      }
+      @media print {
+        body {
+          background: white;
+        }
+        .page {
+          margin: 0;
+          box-shadow: none;
+        }
+        .banner,
+        .alt {
+          display: none;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="banner">
+      <strong>Tax invoice preview</strong>
+      <ul>
+        <li>CLOX platform fee on <strong>freight only</strong> (label: no “sender override” text)</li>
+        <li>Paid surcharges shown as carrier amounts — <strong>no CLOX surcharge fee line</strong></li>
+        <li>Follow-up (not in this template): stop applying fee in payments + settle surcharges 100% to carrier</li>
+      </ul>
+    </div>
+
+    <article class="page">
+      <header class="header">
+        <div class="header-brand">
+          <img src="logo-clox-light.png" alt="CLOX" />
+          <div>
+            <div class="tag">Freight marketplace · Australia</div>
+          </div>
+        </div>
+        <div class="header-doc">
+          <div class="doc-type">Tax Invoice</div>
+          <div class="doc-ref">INV-A1B2C3D4 · Job a1b2c3d4</div>
+        </div>
+      </header>
+      <div class="accent"></div>
+
+      <div class="body">
+        <h1>Tax Invoice</h1>
+        <p class="subtitle">INV-A1B2C3D4 · 19 Nov 2026 · AUD · What the sender paid</p>
+
+        <section class="section">
+          <h2>Invoice summary</h2>
+          <div class="rule"></div>
+          <div class="meta-grid">
+            <div class="kv"><span class="k">Invoice ref</span><span class="v">INV-A1B2C3D4</span></div>
+            <div class="kv"><span class="k">Date</span><span class="v">19 Nov 2026</span></div>
+            <div class="kv"><span class="k">Job</span><span class="v">Metro day hire (a1b2c3d4-…)</span></div>
+            <div class="kv"><span class="k">Pricing model</span><span class="v">HOURLY</span></div>
+            <div class="kv">
+              <span class="k">CLOX platform fee</span>
+              <span class="v">2% exclusive (freight only)</span>
+            </div>
+          </div>
+        </section>
+
+        <section class="section">
+          <h2>Parties</h2>
+          <div class="rule"></div>
+          <div class="parties">
+            <div class="party-box">
+              <div class="role">Bill to (sender)</div>
+              <div class="name">Acme Retail Pty Ltd</div>
+              <div class="line">12 Collins St, Melbourne VIC 3000</div>
+              <div class="line">ABN 12 345 678 901</div>
+            </div>
+            <div class="party-box">
+              <div class="role">Supplier (carrier)</div>
+              <div class="name">Harbour Freight Pty Ltd</div>
+              <div class="line">ABN 51 824 753 556</div>
+              <div class="line">Driver: Jamie Nguyen · Vehicle: ABC123</div>
+            </div>
+          </div>
+        </section>
+
+        <section class="section">
+          <h2>Amounts (AUD) — what sender paid</h2>
+          <div class="rule"></div>
+          <table class="amounts">
+            <thead>
+              <tr>
+                <th>Description</th>
+                <th class="num">Ex GST</th>
+                <th class="num">GST</th>
+                <th class="num">Inc GST</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Freight base (accepted bid)</td>
+                <td class="num">$90.91</td>
+                <td class="num">$9.09</td>
+                <td class="num">$100.00</td>
+              </tr>
+              <tr class="fee">
+                <td>CLOX platform fee 2% exclusive</td>
+                <td class="num">$1.82</td>
+                <td class="num">$0.18</td>
+                <td class="num">$2.00</td>
+              </tr>
+              <tr>
+                <td>Paid surcharges (carrier)</td>
+                <td class="num">$36.36</td>
+                <td class="num">$3.64</td>
+                <td class="num">$40.00</td>
+              </tr>
+              <tr class="total">
+                <td>Total charged</td>
+                <td class="num">$129.09</td>
+                <td class="num">$12.91</td>
+                <td class="num">$142.00</td>
+              </tr>
+            </tbody>
+          </table>
+          <p class="note">
+            Example: freight $100 + 2% CLOX = $102; surcharge $40 fully to carrier (no CLOX fee line).
+          </p>
+        </section>
+      </div>
+
+      <footer class="footer">
+        <span>CLOX | Confidential | System-generated tax invoice</span>
+        <span>Page 1 · Sample preview for approval</span>
+      </footer>
+    </article>
+
+    <div class="alt">
+      <h3>Inclusive mode (freight)</h3>
+      Sender pays listed freight <strong>$100.00</strong> with note “includes ~$2.00 CLOX platform fee (2% inclusive)”.
+      Surcharges still show as carrier amounts with no CLOX fee line.
+    </div>
+  </body>
+</html>

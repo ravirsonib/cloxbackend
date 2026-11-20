@@ -1,6 +1,7 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { DailySheetStatus, EwdActivityType, TripStatus } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
+import { localDateIso, PLATFORM_TIMEZONE, utcDateFromLocalDateIso } from '../../shared/timezone';
 import { ActivityInterval, NhvrCalculatorService } from './nhvr-calculator.service';
 import { NhvrRoadsideService } from './nhvr-roadside.service';
 import {
@@ -12,13 +13,20 @@ import {
   SwitchActivityInput,
 } from './nhvr.types';
 
+const ACTIVE_TRIP_STATUSES: TripStatus[] = [
+  TripStatus.EN_ROUTE_PICKUP,
+  TripStatus.IN_TRANSIT,
+];
+
 @Injectable()
 export class NhvrService {
+  private readonly logger = new Logger(NhvrService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly calculator: NhvrCalculatorService,
     private readonly roadside: NhvrRoadsideService,
-  ) { }
+  ) {}
 
   async getDriverByUserId(userId: string) {
     const driver = await this.prisma.driver.findUnique({
@@ -27,6 +35,10 @@ export class NhvrService {
     });
     if (!driver) throw new NotFoundException('Driver profile not found');
     return driver;
+  }
+
+  private driverTimezone(driver: { baseTimezone?: string | null }): string {
+    return driver.baseTimezone?.trim() || PLATFORM_TIMEZONE;
   }
 
   async getCurrentRecord(driverId: string) {
@@ -52,8 +64,13 @@ export class NhvrService {
 
   private async findActiveTrip(driverId: string) {
     return this.prisma.trip.findFirst({
-      where: { assignment: { driverId }, status: TripStatus.IN_TRANSIT, completedAt: null },
+      where: {
+        assignment: { driverId },
+        status: { in: ACTIVE_TRIP_STATUSES },
+        completedAt: null,
+      },
       include: { assignment: { include: { vehicle: true } } },
+      orderBy: { updatedAt: 'desc' },
     });
   }
 
@@ -89,7 +106,8 @@ export class NhvrService {
   async closeActiveRecord(driverId: string, now: Date, input: SwitchActivityInput) {
     const current = await this.getCurrentRecord(driverId);
     if (!current) return;
-    const duration = this.calculator.calculateIntervalDuration(current.startTime, now);
+    const raw = this.calculator.calculateIntervalDuration(current.startTime, now);
+    const duration = this.calculator.roundMinutes(raw, current.activity);
     await this.prisma.ewdWorkRestRecord.update({
       where: { id: current.id },
       data: {
@@ -105,6 +123,27 @@ export class NhvrService {
 
   async persistBreaches(driverId: string, breaches: EwdBreachItem[]) {
     for (const b of breaches) {
+      const existing = await this.prisma.ewdBreachRecord.findFirst({
+        where: {
+          driverId,
+          ruleName: b.ruleName,
+          resolved: false,
+        },
+        orderBy: { detectedAt: 'desc' },
+      });
+      if (existing) {
+        await this.prisma.ewdBreachRecord.update({
+          where: { id: existing.id },
+          data: {
+            severity: b.severity,
+            description: b.description,
+            actualMinutes: b.actualMinutes,
+            allowableMinutes: b.allowableMinutes,
+            detectedAt: new Date(),
+          },
+        });
+        continue;
+      }
       await this.prisma.ewdBreachRecord.create({
         data: {
           driverId,
@@ -134,6 +173,42 @@ export class NhvrService {
     });
   }
 
+  private async recomputeSheetTotals(
+    driverId: string,
+    timeZone: string,
+    at: Date = new Date(),
+  ) {
+    const dateIso = localDateIso(at, timeZone);
+    const date = utcDateFromLocalDateIso(dateIso);
+    const since = new Date(Date.now() - 48 * 60 * 60 * 1000);
+    const records = await this.prisma.ewdWorkRestRecord.findMany({
+      where: { driverId, startTime: { gte: since } },
+      orderBy: { startTime: 'asc' },
+    });
+    const now = new Date();
+    let totalWorkMinutes = 0;
+    let totalRestMinutes = 0;
+    for (const r of records) {
+      if (localDateIso(r.startTime, timeZone) !== dateIso) continue;
+      const end = r.endTime ?? now;
+      const raw = r.durationMinutes ?? this.calculator.calculateIntervalDuration(r.startTime, end);
+      const mins = this.calculator.roundMinutes(raw, r.activity);
+      if (r.activity === EwdActivityType.WORK) totalWorkMinutes += mins;
+      else totalRestMinutes += mins;
+    }
+    await this.prisma.ewdDailySheet.upsert({
+      where: { driverId_date: { driverId, date } },
+      create: {
+        driverId,
+        date,
+        timezone: timeZone,
+        totalWorkMinutes,
+        totalRestMinutes,
+      },
+      update: { totalWorkMinutes, totalRestMinutes, timezone: timeZone },
+    });
+  }
+
   async switchActivity(userId: string, input: SwitchActivityInput) {
     const driver = await this.getDriverByUserId(userId);
     const now = new Date();
@@ -142,7 +217,41 @@ export class NhvrService {
     const intervals = await this.getIntervalsLast24h(driver.id);
     const breaches = this.calculator.evaluateBreaches(intervals);
     if (breaches.length > 0) await this.persistBreaches(driver.id, breaches);
+    await this.recomputeSheetTotals(driver.id, this.driverTimezone(driver), now);
     return { record, breaches };
+  }
+
+  /**
+   * Trip break choke-point: onBreak → REST, resume → WORK/DRIVING.
+   * No-ops when the open interval already matches the desired activity.
+   */
+  async syncFromTripBreak(
+    userId: string,
+    onBreak: boolean,
+    opts?: { vehicleRego?: string; odometer?: number },
+  ) {
+    const driver = await this.getDriverByUserId(userId);
+    const desired = onBreak ? EwdActivityType.REST : EwdActivityType.WORK;
+    const current = await this.getCurrentRecord(driver.id);
+    if (current?.activity === desired) {
+      return { record: current, breaches: [] as EwdBreachItem[], skipped: true };
+    }
+    try {
+      return {
+        ...(await this.switchActivity(userId, {
+          activity: desired,
+          workType: desired === EwdActivityType.WORK ? 'DRIVING' : undefined,
+          vehicleRego: opts?.vehicleRego,
+          odometer: opts?.odometer,
+        })),
+        skipped: false,
+      };
+    } catch (err) {
+      this.logger.warn(
+        `EWD syncFromTripBreak failed for user ${userId}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      throw err;
+    }
   }
 
   async createManualRecord(userId: string, input: ManualRecordInput) {
@@ -150,11 +259,20 @@ export class NhvrService {
     const start = new Date(input.startTime);
     const end = new Date(input.endTime);
     if (end <= start) throw new BadRequestException('End time must be after start time');
-    const duration = this.calculator.calculateIntervalDuration(start, end);
-    return this.insertManualRecord(driver.id, start, end, duration, input);
+    const raw = this.calculator.calculateIntervalDuration(start, end);
+    const duration = this.calculator.roundMinutes(raw, input.activity);
+    const record = await this.insertManualRecord(driver.id, start, end, duration, input);
+    await this.recomputeSheetTotals(driver.id, this.driverTimezone(driver), start);
+    return record;
   }
 
-  private insertManualRecord(driverId: string, start: Date, end: Date, duration: number, inDto: ManualRecordInput) {
+  private insertManualRecord(
+    driverId: string,
+    start: Date,
+    end: Date,
+    duration: number,
+    inDto: ManualRecordInput,
+  ) {
     return this.prisma.ewdWorkRestRecord.create({
       data: {
         driverId,
@@ -183,28 +301,62 @@ export class NhvrService {
 
   async getTodaySheet(userId: string) {
     const driver = await this.getDriverByUserId(userId);
-    const today = new Date();
-    today.setUTCHours(0, 0, 0, 0);
+    const tz = this.driverTimezone(driver);
+    const dateIso = localDateIso(new Date(), tz);
+    const date = utcDateFromLocalDateIso(dateIso);
+    await this.recomputeSheetTotals(driver.id, tz);
     const existing = await this.prisma.ewdDailySheet.findUnique({
-      where: { driverId_date: { driverId: driver.id, date: today } },
+      where: { driverId_date: { driverId: driver.id, date } },
     });
     if (existing) return existing;
     return this.prisma.ewdDailySheet.create({
-      data: { driverId: driver.id, date: today, timezone: driver.baseTimezone || 'Australia/Sydney' },
+      data: { driverId: driver.id, date, timezone: tz },
     });
   }
 
   async signDailySheet(userId: string, input: SignDailySheetInput) {
     const driver = await this.getDriverByUserId(userId);
-    const targetDate = new Date(`${input.date}T00:00:00.000Z`);
-    return this.upsertDailySheetSignature(driver.id, targetDate, input.signature, SCHEDULE_A_STATUTORY_DECLARATION);
+    const tz = this.driverTimezone(driver);
+    const targetDate = utcDateFromLocalDateIso(input.date);
+    await this.recomputeSheetTotals(
+      driver.id,
+      tz,
+      // Use noon UTC on that calendar date so local-date recompute targets the signed day.
+      new Date(`${input.date}T12:00:00.000Z`),
+    );
+    return this.upsertDailySheetSignature(
+      driver.id,
+      targetDate,
+      input.signature,
+      SCHEDULE_A_STATUTORY_DECLARATION,
+      tz,
+    );
   }
 
-  private upsertDailySheetSignature(driverId: string, date: Date, sig: string, decl: string) {
+  private upsertDailySheetSignature(
+    driverId: string,
+    date: Date,
+    sig: string,
+    decl: string,
+    timezone: string,
+  ) {
     return this.prisma.ewdDailySheet.upsert({
       where: { driverId_date: { driverId, date } },
-      create: { driverId, date, status: DailySheetStatus.SUBMITTED, driverSignature: sig, signedAt: new Date(), declarationText: decl },
-      update: { status: DailySheetStatus.SUBMITTED, driverSignature: sig, signedAt: new Date(), declarationText: decl },
+      create: {
+        driverId,
+        date,
+        timezone,
+        status: DailySheetStatus.SUBMITTED,
+        driverSignature: sig,
+        signedAt: new Date(),
+        declarationText: decl,
+      },
+      update: {
+        status: DailySheetStatus.SUBMITTED,
+        driverSignature: sig,
+        signedAt: new Date(),
+        declarationText: decl,
+      },
     });
   }
 

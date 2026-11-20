@@ -1,11 +1,20 @@
 import {
   BadRequestException,
   Injectable,
+  Logger,
   NotFoundException,
+  Optional,
   ServiceUnavailableException,
 } from '@nestjs/common';
-import { Prisma, RateFloorCheckResult, RateFloorVersionStatus } from '@prisma/client';
+import {
+  NotificationType,
+  Prisma,
+  RateFloorCheckResult,
+  RateFloorVersionStatus,
+} from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
+import { utcDateFromLocalDateIso } from '../../shared/timezone';
+import { InAppNotificationsService } from '../notifications/in-app-notifications.service';
 import { calculateRateFloor, exGstToIncGstCents } from './rate-floor.calc';
 import {
   DEFAULT_BODY_LOADINGS,
@@ -24,6 +33,7 @@ import {
 } from './rate-floor.fuel';
 import {
   localDateIso,
+  localDatesForHourlyWalk,
   resolveLabourPeriod,
   timezoneForPickupState,
   type LabourPeriodCode,
@@ -86,7 +96,12 @@ const DEFAULT_FUEL_KNOBS = {
 
 @Injectable()
 export class RateFloorService {
-  constructor(private readonly prisma: PrismaService) {}
+  private readonly logger = new Logger(RateFloorService.name);
+
+  constructor(
+    private readonly prisma: PrismaService,
+    @Optional() private readonly inbox?: InAppNotificationsService,
+  ) {}
 
   async ensurePublishedSeed(createdByAdminId?: string | null): Promise<void> {
     const published = await this.prisma.rateFloorVersion.findFirst({
@@ -130,8 +145,22 @@ export class RateFloorService {
     });
   }
 
-  /** Backfill §5.1 multipliers (incl. PUBLIC_HOLIDAY stub) on older versions. */
-  private async ensureLabourMultipliers(versionId: string): Promise<void> {
+  /**
+   * Backfill §5.1 multipliers on DRAFT versions only.
+   * PUBLISHED/RETIRED children are DB-immutable (W3.5 triggers) — calc falls back to defaults.
+   */
+  private async ensureLabourMultipliers(
+    versionId: string,
+    status?: RateFloorVersionStatus,
+  ): Promise<void> {
+    if (status && status !== RateFloorVersionStatus.DRAFT) return;
+    if (!status) {
+      const row = await this.prisma.rateFloorVersion.findUnique({
+        where: { id: versionId },
+        select: { status: true },
+      });
+      if (!row || row.status !== RateFloorVersionStatus.DRAFT) return;
+    }
     await this.prisma.rateFloorLabourMultiplier.createMany({
       data: DEFAULT_LABOUR_MULTIPLIERS.map((m) => ({
         versionId,
@@ -142,8 +171,19 @@ export class RateFloorService {
     });
   }
 
-  /** Backfill §4.4 body loadings on versions created before W2.3. */
-  private async ensureBodyLoadings(versionId: string): Promise<void> {
+  /** Backfill §4.4 body loadings on DRAFT versions only (W3.5 immutability). */
+  private async ensureBodyLoadings(
+    versionId: string,
+    status?: RateFloorVersionStatus,
+  ): Promise<void> {
+    if (status && status !== RateFloorVersionStatus.DRAFT) return;
+    if (!status) {
+      const row = await this.prisma.rateFloorVersion.findUnique({
+        where: { id: versionId },
+        select: { status: true },
+      });
+      if (!row || row.status !== RateFloorVersionStatus.DRAFT) return;
+    }
     const count = await this.prisma.rateFloorBodyLoading.count({
       where: { versionId },
     });
@@ -192,20 +232,7 @@ export class RateFloorService {
         code: 'RATE_FLOOR_VERSION_MISSING',
       });
     }
-    const labourCountBefore = version.labourMultipliers.length;
-    await this.ensureLabourMultipliers(version.id);
-    let needsReload =
-      labourCountBefore < DEFAULT_LABOUR_MULTIPLIERS.length ||
-      version.bodyLoadings.length === 0;
-    if (version.bodyLoadings.length === 0) {
-      await this.ensureBodyLoadings(version.id);
-    }
-    if (needsReload) {
-      version = await this.prisma.rateFloorVersion.findFirstOrThrow({
-        where: { id: version.id },
-        include: this.versionInclude(),
-      });
-    }
+    // Never mutate PUBLISHED rows — W3.5 immutability triggers. Defaults used at calc time.
     return version;
   }
 
@@ -236,17 +263,23 @@ export class RateFloorService {
       orderBy: { weekStart: 'desc' },
     });
     if (!latest) {
-      return {
+      const missing = {
         latest: null,
-        ageDays: null,
+        ageDays: null as number | null,
         isStale: true,
         fuelStaleDays: knobs.fuelStaleDays,
         fuelMoveConfirmPercent: knobs.fuelMoveConfirmPercent,
         fuelWeeklyChangeCapPercent: knobs.fuelWeeklyChangeCapPercent,
       };
+      void this.maybeNotifyStaleFuel(missing).catch((err: unknown) => {
+        this.logger.warn(
+          `Stale fuel notify failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      });
+      return missing;
     }
     const ageDays = ageDaysFromWeekStart(new Date(latest.weekStart));
-    return {
+    const status = {
       latest: {
         id: latest.id,
         weekStart: formatWeekStartIso(new Date(latest.weekStart)),
@@ -260,6 +293,57 @@ export class RateFloorService {
       fuelMoveConfirmPercent: knobs.fuelMoveConfirmPercent,
       fuelWeeklyChangeCapPercent: knobs.fuelWeeklyChangeCapPercent,
     };
+    void this.maybeNotifyStaleFuel(status).catch((err: unknown) => {
+      this.logger.warn(
+        `Stale fuel notify failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    });
+    return status;
+  }
+
+  /**
+   * W3.6 / T19 — when diesel index is stale, fan-out once per fuel row (7-day dedupe)
+   * to ACTIVE Super Admins via Ops inbox.
+   */
+  async maybeNotifyStaleFuel(status: {
+    isStale: boolean;
+    ageDays: number | null;
+    fuelStaleDays: number;
+    latest: { id: string; weekStart: string; dieselCpl: number } | null;
+  }): Promise<{ notified: number; skipped: boolean }> {
+    if (!status.isStale || !this.inbox) {
+      return { notified: 0, skipped: true };
+    }
+    const entityId = status.latest?.id ?? 'fuel-index-missing';
+    const since = new Date(Date.now() - 7 * 86_400_000);
+    const recent = await this.prisma.notification.findFirst({
+      where: {
+        type: NotificationType.FUEL_INDEX_STALE,
+        entityType: 'FuelIndex',
+        entityId,
+        createdAt: { gte: since },
+      },
+      select: { id: true },
+    });
+    if (recent) return { notified: 0, skipped: true };
+
+    const adminUserIds = await this.inbox.adminIdsSuper();
+    if (adminUserIds.length === 0) return { notified: 0, skipped: true };
+
+    const ageLabel = status.ageDays != null ? `${status.ageDays}` : 'unknown';
+    const weekLabel = status.latest?.weekStart ?? 'none';
+    const cplLabel =
+      status.latest?.dieselCpl != null ? String(status.latest.dieselCpl) : 'n/a';
+    const notified = await this.inbox.notifyAdmins({
+      adminUserIds,
+      type: NotificationType.FUEL_INDEX_STALE,
+      title: 'Diesel fuel index is stale',
+      body: `Latest week ${weekLabel} is ${ageLabel} days old (threshold ${status.fuelStaleDays}). Diesel ${cplLabel} c/L. Enter this week’s AIP national average on Rate Floor → Fuel.`,
+      href: '/rate-floor',
+      entityType: 'FuelIndex',
+      entityId,
+    });
+    return { notified, skipped: false };
   }
 
   async listFuelIndexes(limit = 26) {
@@ -354,19 +438,37 @@ export class RateFloorService {
   }> {
     const tz = timezoneForPickupState(pickupState);
     const dateIso = localDateIso(at, tz);
-    const holidayDate = new Date(`${dateIso}T00:00:00.000Z`);
+    const named = await this.resolveHolidayDateNames([dateIso], pickupState);
+    return {
+      isHoliday: named.has(dateIso),
+      holidayName: named.get(dateIso) ?? null,
+    };
+  }
+
+  /** Local YYYY-MM-DD → holiday name for NATIONAL or state holidays. */
+  private async resolveHolidayDateNames(
+    dateIsos: string[],
+    pickupState?: string | null,
+  ): Promise<Map<string, string>> {
+    const unique = [...new Set(dateIsos.filter(Boolean))];
+    const found = new Map<string, string>();
+    if (unique.length === 0) return found;
     const state = pickupState?.trim().toUpperCase() || null;
-    const row = await this.prisma.publicHoliday.findFirst({
+    const rows = await this.prisma.publicHoliday.findMany({
       where: {
-        holidayDate,
-        OR: [
-          { state: 'NATIONAL' },
-          ...(state ? [{ state }] : []),
-        ],
+        holidayDate: { in: unique.map((d) => utcDateFromLocalDateIso(d)) },
+        OR: [{ state: 'NATIONAL' }, ...(state ? [{ state }] : [])],
       },
-      select: { name: true },
+      select: { holidayDate: true, name: true },
     });
-    return { isHoliday: Boolean(row), holidayName: row?.name ?? null };
+    for (const row of rows) {
+      const iso =
+        row.holidayDate instanceof Date
+          ? row.holidayDate.toISOString().slice(0, 10)
+          : String(row.holidayDate).slice(0, 10);
+      if (!found.has(iso)) found.set(iso, row.name);
+    }
+    return found;
   }
 
   private async resolveLabourForCalc(
@@ -394,6 +496,37 @@ export class RateFloorService {
       timeZone: tz,
       holidayName: holiday.holidayName,
       awardHolidayStub: periodCode === 'PUBLIC_HOLIDAY',
+    };
+  }
+
+  private async resolveLabourWalkForCalc(
+    version: {
+      labourRateHrCents: number;
+      labourMultipliers: Array<{ periodCode: string; multiplier: number }>;
+      minHours: number;
+    },
+    at: Date,
+    billableHours: number | null | undefined,
+    pickupState: string | null | undefined,
+    bodyMinHours: number | null | undefined,
+  ) {
+    const tz = timezoneForPickupState(pickupState);
+    const versionMin = version.minHours > 0 ? version.minHours : 4;
+    const bodyMin = bodyMinHours != null && bodyMinHours > 0 ? bodyMinHours : 0;
+    const minHours = Math.max(versionMin, bodyMin);
+    const hoursRaw = billableHours ?? minHours;
+    const hoursCharged = Math.max(hoursRaw, minHours);
+    const dateIsos = localDatesForHourlyWalk(at, hoursCharged, tz);
+    const named = await this.resolveHolidayDateNames(dateIsos, pickupState);
+    return {
+      startAt: at,
+      timeZone: tz,
+      labourRateHrCents: version.labourRateHrCents,
+      multipliers:
+        version.labourMultipliers.length > 0
+          ? version.labourMultipliers
+          : DEFAULT_LABOUR_MULTIPLIERS,
+      holidayDates: new Set(named.keys()),
     };
   }
 
@@ -483,6 +616,19 @@ export class RateFloorService {
           }
         : { bodyCode: resolvedBodyCode, loadingPct: 0, minHours: bodyRow?.minHours ?? null };
 
+    const labourWalk =
+      input.pricingModel === 'HOURLY' &&
+      input.at instanceof Date &&
+      !Number.isNaN(input.at.getTime())
+        ? await this.resolveLabourWalkForCalc(
+            version,
+            input.at,
+            input.billableHours,
+            input.pickupState,
+            body.minHours,
+          )
+        : null;
+
     const calc = calculateRateFloor({
       pricingModel: input.pricingModel,
       distanceKm: input.distanceKm,
@@ -504,6 +650,7 @@ export class RateFloorService {
       gstPercent: knobs.gstPercent,
       fuel,
       labour,
+      labourWalk,
       body,
       backhaul: Boolean(input.backhaul),
     });
@@ -580,12 +727,13 @@ export class RateFloorService {
     });
     if (!version) throw new NotFoundException('Rate floor version not found');
     const labourCountBefore = version.labourMultipliers.length;
-    await this.ensureLabourMultipliers(version.id);
+    await this.ensureLabourMultipliers(version.id, version.status);
     let needsReload =
-      labourCountBefore < DEFAULT_LABOUR_MULTIPLIERS.length ||
-      version.bodyLoadings.length === 0;
-    if (version.bodyLoadings.length === 0) {
-      await this.ensureBodyLoadings(version.id);
+      version.status === RateFloorVersionStatus.DRAFT &&
+      (labourCountBefore < DEFAULT_LABOUR_MULTIPLIERS.length ||
+        version.bodyLoadings.length === 0);
+    if (version.status === RateFloorVersionStatus.DRAFT && version.bodyLoadings.length === 0) {
+      await this.ensureBodyLoadings(version.id, version.status);
     }
     if (needsReload) {
       version = await this.prisma.rateFloorVersion.findUniqueOrThrow({
@@ -646,18 +794,10 @@ export class RateFloorService {
     });
   }
 
-  async updateDraftLine(
-    versionId: string,
-    vehicleClassCode: string,
-    patch: {
-      hourlyFloorCents?: number;
-      kmFloorCents?: number;
-      variableKmCents?: number;
-      litresPerKm?: number;
-      basis?: string;
-    },
-  ) {
-    const version = await this.getVersion(versionId);
+  private assertDraftEditable(version: {
+    status: RateFloorVersionStatus;
+    approvalSubmittedAt: Date | null;
+  }) {
     if (version.status !== RateFloorVersionStatus.DRAFT) {
       throw new BadRequestException({
         message: 'Only DRAFT floor versions can be edited',
@@ -670,6 +810,21 @@ export class RateFloorService {
         code: 'RATE_FLOOR_PENDING_APPROVAL',
       });
     }
+  }
+
+  async updateDraftLine(
+    versionId: string,
+    vehicleClassCode: string,
+    patch: {
+      hourlyFloorCents?: number;
+      kmFloorCents?: number;
+      variableKmCents?: number;
+      litresPerKm?: number;
+      basis?: string;
+    },
+  ) {
+    const version = await this.getVersion(versionId);
+    this.assertDraftEditable(version);
     const code = vehicleClassCode.trim().toUpperCase();
     const line = version.lines.find((l) => l.vehicleClassCode === code);
     if (!line) {
@@ -683,6 +838,34 @@ export class RateFloorService {
         ...(patch.variableKmCents != null ? { variableKmCents: patch.variableKmCents } : {}),
         ...(patch.litresPerKm != null ? { litresPerKm: patch.litresPerKm } : {}),
         ...(patch.basis != null ? { basis: patch.basis } : {}),
+      },
+    });
+  }
+
+  async updateDraftBodyLoading(
+    versionId: string,
+    bodyCode: string,
+    patch: { loadingPct?: number; minHours?: number | null },
+  ) {
+    const version = await this.getVersion(versionId);
+    this.assertDraftEditable(version);
+    const code = bodyCode.trim().toUpperCase();
+    let row = version.bodyLoadings.find((b) => b.bodyCode === code) ?? null;
+    if (!row) {
+      await this.ensureBodyLoadings(version.id);
+      row =
+        (
+          await this.prisma.rateFloorBodyLoading.findMany({ where: { versionId } })
+        ).find((b) => b.bodyCode === code) ?? null;
+    }
+    if (!row) {
+      throw new NotFoundException(`Body loading ${code} not found on version`);
+    }
+    return this.prisma.rateFloorBodyLoading.update({
+      where: { id: row.id },
+      data: {
+        ...(patch.loadingPct != null ? { loadingPct: patch.loadingPct } : {}),
+        ...(patch.minHours !== undefined ? { minHours: patch.minHours } : {}),
       },
     });
   }
@@ -708,16 +891,78 @@ export class RateFloorService {
   async listChecks(query: {
     jobId?: string;
     result?: RateFloorCheckResult;
+    from?: string;
+    to?: string;
     limit?: number;
   }) {
-    const take = Math.min(Math.max(query.limit ?? 50, 1), 200);
+    const take = Math.min(Math.max(query.limit ?? 50, 1), 500);
+    const createdAt: { gte?: Date; lte?: Date } = {};
+    if (query.from) createdAt.gte = new Date(`${query.from}T00:00:00.000Z`);
+    if (query.to) createdAt.lte = new Date(`${query.to}T23:59:59.999Z`);
     return this.prisma.rateFloorCheck.findMany({
       where: {
         ...(query.jobId ? { jobId: query.jobId } : {}),
         ...(query.result ? { result: query.result } : {}),
+        ...(Object.keys(createdAt).length ? { createdAt } : {}),
       },
       orderBy: { createdAt: 'desc' },
       take,
+    });
+  }
+
+  async exportChecksCsv(query: {
+    jobId?: string;
+    result?: RateFloorCheckResult;
+    from?: string;
+    to?: string;
+  }) {
+    const rows = await this.listChecks({ ...query, limit: 500 });
+    const header = [
+      'id',
+      'createdAt',
+      'result',
+      'jobId',
+      'versionId',
+      'floorExGstCents',
+      'floorIncGstCents',
+      'offeredIncGstCents',
+      'actorUserId',
+      'actorAdminId',
+    ];
+    const escape = (value: string) => `"${value.replace(/"/g, '""')}"`;
+    const lines = [
+      header.join(','),
+      ...rows.map((r) =>
+        [
+          r.id,
+          r.createdAt.toISOString(),
+          r.result,
+          r.jobId ?? '',
+          r.versionId,
+          String(r.floorExGstCents),
+          String(r.floorIncGstCents),
+          r.offeredIncGstCents != null ? String(r.offeredIncGstCents) : '',
+          r.actorUserId ?? '',
+          r.actorAdminId ?? '',
+        ]
+          .map((v) => escape(v))
+          .join(','),
+      ),
+    ];
+    return lines.join('\n');
+  }
+
+  async expireOverride(overrideId: string) {
+    const row = await this.prisma.rateFloorOverride.findUnique({
+      where: { id: overrideId },
+    });
+    if (!row) throw new NotFoundException('Override not found');
+    if (row.expiresAt.getTime() <= Date.now()) {
+      return row;
+    }
+    return this.prisma.rateFloorOverride.update({
+      where: { id: overrideId },
+      data: { expiresAt: new Date() },
     });
   }
 
@@ -911,6 +1156,9 @@ export class RateFloorService {
       },
       orderBy: { createdAt: 'desc' },
       take,
+      include: {
+        approvedByAdmin: { select: { id: true, email: true, name: true } },
+      },
     });
   }
 

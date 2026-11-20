@@ -39,18 +39,11 @@ describe('PaymentsService surcharge settlement accrual + carrier transfer', () =
   });
 
   describe('markSurchargePaid settlement accrual', () => {
-    it('accrues 70/15/10/5 SettlementLines for WAITING surcharge (fallback split)', async () => {
+    it('accrues 100% carrier SettlementLine for WAITING surcharge (no CLOX split)', async () => {
       const tx = {
         paymentEvent: { update: jest.fn() },
         surcharge: { update: jest.fn() },
         trip: { update: jest.fn() },
-        job: {
-          findUnique: jest.fn().mockResolvedValue({
-            originRegionId: 'reg-1',
-            originTerritoryId: 'terr-1',
-            senderCompanyId: 'co-1',
-          }),
-        },
         settlementLine: { createMany: jest.fn() },
       };
       const prisma = {
@@ -85,29 +78,8 @@ describe('PaymentsService surcharge settlement accrual + carrier transfer', () =
           {
             jobId: 'job-1',
             recipientType: SettlementRecipientType.CARRIER,
-            sharePercent: 70,
-            amountCents: 7000,
-            status: SettlementLineStatus.ACCRUED,
-          },
-          {
-            jobId: 'job-1',
-            recipientType: SettlementRecipientType.SUPER_ADMIN,
-            sharePercent: 15,
-            amountCents: 1500,
-            status: SettlementLineStatus.ACCRUED,
-          },
-          {
-            jobId: 'job-1',
-            recipientType: SettlementRecipientType.STATE_MASTER,
-            sharePercent: 9,
-            amountCents: 900,
-            status: SettlementLineStatus.ACCRUED,
-          },
-          {
-            jobId: 'job-1',
-            recipientType: SettlementRecipientType.LOCAL_BDE,
-            sharePercent: 6,
-            amountCents: 600,
+            sharePercent: 100,
+            amountCents: 10_000,
             status: SettlementLineStatus.ACCRUED,
           },
         ],
@@ -116,24 +88,20 @@ describe('PaymentsService surcharge settlement accrual + carrier transfer', () =
         expect.objectContaining({
           where: { id: 's-w' },
           data: expect.objectContaining({
-            metadata: expect.objectContaining({ settlementAccrued: true }),
+            metadata: expect.objectContaining({
+              settlementAccrued: true,
+              surchargeSettlement: 'CARRIER_100',
+            }),
           }),
         }),
       );
     });
 
-    it('uses RevenueSplitService when injected', async () => {
+    it('does not call RevenueSplitService for surcharge accrual (carrier 100%)', async () => {
       const tx = {
         paymentEvent: { update: jest.fn() },
         surcharge: { update: jest.fn() },
         trip: { update: jest.fn() },
-        job: {
-          findUnique: jest.fn().mockResolvedValue({
-            originRegionId: 'reg-1',
-            originTerritoryId: 'terr-1',
-            senderCompanyId: 'co-1',
-          }),
-        },
         settlementLine: { createMany: jest.fn() },
       };
       const prisma = {
@@ -156,29 +124,7 @@ describe('PaymentsService surcharge settlement accrual + carrier transfer', () =
         $transaction: jest.fn(async (fn: (t: typeof tx) => Promise<void>) => fn(tx)),
       };
       const revenueSplit = {
-        resolveForJob: jest.fn().mockResolvedValue({
-          policyVersionId: 'pv-1',
-          overrideId: null,
-          adminPackageId: null,
-          lines: [
-            {
-              recipientType: SettlementRecipientType.CARRIER,
-              sharePercent: 70,
-              amountCents: 3500,
-              regionId: null,
-              territoryId: null,
-              adminUserId: null,
-            },
-            {
-              recipientType: SettlementRecipientType.SUPER_ADMIN,
-              sharePercent: 30,
-              amountCents: 1500,
-              regionId: null,
-              territoryId: null,
-              adminUserId: null,
-            },
-          ],
-        }),
+        resolveForJob: jest.fn(),
       };
 
       await makeService(prisma, revenueSplit).markSurchargePaid({
@@ -187,25 +133,16 @@ describe('PaymentsService surcharge settlement accrual + carrier transfer', () =
         source: 'webhook',
       });
 
-      expect(revenueSplit.resolveForJob).toHaveBeenCalledWith({
-        grossIncGstCents: 5000,
-        originRegionId: 'reg-1',
-        originTerritoryId: 'terr-1',
-        senderCompanyId: 'co-1',
-        carrierCompanyId: null,
-      });
+      expect(revenueSplit.resolveForJob).not.toHaveBeenCalled();
       expect(tx.settlementLine.createMany).toHaveBeenCalledWith({
         data: [
-          expect.objectContaining({
+          {
+            jobId: 'job-1',
             recipientType: SettlementRecipientType.CARRIER,
-            amountCents: 3500,
-            policyVersionId: 'pv-1',
-          }),
-          expect.objectContaining({
-            recipientType: SettlementRecipientType.SUPER_ADMIN,
-            amountCents: 1500,
-            policyVersionId: 'pv-1',
-          }),
+            sharePercent: 100,
+            amountCents: 5000,
+            status: SettlementLineStatus.ACCRUED,
+          },
         ],
       });
     });
@@ -282,16 +219,17 @@ describe('PaymentsService surcharge settlement accrual + carrier transfer', () =
         source: 'retry',
       });
       expect(result).toEqual({ skipped: true, alreadyPaid: true });
-      expect(tx.settlementLine.createMany).toHaveBeenCalledWith(
-        expect.objectContaining({
-          data: expect.arrayContaining([
-            expect.objectContaining({
-              recipientType: SettlementRecipientType.CARRIER,
-              amountCents: 1400,
-            }),
-          ]),
-        }),
-      );
+      expect(tx.settlementLine.createMany).toHaveBeenCalledWith({
+        data: [
+          {
+            jobId: 'job-1',
+            recipientType: SettlementRecipientType.CARRIER,
+            sharePercent: 100,
+            amountCents: 2000,
+            status: SettlementLineStatus.ACCRUED,
+          },
+        ],
+      });
     });
   });
 

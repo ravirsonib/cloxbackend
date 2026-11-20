@@ -64,6 +64,38 @@ describe('NhvrCalculatorService', () => {
       const breaches = service.evaluateBreaches(intervals);
       expect(breaches.filter((b) => b.ruleName.includes('5.5h')).length).toBe(0);
     });
+
+    it('detects 12h max work in 24h', () => {
+      const intervals: ActivityInterval[] = [
+        {
+          activity: EwdActivityType.WORK,
+          startTime: new Date('2026-11-15T00:00:00Z'),
+          endTime: new Date('2026-11-15T13:00:00Z'),
+          durationMinutes: 780,
+        },
+      ];
+      const breaches = service.evaluateBreaches(intervals);
+      expect(breaches.some((b) => b.ruleName.includes('12h Max Work'))).toBe(true);
+    });
+
+    it('detects missing 7h continuous rest when work >= 8h', () => {
+      const intervals: ActivityInterval[] = [
+        {
+          activity: EwdActivityType.WORK,
+          startTime: new Date('2026-11-15T00:00:00Z'),
+          endTime: new Date('2026-11-15T09:00:00Z'),
+          durationMinutes: 540,
+        },
+        {
+          activity: EwdActivityType.REST,
+          startTime: new Date('2026-11-15T09:00:00Z'),
+          endTime: new Date('2026-11-15T12:00:00Z'),
+          durationMinutes: 180,
+        },
+      ];
+      const breaches = service.evaluateBreaches(intervals);
+      expect(breaches.some((b) => b.ruleName.includes('7h Continuous Rest'))).toBe(true);
+    });
   });
 });
 

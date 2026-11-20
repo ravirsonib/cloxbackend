@@ -330,6 +330,9 @@ export class DriverService {
         suburb: driver.suburb,
         state: driver.state,
         postcode: driver.postcode,
+        facePhotoDocumentId:
+          (driver as { facePhotoDocumentId?: string | null }).facePhotoDocumentId ??
+          null,
       },
       company: driver.company
         ? { id: driver.company.id, legalName: driver.company.legalName, status: driver.company.status }
@@ -372,6 +375,25 @@ export class DriverService {
       });
     }
 
+    let facePhotoDocumentId: string | null = null;
+    if (input.facePhotoDocumentId) {
+      const face = await this.prisma.complianceDocument.findFirst({
+        where: {
+          id: input.facePhotoDocumentId,
+          driverId: driver.id,
+          docType: ComplianceDocType.SELFIE,
+          status: { in: USABLE_COMPLIANCE_DOC_STATUSES },
+        },
+      });
+      if (!face) {
+        throw new BadRequestException({
+          message: 'Usable SELFIE document required when facePhotoDocumentId is set',
+          code: 'DRIVER_FACE_PHOTO_INVALID',
+        });
+      }
+      facePhotoDocumentId = face.id;
+    }
+
     const company = await this.prisma.company.findUnique({
       where: { id: driver.companyId },
       select: {
@@ -405,6 +427,10 @@ export class DriverService {
           suburb: input.suburb,
           state: input.state,
           postcode: input.postcode,
+          // Scalar added in migration 20261119220000; cast until prisma generate unlocks.
+          ...(facePhotoDocumentId
+            ? ({ facePhotoDocumentId } as { facePhotoDocumentId: string })
+            : {}),
           status: nextStatus,
         },
       }),
@@ -425,6 +451,7 @@ export class DriverService {
       metadata: {
         licenceClass: input.licenceClass,
         licenceDocumentId: input.licenceDocumentId,
+        facePhotoDocumentId,
         status: nextStatus,
         state: input.state,
         postcode: input.postcode,
@@ -504,6 +531,8 @@ export class DriverService {
         where: {
           companyId: company.id,
           driverId: { not: null },
+          // Face / profile selfies stay off licence review cases.
+          docType: { not: ComplianceDocType.SELFIE },
           status: {
             in: [ComplianceDocStatus.UPLOADED, ComplianceDocStatus.UNDER_REVIEW],
           },

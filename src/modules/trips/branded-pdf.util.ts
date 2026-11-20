@@ -13,12 +13,27 @@ export type BrandedPdfImage = {
   fitHeight?: number;
 };
 
+export type BrandedPdfCallout = {
+  /** billing = orange accent; flag = red Super Admin / detention alert */
+  tone: 'billing' | 'flag';
+  text: string;
+};
+
 export type BrandedPdfSection = {
   title: string;
   rows?: BrandedPdfKv[];
   paragraphs?: string[];
+  /** Highlight / billing notes (e.g. 4h floor, odo discrepancy) */
+  callouts?: BrandedPdfCallout[];
   /** Simple table: first row = headers */
-  table?: { headers: string[]; rows: string[][] };
+  table?: {
+    headers: string[];
+    rows: string[][];
+    /** 0-based data row indexes rendered with danger (red) background */
+    dangerRowIndexes?: number[];
+    /** 0-based data row indexes with soft orange accent (e.g. platform fee lines) */
+    accentRowIndexes?: number[];
+  };
   images?: BrandedPdfImage[];
 };
 
@@ -54,6 +69,9 @@ const COLORS = {
   surface: '#f3f5f9',
   white: '#ffffff',
   headerMute: '#c9d3e4',
+  danger: '#b91c1c',
+  dangerBg: '#fef2f2',
+  billingBg: '#fff8f3',
 };
 
 function contentWidth() {
@@ -246,6 +264,13 @@ export async function buildBrandedPdf(input: BrandedPdfInput): Promise<Buffer> {
         }
       }
 
+      if (section.callouts?.length) {
+        for (const callout of section.callouts) {
+          drawCallout(doc, callout);
+        }
+        doc.moveDown(0.2);
+      }
+
       if (section.rows?.length) {
         for (const row of section.rows) {
           const label = pdfSafeText(row.label);
@@ -272,7 +297,10 @@ export async function buildBrandedPdf(input: BrandedPdfInput): Promise<Buffer> {
       }
 
       if (section.table && section.table.headers.length > 0) {
-        drawTable(doc, section.table.headers, section.table.rows);
+        drawTable(doc, section.table.headers, section.table.rows, {
+          dangerRowIndexes: section.table.dangerRowIndexes,
+          accentRowIndexes: section.table.accentRowIndexes,
+        });
         doc.moveDown(0.4);
       }
 
@@ -371,54 +399,122 @@ function ensureSpace(doc: PDFKit.PDFDocument, needed: number) {
   }
 }
 
+function drawCallout(doc: PDFKit.PDFDocument, callout: BrandedPdfCallout) {
+  const text = pdfSafeText(callout.text);
+  const padX = 8;
+  const padY = 6;
+  const boxW = contentWidth();
+  doc.font(callout.tone === 'flag' ? 'Helvetica-Bold' : 'Helvetica').fontSize(9);
+  const textH = doc.heightOfString(text, {
+    width: boxW - padX * 2,
+    lineGap: 1,
+  });
+  const boxH = textH + padY * 2;
+  ensureSpace(doc, boxH + 8);
+  const y = doc.y;
+  if (callout.tone === 'flag') {
+    doc.rect(MARGIN.left, y, boxW, boxH).fill(COLORS.dangerBg);
+    doc
+      .rect(MARGIN.left, y, boxW, boxH)
+      .strokeColor('#fecaca')
+      .lineWidth(0.8)
+      .stroke();
+    doc.fillColor(COLORS.danger);
+  } else {
+    doc.rect(MARGIN.left, y, 3, boxH).fill(COLORS.orange);
+    doc.rect(MARGIN.left + 3, y, boxW - 3, boxH).fill(COLORS.billingBg);
+    doc.fillColor(COLORS.ink);
+  }
+  doc
+    .font(callout.tone === 'flag' ? 'Helvetica-Bold' : 'Helvetica')
+    .fontSize(9)
+    .text(text, MARGIN.left + padX, y + padY, {
+      width: boxW - padX * 2,
+      lineGap: 1,
+    });
+  doc.x = MARGIN.left;
+  doc.y = y + boxH + 6;
+}
+
 function drawTable(
   doc: PDFKit.PDFDocument,
   headers: string[],
   rows: string[][],
+  opts?: { dangerRowIndexes?: number[]; accentRowIndexes?: number[] },
 ) {
   const colCount = headers.length;
   const width = contentWidth();
-  const colW = width / colCount;
+  /** Description-heavy tables (tax invoice): widen first column. */
+  const colWidths =
+    colCount === 4
+      ? [width * 0.46, width * 0.18, width * 0.18, width * 0.18]
+      : Array.from({ length: colCount }, () => width / colCount);
   const pad = 4;
+  const dangerSet = new Set(opts?.dangerRowIndexes ?? []);
+  const accentSet = new Set(opts?.accentRowIndexes ?? []);
 
-  const measure = (text: string, bold: boolean) => {
+  const measure = (text: string, bold: boolean, colW: number) => {
     doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(8);
     return doc.heightOfString(pdfSafeText(text || '-'), { width: colW - pad * 2 });
   };
 
-  const drawRow = (cells: string[], header: boolean) => {
+  const drawRow = (
+    cells: string[],
+    header: boolean,
+    style: 'plain' | 'danger' | 'accent' | 'total' = 'plain',
+  ) => {
     const safe = cells.map((c) => pdfSafeText(c || '-'));
-    const heights = safe.map((c) => measure(c, header));
+    const heights = safe.map((c, i) => measure(c, header || style === 'total', colWidths[i]!));
     const rowH = Math.max(16, ...heights) + pad * 2;
     ensureSpace(doc, rowH + 2);
     const y = doc.y;
     if (header) {
       doc.rect(MARGIN.left, y, width, rowH).fill(COLORS.surface);
+    } else if (style === 'danger') {
+      doc.rect(MARGIN.left, y, width, rowH).fill(COLORS.dangerBg);
+    } else if (style === 'accent') {
+      doc.rect(MARGIN.left, y, width, rowH).fill(COLORS.billingBg);
+    } else if (style === 'total') {
+      doc.rect(MARGIN.left, y, width, rowH).fill(COLORS.surface);
     }
     doc.strokeColor(COLORS.line).lineWidth(0.6);
     doc.rect(MARGIN.left, y, width, rowH).stroke();
+    let x = MARGIN.left;
     for (let i = 1; i < colCount; i++) {
-      const x = MARGIN.left + colW * i;
+      x += colWidths[i - 1]!;
       doc.moveTo(x, y).lineTo(x, y + rowH).stroke();
     }
+    x = MARGIN.left;
     for (let i = 0; i < colCount; i++) {
+      const colW = colWidths[i]!;
+      const alignRight = !header && i > 0 && colCount === 4;
       doc
-        .font(header ? 'Helvetica-Bold' : 'Helvetica')
+        .font(header || style === 'total' ? 'Helvetica-Bold' : 'Helvetica')
         .fontSize(8)
-        .fillColor(COLORS.ink)
-        .text(safe[i]!, MARGIN.left + colW * i + pad, y + pad, {
+        .fillColor(style === 'danger' && !header ? COLORS.danger : COLORS.ink)
+        .text(safe[i]!, x + pad, y + pad, {
           width: colW - pad * 2,
           height: rowH - pad * 2,
+          align: alignRight ? 'right' : 'left',
         });
+      x += colW;
     }
     doc.x = MARGIN.left;
     doc.y = y + rowH;
   };
 
   drawRow(headers, true);
-  for (const row of rows) {
+  rows.forEach((row, index) => {
     const padded = [...row];
     while (padded.length < colCount) padded.push('-');
-    drawRow(padded.slice(0, colCount), false);
-  }
+    const desc = (padded[0] ?? '').toLowerCase();
+    const style = dangerSet.has(index)
+      ? 'danger'
+      : accentSet.has(index)
+        ? 'accent'
+        : desc.startsWith('total')
+          ? 'total'
+          : 'plain';
+    drawRow(padded.slice(0, colCount), false, style);
+  });
 }

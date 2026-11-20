@@ -167,7 +167,7 @@ describe('buildBrandedPdf', () => {
   it('keeps tax invoice on one page', async () => {
     const buf = await buildBrandedPdf({
       documentTitle: 'Tax Invoice',
-      subtitle: 'INV-DEMO | 2026-10-24',
+      subtitle: 'INV-DEMO | 2026-10-24 | AUD | What the sender paid',
       headerRef: 'INV-DEMO | Job demojob',
       logo: loadCloxLogoBuffer(),
       footerNote: 'CLOX | Confidential | System-generated tax invoice',
@@ -178,25 +178,42 @@ describe('buildBrandedPdf', () => {
             { label: 'Invoice ref', value: 'INV-DEMO' },
             { label: 'Job', value: 'QA job' },
             { label: 'Pricing model', value: 'PER_KM' },
+            { label: 'CLOX platform fee', value: '2% exclusive (freight only)' },
           ],
         },
         {
-          title: 'Amounts (AUD)',
+          title: 'Parties',
           rows: [
-            { label: 'Freight (inc GST)', value: '$150.00 AUD' },
-            { label: 'Total inc GST', value: '$150.00 AUD' },
+            { label: 'Bill to (sender)', value: 'Acme Pty Ltd' },
+            { label: 'Supplier (carrier)', value: 'Harbour Freight' },
           ],
+        },
+        {
+          title: 'Amounts (AUD) — what sender paid',
+          table: {
+            headers: ['Description', 'Ex GST', 'GST', 'Inc GST'],
+            rows: [
+              ['Freight base (accepted bid)', '$90.91', '$9.09', '$100.00'],
+              ['CLOX platform fee 2% exclusive', '$1.82', '$0.18', '$2.00'],
+              ['Paid surcharges (carrier)', '$36.36', '$3.64', '$40.00'],
+              ['Total charged', '$129.09', '$12.91', '$142.00'],
+            ],
+            accentRowIndexes: [1],
+          },
         },
         {
           title: 'Notes',
           paragraphs: [
-            'This is a system-generated tax invoice summary from CLOX. Retain for your records.',
+            'CLOX platform fee 2% exclusive applied on freight at payment.',
+            'Paid surcharges are carrier amounts (no CLOX platform fee line).',
           ],
         },
       ],
     });
     expect(countPdfPages(buf)).toBe(1);
   });
+
+
 
   it('keeps exception report on one page', async () => {
     const buf = await buildBrandedPdf({
@@ -233,10 +250,11 @@ describe('buildBrandedPdf', () => {
     const stopRows = Array.from({ length: 12 }, (_, i) => [
       String(i + 1),
       i % 2 === 0 ? 'PICKUP' : 'DROPOFF',
-      `Suburb ${i + 1}`,
-      '2026-10-24 10:00',
-      '2026-10-24 10:15',
-      '5m',
+      `${i + 1} Sample St, Suburb ${i + 1} VIC`,
+      '08:00 AM',
+      '08:15 AM',
+      i === 2 ? '75 mins' : '15 mins',
+      i === 0 ? '1000 km (manual)' : i === 11 ? '1042 km (final manual)' : 'N/A (GPS sync)',
     ]);
     const buf = await buildBrandedPdf({
       documentTitle: 'Hourly Run Sheet',
@@ -253,21 +271,47 @@ describe('buildBrandedPdf', () => {
           ],
         },
         {
-          title: 'Stops',
-          table: {
-            headers: ['#', 'Type', 'Suburb', 'Arrival', 'Departure', 'Wait'],
-            rows: stopRows,
-          },
-          paragraphs: ['Odometer: not captured (manual input pending).'],
+          title: 'Trip summary',
+          rows: [{ label: 'Total duration', value: '3.50 h actual · billed 4.0 h' }],
+          callouts: [
+            {
+              tone: 'billing',
+              text: '4-hour floor: Total time: 3.50 h · Billed time: 4.0 hours (Minimum Engagement).',
+            },
+            {
+              tone: 'flag',
+              text: 'FLAG: Odometer vs GPS discrepancy > 10% — Super Admin review',
+            },
+          ],
         },
         {
-          title: 'Fatigue / break log',
+          title: 'Stops',
+          table: {
+            headers: [
+              '#',
+              'Type',
+              'Address',
+              'Arrival',
+              'Departure',
+              'Dwell / wait',
+              'Odometer',
+            ],
+            rows: stopRows,
+            dangerRowIndexes: [2],
+          },
+          paragraphs: [
+            'Dwell > 60 minutes flagged in red for potential detention billing.',
+          ],
+        },
+        {
+          title: 'Fatigue & break log',
+          table: {
+            headers: ['Break', 'Start', 'End', 'Duration', 'Location'],
+            rows: [['Break 1', '09:45 AM', '10:00 AM', '15 mins', 'Port Melbourne']],
+          },
           rows: [
-            { label: 'Break at completion', value: 'no' },
-            {
-              label: 'Billing note',
-              value: 'Billed hours: 4.0 (4.0 hour floor applies).',
-            },
+            { label: 'Total work time', value: '03:20' },
+            { label: 'Total rest time', value: '00:15' },
           ],
         },
       ],

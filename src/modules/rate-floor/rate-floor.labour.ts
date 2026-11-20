@@ -1,3 +1,7 @@
+import { localDateIso } from '../../shared/timezone';
+
+export { localDateIso };
+
 export type LabourPeriodCode =
   | 'WEEKDAY_ORDINARY'
   | 'AFTERNOON'
@@ -35,20 +39,6 @@ export function timezoneForPickupState(state?: string | null): string {
   if (!state) return 'Australia/Melbourne';
   const key = state.trim().toUpperCase();
   return STATE_TIMEZONES[key] ?? 'Australia/Melbourne';
-}
-
-/** Local calendar date (YYYY-MM-DD) in the given IANA timezone. */
-export function localDateIso(at: Date, timeZone: string): string {
-  const parts = new Intl.DateTimeFormat('en-CA', {
-    timeZone,
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-  }).formatToParts(at);
-  const y = parts.find((p) => p.type === 'year')?.value ?? '1970';
-  const m = parts.find((p) => p.type === 'month')?.value ?? '01';
-  const d = parts.find((p) => p.type === 'day')?.value ?? '01';
-  return `${y}-${m}-${d}`;
 }
 
 /**
@@ -97,4 +87,99 @@ export function loadedHourlyFloorCents(
   const add = labour * (m - 1);
   if (add <= 0) return hourlyFloorCents;
   return Math.ceil(hourlyFloorCents + add - 1e-9);
+}
+
+export type HourlyLabourBlock = {
+  atIso: string;
+  localDate: string;
+  periodCode: LabourPeriodCode;
+  multiplier: number;
+  blockHours: number;
+  loadedHourlyFloorCents: number;
+  labourAddCents: number;
+  blockExGstCents: number;
+};
+
+/**
+ * IT §4.1 / T12 — walk billable hours in ≤1h blocks; each block resolves its own
+ * labour period at the local cursor. OT beyond 7.6h/day is intentionally deferred
+ * (Legal/Award — see gap inventory).
+ */
+export function walkHourlyLabourBlocks(params: {
+  startAt: Date;
+  hoursCharged: number;
+  timeZone: string;
+  baseHourlyFloorCents: number;
+  labourRateHrCents: number;
+  multipliers: Array<{ periodCode: string; multiplier: number }>;
+  /** Local YYYY-MM-DD dates that are public holidays in this jurisdiction. */
+  holidayDates?: ReadonlySet<string>;
+}): HourlyLabourBlock[] {
+  const hours = Number.isFinite(params.hoursCharged) ? Math.max(0, params.hoursCharged) : 0;
+  if (hours <= 0) return [];
+
+  const multiplierFor = (code: LabourPeriodCode): number => {
+    const row =
+      params.multipliers.find((m) => m.periodCode === code) ??
+      DEFAULT_LABOUR_MULTIPLIERS.find((m) => m.periodCode === code);
+    const m = row?.multiplier ?? 1;
+    return Number.isFinite(m) && m > 0 ? m : 1;
+  };
+
+  const blocks: HourlyLabourBlock[] = [];
+  let remaining = hours;
+  let cursorMs = params.startAt.getTime();
+
+  while (remaining > 1e-9) {
+    const blockHours = Math.min(1, remaining);
+    const at = new Date(cursorMs);
+    const localDate = localDateIso(at, params.timeZone);
+    const isHoliday = params.holidayDates?.has(localDate) ?? false;
+    const periodCode = resolveLabourPeriod(at, params.timeZone, isHoliday);
+    const multiplier = multiplierFor(periodCode);
+    const loaded = loadedHourlyFloorCents(
+      params.baseHourlyFloorCents,
+      params.labourRateHrCents,
+      multiplier,
+    );
+    const labourAddCents = loaded - params.baseHourlyFloorCents;
+    const blockExGstCents = Math.ceil(blockHours * loaded - 1e-9);
+    blocks.push({
+      atIso: at.toISOString(),
+      localDate,
+      periodCode,
+      multiplier,
+      blockHours: Math.round(blockHours * 1000) / 1000,
+      loadedHourlyFloorCents: loaded,
+      labourAddCents,
+      blockExGstCents,
+    });
+    cursorMs += blockHours * 3_600_000;
+    remaining -= blockHours;
+  }
+
+  return blocks;
+}
+
+/** Distinct local calendar dates touched by an hourly walk (for holiday lookup). */
+export function localDatesForHourlyWalk(
+  startAt: Date,
+  hoursCharged: number,
+  timeZone: string,
+): string[] {
+  const hours = Number.isFinite(hoursCharged) ? Math.max(0, hoursCharged) : 0;
+  const dates = new Set<string>();
+  let remaining = hours;
+  let cursorMs = startAt.getTime();
+  if (hours <= 0) {
+    dates.add(localDateIso(startAt, timeZone));
+    return [...dates];
+  }
+  while (remaining > 1e-9) {
+    const blockHours = Math.min(1, remaining);
+    dates.add(localDateIso(new Date(cursorMs), timeZone));
+    cursorMs += blockHours * 3_600_000;
+    remaining -= blockHours;
+  }
+  return [...dates];
 }

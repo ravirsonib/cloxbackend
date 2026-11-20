@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ConflictException,
   NotFoundException,
 } from '@nestjs/common';
 import { CompanyStatus, DriverStatus, VehicleStatus } from '@prisma/client';
@@ -146,6 +147,7 @@ describe('CarrierService resend / vehicle / capabilities leftovers', () => {
         }),
       },
       vehicle: {
+        findFirst: jest.fn().mockResolvedValue(null),
         create: jest.fn().mockResolvedValue({ id: 'veh-1' }),
       },
       company: { findUnique: jest.fn() },
@@ -166,7 +168,57 @@ describe('CarrierService resend / vehicle / capabilities leftovers', () => {
         status: VehicleStatus.ACTIVE,
       }),
     });
-    expect(result).toMatchObject({ step: expect.any(String) });
+    expect(result).toMatchObject({ step: expect.any(String), vehicleId: 'veh-1' });
+  });
+
+  it('addVehicle rejects duplicate non-retired registration', async () => {
+    const company = carrierCompany({ status: CompanyStatus.DRAFT });
+    const prisma = {
+      isConnected: () => true,
+      user: {
+        findUnique: jest.fn().mockResolvedValue({
+          id: 'user-carrier',
+          email: 'carrier@yopmail.com',
+          role: 'TRANSPORT_COMPANY',
+          name: 'C',
+          phone: null,
+          company,
+        }),
+      },
+      vehicle: {
+        findFirst: jest.fn().mockResolvedValue({ id: 'veh-existing' }),
+        create: jest.fn(),
+      },
+    };
+    await expect(
+      makeService(prisma).addVehicle(carrier, {
+        label: 'Dup',
+        registration: 'rt0001',
+        vehicleClass: 'ROAD_TRAIN',
+        tareKg: 1,
+        gvmKg: 1,
+        gcmKg: 1,
+      } as never),
+    ).rejects.toBeInstanceOf(ConflictException);
+    try {
+      await makeService(prisma).addVehicle(carrier, {
+        label: 'Dup',
+        registration: 'rt0001',
+        vehicleClass: 'ROAD_TRAIN',
+        tareKg: 1,
+        gvmKg: 1,
+        gcmKg: 1,
+      } as never);
+    } catch (err) {
+      expect(err).toBeInstanceOf(ConflictException);
+      expect((err as ConflictException).getResponse()).toEqual(
+        expect.objectContaining({
+          code: 'VEHICLE_REGISTRATION_EXISTS',
+          existingVehicleId: 'veh-existing',
+        }),
+      );
+    }
+    expect(prisma.vehicle.create).not.toHaveBeenCalled();
   });
 
   it('addVehicle BID_ELIGIBLE creates PENDING_REVIEW; rejects SUSPENDED', async () => {
@@ -188,6 +240,7 @@ describe('CarrierService resend / vehicle / capabilities leftovers', () => {
         }),
       },
       vehicle: {
+        findFirst: jest.fn().mockResolvedValue(null),
         create: jest.fn().mockResolvedValue({ id: 'veh-2' }),
       },
     };
@@ -200,7 +253,7 @@ describe('CarrierService resend / vehicle / capabilities leftovers', () => {
         gvmKg: 1,
         gcmKg: 1,
       } as never),
-    ).resolves.toMatchObject({ step: expect.any(String) });
+    ).resolves.toMatchObject({ step: expect.any(String), vehicleId: 'veh-2' });
     expect(eligiblePrisma.vehicle.create).toHaveBeenCalledWith({
       data: expect.objectContaining({
         status: VehicleStatus.PENDING_REVIEW,

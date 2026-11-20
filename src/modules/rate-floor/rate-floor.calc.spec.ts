@@ -8,10 +8,12 @@ import {
 import { inferBodyCode } from './rate-floor.body';
 import { DEFAULT_RATE_FLOOR_LINES } from './rate-floor.defaults';
 import { applyWeeklyDieselCap, mondayOfWeek, percentChange } from './rate-floor.fuel';
+import { DEFAULT_LABOUR_MULTIPLIERS } from './rate-floor.defaults';
 import {
   loadedHourlyFloorCents,
   localDateIso,
   resolveLabourPeriod,
+  walkHourlyLabourBlocks,
 } from './rate-floor.labour';
 
 const rigid8 = DEFAULT_RATE_FLOOR_LINES.find((l) => l.vehicleClassCode === 'RIGID_8_10T')!;
@@ -230,6 +232,135 @@ describe('Wave 2.3 body loadings', () => {
     });
     expect(withBody.floorExGstCents).toBe(Math.ceil(base.floorExGstCents * 1.2 - 1e-9));
     expect(withBody.breakdown.modifiersApplied).toContain('BODY');
+  });
+});
+
+describe('W3.3 hourly hour-blocks (IT §4.1 / T12)', () => {
+  const multipliers = DEFAULT_LABOUR_MULTIPLIERS;
+  const labourRateHrCents = 3440;
+
+  it('T2: Saturday 4h via labourWalk matches single Saturday labour', () => {
+    // Sat 10:00 Melbourne AEDT = 2026-11-20 23:00Z (Fri UTC / Sat local)
+    const satStart = new Date('2026-11-20T23:00:00.000Z');
+    expect(resolveLabourPeriod(satStart, 'Australia/Melbourne')).toBe('SATURDAY');
+    const single = calculateRateFloor({
+      pricingModel: 'HOURLY',
+      billableHours: 4,
+      line: rigid8,
+      version,
+      gstPercent: gst,
+      labour: { periodCode: 'SATURDAY', multiplier: 1.5, labourRateHrCents },
+    });
+    const walked = calculateRateFloor({
+      pricingModel: 'HOURLY',
+      billableHours: 4,
+      line: rigid8,
+      version,
+      gstPercent: gst,
+      labourWalk: {
+        startAt: satStart,
+        timeZone: 'Australia/Melbourne',
+        labourRateHrCents,
+        multipliers,
+      },
+    });
+    expect(walked.floorExGstCents).toBe(single.floorExGstCents);
+    expect(walked.floorExGstCents).toBe(4 * loadedHourlyFloorCents(6400, labourRateHrCents, 1.5));
+    expect(walked.breakdown.labourPeriodCode).toBe('SATURDAY');
+  });
+
+  it('T3: Sunday 4h via labourWalk matches single Sunday labour', () => {
+    // Sun 10:00 Melbourne AEDT = 2026-11-21 23:00Z
+    const sunStart = new Date('2026-11-21T23:00:00.000Z');
+    expect(resolveLabourPeriod(sunStart, 'Australia/Melbourne')).toBe('SUNDAY');
+    const walked = calculateRateFloor({
+      pricingModel: 'HOURLY',
+      billableHours: 4,
+      line: rigid8,
+      version,
+      gstPercent: gst,
+      labourWalk: {
+        startAt: sunStart,
+        timeZone: 'Australia/Melbourne',
+        labourRateHrCents,
+        multipliers,
+      },
+    });
+    expect(walked.floorExGstCents).toBe(4 * 9840);
+    expect(walked.breakdown.labourPeriodCode).toBe('SUNDAY');
+  });
+
+  it('T12: Fri 23:00 → Sat hour blocks use AFTERNOON then SATURDAY', () => {
+    // Fri 23:00 Melbourne AEDT (UTC+11) = 2026-11-20T12:00:00.000Z
+    const friEve = new Date('2026-11-20T12:00:00.000Z');
+    expect(resolveLabourPeriod(friEve, 'Australia/Melbourne')).toBe('AFTERNOON');
+    expect(localDateIso(friEve, 'Australia/Melbourne')).toBe('2026-11-20');
+
+    const blocks = walkHourlyLabourBlocks({
+      startAt: friEve,
+      hoursCharged: 4,
+      timeZone: 'Australia/Melbourne',
+      baseHourlyFloorCents: rigid8.hourlyFloorCents,
+      labourRateHrCents,
+      multipliers,
+    });
+    expect(blocks.map((b) => b.periodCode)).toEqual([
+      'AFTERNOON',
+      'SATURDAY',
+      'SATURDAY',
+      'SATURDAY',
+    ]);
+
+    const afternoon = loadedHourlyFloorCents(6400, labourRateHrCents, 1.175);
+    const saturday = loadedHourlyFloorCents(6400, labourRateHrCents, 1.5);
+    expect(afternoon).toBe(7002);
+    expect(saturday).toBe(8120);
+
+    const r = calculateRateFloor({
+      pricingModel: 'HOURLY',
+      billableHours: 4,
+      line: rigid8,
+      version,
+      gstPercent: gst,
+      labourWalk: {
+        startAt: friEve,
+        timeZone: 'Australia/Melbourne',
+        labourRateHrCents,
+        multipliers,
+      },
+    });
+    expect(r.floorExGstCents).toBe(afternoon + 3 * saturday);
+    expect(r.breakdown.labourPeriodCode).toBe('MIXED');
+    expect(r.breakdown.modifiersApplied).toEqual(
+      expect.arrayContaining(['LABOUR', 'HOUR_BLOCKS']),
+    );
+    expect(r.breakdown.hourBlocks).toHaveLength(4);
+
+    // Single start-period would under-charge Saturday hours — prove divergence.
+    const flatAfternoon = calculateRateFloor({
+      pricingModel: 'HOURLY',
+      billableHours: 4,
+      line: rigid8,
+      version,
+      gstPercent: gst,
+      labour: { periodCode: 'AFTERNOON', multiplier: 1.175, labourRateHrCents },
+    });
+    expect(r.floorExGstCents).toBeGreaterThan(flatAfternoon.floorExGstCents);
+  });
+
+  it('fractional last block: 4.5h yields five blocks with 0.5h tail', () => {
+    const start = new Date('2026-11-18T01:00:00.000Z'); // Wed 12:00 Melbourne
+    const blocks = walkHourlyLabourBlocks({
+      startAt: start,
+      hoursCharged: 4.5,
+      timeZone: 'Australia/Melbourne',
+      baseHourlyFloorCents: rigid8.hourlyFloorCents,
+      labourRateHrCents,
+      multipliers,
+    });
+    expect(blocks).toHaveLength(5);
+    expect(blocks[4]?.blockHours).toBe(0.5);
+    expect(blocks.every((b) => b.periodCode === 'WEEKDAY_ORDINARY')).toBe(true);
   });
 });
 
