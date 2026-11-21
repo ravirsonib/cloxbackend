@@ -1270,7 +1270,15 @@ export class CarrierService {
             : openBid
               ? 'BID_COMMITTED'
               : null;
-        const bidAvailable = v.status === VehicleStatus.ACTIVE && activityStatus == null;
+        const compliance = this.buildUnitComplianceSnapshot(
+          v,
+          rwcByVehicle.get(v.id) ?? [],
+        );
+        // Assignable only when Ops has approved every required unit RWC (not merely uploaded).
+        const rwcBidReady =
+          compliance.aggregate.state === 'OK' || compliance.aggregate.state === 'EXPIRING';
+        const bidAvailable =
+          v.status === VehicleStatus.ACTIVE && activityStatus == null && rwcBidReady;
         const vehicleDgDoc =
           dgByVehicle.get(v.id) ??
           (!hasPerVehicleDgDocs && company.capabilities.includes('DG') ? companyDgDoc : null);
@@ -1300,16 +1308,16 @@ export class CarrierService {
                 jobTitle: active!.job.title,
               }
             : null,
-          compliance: this.buildUnitComplianceSnapshot(
-            v,
-            rwcByVehicle.get(v.id) ?? [],
-          ),
+          compliance,
         };
       }),
     };
   }
 
-  /** FLT-01: RWC pill — uploaded/under review/approved all show OK; Ops approval is documentStatus. */
+  /**
+   * RWC pill for Fleet UI — only APPROVED is green OK.
+   * UPLOADED / UNDER_REVIEW stay PENDING until CLOX Ops approves (do not look assignable).
+   */
   private summarizeRwcDoc(
     doc:
       | {
@@ -1337,17 +1345,17 @@ export class CarrierService {
       (expiresMs != null && expiresMs <= now)
     ) {
       state = 'EXPIRED';
-    } else if (doc.status === ComplianceDocStatus.UPLOAD_PENDING) {
-      state = 'PENDING';
+    } else if (doc.status === ComplianceDocStatus.REJECTED) {
+      state = 'MISSING';
+    } else if (doc.status === ComplianceDocStatus.APPROVED) {
+      state =
+        expiresMs != null && expiresMs - now <= warnMs ? 'EXPIRING' : 'OK';
     } else if (
       doc.status === ComplianceDocStatus.UPLOADED ||
       doc.status === ComplianceDocStatus.UNDER_REVIEW ||
-      doc.status === ComplianceDocStatus.APPROVED
+      doc.status === ComplianceDocStatus.UPLOAD_PENDING
     ) {
-      state =
-        expiresMs != null && expiresMs - now <= warnMs ? 'EXPIRING' : 'OK';
-    } else if (doc.status === ComplianceDocStatus.REJECTED) {
-      state = 'MISSING';
+      state = 'PENDING';
     } else {
       state = 'PENDING';
     }

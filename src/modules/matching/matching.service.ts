@@ -21,6 +21,13 @@ import {
   TripStatus,
   VehicleStatus,
 } from '@prisma/client';
+import {
+  assertUnitsComplete,
+  defaultCombinationConfigForClass,
+  RWC_BID_READY_STATUSES,
+  type CombinationConfigCode,
+  type VehicleUnitRoleCode,
+} from '../carrier/vehicle-units.util';
 import type { AuthenticatedPrincipal } from '../../common/guards/jwt-auth.guard';
 import { AuditAction, type ProposalSubmitInput } from '../../shared/types';
 import { PrismaService } from '../../prisma/prisma.service';
@@ -150,6 +157,7 @@ export class MatchingService {
         stops: { orderBy: { sequence: 'asc' }, take: 4 },
         dgDocument: { select: { id: true, originalFilename: true } },
         originRegion: true,
+        rateFloorVersion: { select: { id: true, label: true } },
         proposals: {
           where: {
             carrierCompanyId: company.id,
@@ -287,6 +295,8 @@ export class MatchingService {
           minBidIncGstCents: hardFloorGross,
           /** Carrier-facing minimum payout (net). */
           minBidNetToCarrierCents,
+          rateFloorVersionId: j.rateFloorVersionId ?? j.rateFloorVersion?.id ?? null,
+          rateFloorVersionLabel: j.rateFloorVersion?.label ?? null,
           siteManeuverability: j.siteManeuverability,
           siteFacility: j.siteFacility,
           pickupAt: j.pickupAt,
@@ -373,6 +383,7 @@ export class MatchingService {
         companyId: company.id,
         status: VehicleStatus.ACTIVE,
       },
+      include: { units: { orderBy: { role: 'asc' } } },
     });
     if (!vehicle) {
       throw new BadRequestException({
@@ -398,6 +409,63 @@ export class MatchingService {
       throw new BadRequestException({
         message: `Vehicle class ${vehicleClass} undersized for min ${job.minVehicleClass}`,
         code: 'VEHICLE_CLASS_UNDERSIZE',
+      });
+    }
+
+    const rwcDocs = await this.prisma.complianceDocument.findMany({
+      where: {
+        companyId: company.id,
+        vehicleId: vehicle.id,
+        docType: ComplianceDocType.RWC,
+      },
+      orderBy: { updatedAt: 'desc' },
+      select: {
+        id: true,
+        status: true,
+        expiresAt: true,
+        vehicleUnitId: true,
+      },
+    });
+    const combinationConfig = (vehicle.combinationConfig ??
+      defaultCombinationConfigForClass(vehicleClass)) as CombinationConfigCode;
+    const unitRows =
+      vehicle.units && vehicle.units.length > 0
+        ? vehicle.units
+        : [
+            {
+              id: null as string | null,
+              role: 'POWERED' as const,
+              registration: vehicle.registration,
+            },
+          ];
+    const unitInputs = unitRows.map((u) => {
+      const doc =
+        (u.id ? rwcDocs.find((d) => d.vehicleUnitId === u.id) : undefined) ??
+        (u.role === 'POWERED'
+          ? rwcDocs.find((d) => !d.vehicleUnitId) ?? null
+          : null);
+      return {
+        role: u.role as VehicleUnitRoleCode,
+        registration: u.registration,
+        rwc: doc
+          ? { status: String(doc.status), expiresAt: doc.expiresAt }
+          : null,
+      };
+    });
+    const unitsReady = assertUnitsComplete(
+      vehicleClass,
+      combinationConfig,
+      unitInputs,
+      new Date(),
+      RWC_BID_READY_STATUSES,
+    );
+    if (!unitsReady.ok) {
+      throw new BadRequestException({
+        message:
+          'This vehicle cannot bid until CLOX Ops has approved Roadworthy / COI for every required unit (prime mover and trailers)',
+        code: 'VEHICLE_RWC_UNITS_NOT_APPROVED',
+        missingRwc: unitsReady.missingRwc,
+        missingRegistration: unitsReady.missingRegistration,
       });
     }
 

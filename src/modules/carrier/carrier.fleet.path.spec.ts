@@ -282,6 +282,100 @@ describe('CarrierService resend / vehicle / capabilities leftovers', () => {
     ).rejects.toBeInstanceOf(BadRequestException);
   });
 
+  it('listVehicles marks UPLOADED trailer RWC as PENDING and not bidAvailable', async () => {
+    const prisma = {
+      isConnected: () => true,
+      user: {
+        findUnique: jest.fn().mockResolvedValue({
+          id: 'user-carrier',
+          company: carrierCompany({ status: CompanyStatus.BID_ELIGIBLE }),
+        }),
+      },
+      vehicle: {
+        findMany: jest.fn().mockResolvedValue([
+          {
+            id: 'veh-bd',
+            status: VehicleStatus.ACTIVE,
+            label: 'BDOUBLE New',
+            registration: '1MR9FM',
+            vehicleClass: 'BDOUBLE',
+            combinationConfig: 'BDOUBLE',
+            tareKg: 20_000,
+            gvmKg: 62_500,
+            gcmKg: null,
+            disabledAt: null,
+            disabledReason: null,
+            disabledNote: null,
+            createdAt: new Date(),
+            updatedAt: new Date(),
+            units: [
+              { id: 'u-pm', role: 'POWERED', registration: '1MR9FM', label: 'PM' },
+              { id: 'u-t1', role: 'TRAILER_1', registration: 'T1', label: 'T1' },
+              { id: 'u-t2', role: 'TRAILER_2', registration: 'T2', label: 'T2' },
+            ],
+          },
+        ]),
+      },
+      complianceDocument: {
+        findMany: jest.fn().mockImplementation(async (args: { where?: { caseId?: null } }) => {
+          // Orphan reconcile query (caseId: null) — return the pending trailer upload only.
+          if (args?.where && 'caseId' in (args.where ?? {}) && args.where.caseId === null) {
+            return [
+              {
+                id: 'rwc-t2',
+                vehicleId: 'veh-bd',
+                vehicleUnitId: 'u-t2',
+                companyId: 'co-c',
+                status: 'UPLOADED',
+                expiresAt: null,
+              },
+            ];
+          }
+          return [
+            {
+              id: 'rwc-pm',
+              vehicleId: 'veh-bd',
+              vehicleUnitId: 'u-pm',
+              companyId: 'co-c',
+              status: 'APPROVED',
+              expiresAt: null,
+            },
+            {
+              id: 'rwc-t1',
+              vehicleId: 'veh-bd',
+              vehicleUnitId: 'u-t1',
+              companyId: 'co-c',
+              status: 'APPROVED',
+              expiresAt: null,
+            },
+            {
+              id: 'rwc-t2',
+              vehicleId: 'veh-bd',
+              vehicleUnitId: 'u-t2',
+              companyId: 'co-c',
+              status: 'UPLOADED',
+              expiresAt: null,
+            },
+          ];
+        }),
+        updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+      },
+      complianceCase: {
+        findFirst: jest.fn().mockResolvedValue(null),
+        create: jest.fn().mockResolvedValue({ id: 'case-fleet-rwc' }),
+      },
+      assignment: { findMany: jest.fn().mockResolvedValue([]) },
+      proposal: { findMany: jest.fn().mockResolvedValue([]) },
+    };
+    const result = await makeService(prisma).listVehicles(carrier);
+    expect(result.items[0].compliance.aggregate.state).toBe('PENDING');
+    expect(result.items[0].bidAvailable).toBe(false);
+    const t2 = result.items[0].compliance.units.find(
+      (u: { role: string }) => u.role === 'TRAILER_2',
+    );
+    expect(t2?.rwc.state).toBe('PENDING');
+  });
+
   it('listVehicles returns company fleet with RWC compliance summary', async () => {
     const prisma = {
       isConnected: () => true,

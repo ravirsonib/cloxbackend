@@ -4,6 +4,7 @@ import {
   defaultCombinationConfigForClass,
   pillForUnitRwc,
   requiredUnitsForVehicle,
+  RWC_BID_READY_STATUSES,
 } from './vehicle-units.util';
 
 describe('vehicle-units.util', () => {
@@ -165,6 +166,22 @@ describe('vehicle-units.util', () => {
       );
       expect(result.ok).toBe(true);
     });
+
+    it('bid-ready requires APPROVED — UPLOADED alone fails', () => {
+      const uploaded = assertUnitsComplete(
+        'BDOUBLE',
+        'BDOUBLE',
+        [
+          { role: 'POWERED', registration: 'PM1', rwc: { status: 'APPROVED', expiresAt: future } },
+          { role: 'TRAILER_1', registration: 'T1', rwc: { status: 'APPROVED', expiresAt: future } },
+          { role: 'TRAILER_2', registration: 'T2', rwc: { status: 'UPLOADED', expiresAt: future } },
+        ],
+        now,
+        RWC_BID_READY_STATUSES,
+      );
+      expect(uploaded.ok).toBe(false);
+      expect(uploaded.missingRwc).toContain('TRAILER_2');
+    });
   });
 
   describe('pill aggregation', () => {
@@ -173,6 +190,8 @@ describe('vehicle-units.util', () => {
       expect(aggregateUnitPills(['OK', 'EXPIRING', 'PENDING'])).toBe('EXPIRING');
       expect(aggregateUnitPills(['OK', 'EXPIRED'])).toBe('EXPIRED');
       expect(pillForUnitRwc(null)).toBe('MISSING');
+      expect(pillForUnitRwc({ status: 'UPLOADED', expiresAt: null })).toBe('PENDING');
+      expect(pillForUnitRwc({ status: 'UNDER_REVIEW', expiresAt: null })).toBe('PENDING');
       expect(
         pillForUnitRwc(
           { status: 'APPROVED', expiresAt: new Date(Date.now() - 1000) },

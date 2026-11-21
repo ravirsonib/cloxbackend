@@ -22,8 +22,11 @@ export const VEHICLE_UNIT_ROLE_LABELS: Record<VehicleUnitRoleCode, string> = {
 /** Classes that always require two registered units (powered + trailer). */
 const TWO_UNIT_CLASSES = new Set(['SEMI', 'CONTAINER']);
 
-/** Eligible RWC/COI statuses for fleet gates (same as prior single-RWC rule). */
+/** Eligible RWC/COI statuses for fleet readiness / completeness (docs submitted). */
 export const RWC_ELIGIBLE_STATUSES = new Set(['UPLOADED', 'UNDER_REVIEW', 'APPROVED']);
+
+/** Bid / assign only after Ops has approved every required unit certificate. */
+export const RWC_BID_READY_STATUSES = new Set(['APPROVED']);
 
 export function defaultCombinationConfigForClass(
   vehicleClass: string | null | undefined,
@@ -83,9 +86,13 @@ export type UnitCompletenessResult = {
   expiredRwc: VehicleUnitRoleCode[];
 };
 
-function isRwcValid(rwc: UnitRwcSnapshot | null | undefined, now: Date): boolean {
+function isRwcValid(
+  rwc: UnitRwcSnapshot | null | undefined,
+  now: Date,
+  eligible: Set<string> = RWC_ELIGIBLE_STATUSES,
+): boolean {
   if (!rwc) return false;
-  if (!RWC_ELIGIBLE_STATUSES.has(rwc.status)) return false;
+  if (!eligible.has(rwc.status)) return false;
   if (rwc.expiresAt != null) {
     const exp = rwc.expiresAt instanceof Date ? rwc.expiresAt : new Date(rwc.expiresAt);
     if (!Number.isNaN(exp.getTime()) && exp.getTime() <= now.getTime()) return false;
@@ -95,12 +102,14 @@ function isRwcValid(rwc: UnitRwcSnapshot | null | undefined, now: Date): boolean
 
 /**
  * Assert every required role has registration + non-expired eligible RWC/COI.
+ * Pass {@link RWC_BID_READY_STATUSES} when Ops approval is required before assign/bid.
  */
 export function assertUnitsComplete(
   vehicleClass: string | null | undefined,
   combinationConfig: CombinationConfigCode | null | undefined,
   units: UnitCompletenessInput[],
   now: Date = new Date(),
+  eligibleStatuses: Set<string> = RWC_ELIGIBLE_STATUSES,
 ): UnitCompletenessResult {
   const required = requiredUnitsForVehicle(vehicleClass, combinationConfig);
   const byRole = new Map(units.map((u) => [u.role, u]));
@@ -120,7 +129,7 @@ export function assertUnitsComplete(
       missingRegistration.push(role);
     }
     const rwc = unit.rwc;
-    if (!rwc || !RWC_ELIGIBLE_STATUSES.has(rwc.status)) {
+    if (!rwc || !eligibleStatuses.has(rwc.status)) {
       missingRwc.push(role);
     } else if (rwc.expiresAt != null) {
       const exp = rwc.expiresAt instanceof Date ? rwc.expiresAt : new Date(rwc.expiresAt);
@@ -155,6 +164,7 @@ export function pillForUnitRwc(
       if (exp.getTime() - now.getTime() <= expiringWithinMs) return 'EXPIRING';
     }
   }
+  // Uploaded / under Ops review — not bid-ready until APPROVED.
   if (rwc.status === 'UPLOADED' || rwc.status === 'UNDER_REVIEW') return 'PENDING';
   return 'OK';
 }
