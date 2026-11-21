@@ -511,6 +511,7 @@ export class ComplianceService {
               expiresAt: true,
               originalFilename: true,
               vehicleId: true,
+              vehicleUnitId: true,
               driverId: true,
             },
           },
@@ -558,7 +559,13 @@ export class ComplianceService {
         ? []
         : await this.prisma.vehicle.findMany({
             where: { id: { in: vehicleIds }, companyId: complianceCase.companyId },
-            select: { id: true, registration: true, label: true, status: true },
+            select: {
+              id: true,
+              registration: true,
+              label: true,
+              status: true,
+              units: { select: { id: true, role: true, registration: true, label: true } },
+            },
           });
     const drivers =
       driverIds.length === 0
@@ -573,17 +580,24 @@ export class ComplianceService {
             },
           });
     const vehicleById = new Map(vehicles.map((v) => [v.id, v]));
+    const unitById = new Map(
+      vehicles.flatMap((v) => v.units.map((u) => [u.id, { ...u, vehicleId: v.id }] as const)),
+    );
     const driverById = new Map(drivers.map((d) => [d.id, d]));
     const documents = [...complianceCase.documents]
       .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
       .map((doc) => {
         const vehicle = doc.vehicleId ? vehicleById.get(doc.vehicleId) : undefined;
+        const unit = doc.vehicleUnitId ? unitById.get(doc.vehicleUnitId) : undefined;
         const driver = doc.driverId ? driverById.get(doc.driverId) : undefined;
         return {
           ...doc,
-          vehicleRegistration: vehicle?.registration ?? null,
+          vehicleRegistration: unit?.registration ?? vehicle?.registration ?? null,
           vehicleLabel: vehicle?.label ?? null,
           vehicleStatus: vehicle?.status ?? null,
+          vehicleUnitId: doc.vehicleUnitId ?? null,
+          vehicleUnitRole: unit?.role ?? null,
+          vehicleUnitLabel: unit?.label ?? null,
           driverEmail: driver?.user.email ?? null,
           driverName: driver?.user.name ?? null,
           driverLicenceClass: driver?.licenceClass ?? null,
@@ -1555,6 +1569,16 @@ export class ComplianceService {
       });
 
       if (doc.vehicleId && doc.docType === ComplianceDocType.RWC) {
+        let unitNote = '';
+        if (doc.vehicleUnitId) {
+          const unit = await this.prisma.vehicleUnit.findUnique({
+            where: { id: doc.vehicleUnitId },
+            select: { role: true, registration: true, label: true },
+          });
+          if (unit) {
+            unitNote = ` (${unit.label ?? unit.role}${unit.registration ? ` ${unit.registration}` : ''})`;
+          }
+        }
         // Fleet+ AC5: per-vehicle RWC expiry → MAINTENANCE (blocks bid) rather than SUSPENDED.
         await this.prisma.vehicle.update({
           where: { id: doc.vehicleId },
@@ -1569,7 +1593,7 @@ export class ComplianceService {
             vehicleId: doc.vehicleId,
             companyId: doc.companyId!,
             cause: VehicleMaintenanceCause.RWC_EXPIRED,
-            notes: `Compliance expiry watchdog — doc ${doc.id}`,
+            notes: `Compliance expiry watchdog — RWC/COI expired${unitNote} — doc ${doc.id}`,
           },
         });
         suspendedVehicles += 1;

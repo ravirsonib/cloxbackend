@@ -615,6 +615,23 @@ enum VehicleMaintenanceCause {
   MANUAL
 }
 
+/// Multi-unit RWC/COI: role of a registered physical unit in a combination.
+enum VehicleUnitRole {
+  POWERED
+  TRAILER_1
+  TRAILER_2
+  TRAILER_3
+}
+
+/// How many registered units a Vehicle combination requires for RWC/COI.
+enum CombinationConfig {
+  NONE
+  SEMI
+  BDOUBLE
+  RT_DOUBLE
+  RT_TRIPLE
+}
+
 enum VehicleFuelLogSource {
   MANUAL
   TRIP_ODOMETER
@@ -686,6 +703,8 @@ model Vehicle {
   registration String?
   /// e.g. UTE, RIGID_1_2T — floor G0-12
   vehicleClass String?
+  /// Articulated multi-unit RWC/COI layout (NONE = single powered unit).
+  combinationConfig CombinationConfig @default(NONE)
   tareKg       Int?
   gvmKg        Int?
   gcmKg        Int?
@@ -710,12 +729,30 @@ model Vehicle {
   assignments Assignment[]
   proposals   Proposal[]
   complianceDocuments ComplianceDocument[]
+  units                VehicleUnit[]
   proposedOnExceptions TripException[] @relation("ExceptionProposedVehicle")
   fuelLogs             VehicleFuelLog[]
   costEntries          VehicleCostEntry[]
   maintenanceWorkOrders VehicleMaintenanceWorkOrder[]
 
   @@index([companyId, status])
+}
+
+/// Registered physical unit in a combination (prime mover / trailer) — own rego + RWC/COI.
+model VehicleUnit {
+  id           String          @id @default(uuid())
+  vehicleId    String
+  vehicle      Vehicle         @relation(fields: [vehicleId], references: [id], onDelete: Cascade)
+  role         VehicleUnitRole
+  registration String?
+  label        String?
+  createdAt    DateTime        @default(now())
+  updatedAt    DateTime        @updatedAt
+
+  complianceDocuments ComplianceDocument[]
+
+  @@unique([vehicleId, role])
+  @@index([vehicleId])
 }
 
 model VehicleFuelLog {
@@ -1047,6 +1084,9 @@ model ComplianceDocument {
   company          Company?            @relation(fields: [companyId], references: [id], onDelete: Cascade)
   vehicleId        String?
   vehicle          Vehicle?            @relation(fields: [vehicleId], references: [id], onDelete: Cascade)
+  /// Multi-unit RWC/COI: which combination unit this doc belongs to.
+  vehicleUnitId    String?
+  vehicleUnit      VehicleUnit?        @relation(fields: [vehicleUnitId], references: [id], onDelete: Cascade)
   driverId         String?
   driver           Driver?             @relation(fields: [driverId], references: [id], onDelete: Cascade)
   caseId           String?
@@ -1073,6 +1113,7 @@ model ComplianceDocument {
 
   @@index([companyId, status])
   @@index([vehicleId])
+  @@index([vehicleUnitId])
   @@index([driverId])
   @@index([caseId])
   @@index([expiresAt])

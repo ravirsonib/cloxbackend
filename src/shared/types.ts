@@ -794,6 +794,10 @@ export const createUploadIntentSchema = z.object({
     ComplianceDocType.OTHER,
   ]),
   vehicleId: z.string().uuid().optional(),
+  /** Multi-unit RWC/COI: which combination unit this document belongs to. */
+  vehicleUnitId: z.string().uuid().optional(),
+  /** Alternative to vehicleUnitId — resolved with vehicleId to the unit row. */
+  vehicleUnitRole: z.enum(['POWERED', 'TRAILER_1', 'TRAILER_2', 'TRAILER_3']).optional(),
   driverId: z.string().uuid().optional(),
   originalFilename: z
     .string()
@@ -1168,9 +1172,19 @@ export const carrierSubmitVerificationSchema = z.object({
 
 export type CarrierSubmitVerificationInput = z.infer<typeof carrierSubmitVerificationSchema>;
 
+const vehicleUnitRoleSchema = z.enum(['POWERED', 'TRAILER_1', 'TRAILER_2', 'TRAILER_3']);
+const combinationConfigSchema = z.enum(['NONE', 'SEMI', 'BDOUBLE', 'RT_DOUBLE', 'RT_TRIPLE']);
+
+export const carrierVehicleUnitInputSchema = z.object({
+  role: vehicleUnitRoleSchema,
+  registration: z.string().trim().min(2).max(20),
+  label: z.string().trim().min(1).max(120).optional(),
+});
+
 export const carrierVehicleSchema = z
   .object({
     label: z.string().trim().min(1).max(120),
+    /** Powered-unit registration (kept for marketplace display / single-unit). */
     registration: z.string().trim().min(2).max(20),
     vehicleClass: z
       .string()
@@ -1179,6 +1193,16 @@ export const carrierVehicleSchema = z
       .max(32)
       .regex(/^[A-Za-z0-9_]+$/, 'Code must be alphanumeric with underscores only')
       .transform((v) => v.toUpperCase()),
+    /**
+     * ROAD_TRAIN: RT_DOUBLE (3 units) or RT_TRIPLE (4).
+     * Other classes derive config from vehicleClass when omitted.
+     */
+    combinationConfig: combinationConfigSchema.optional(),
+    /**
+     * Per-unit registrations for articulated combinations.
+     * When omitted, POWERED is created from `registration` and trailer slots are empty.
+     */
+    units: z.array(carrierVehicleUnitInputSchema).min(1).max(4).optional(),
     /** Unladen mass (kg) — optional but recommended. */
     tareKg: z.number().int().positive().max(100_000).optional(),
     /** Gross Vehicle Mass (kg) — required from compliance plate. */
@@ -1201,9 +1225,35 @@ export const carrierVehicleSchema = z
         message: 'GCM must be greater than or equal to GVM',
       });
     }
+    if (value.vehicleClass === 'ROAD_TRAIN' && value.combinationConfig === 'NONE') {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['combinationConfig'],
+        message: 'ROAD_TRAIN requires RT_DOUBLE or RT_TRIPLE',
+      });
+    }
+    if (value.units) {
+      const roles = value.units.map((u) => u.role);
+      if (new Set(roles).size !== roles.length) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['units'],
+          message: 'Duplicate unit roles are not allowed',
+        });
+      }
+      const powered = value.units.find((u) => u.role === 'POWERED');
+      if (powered && powered.registration.toUpperCase() !== value.registration.toUpperCase()) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['units'],
+          message: 'POWERED unit registration must match vehicle registration',
+        });
+      }
+    }
   });
 
 export type CarrierVehicleInput = z.infer<typeof carrierVehicleSchema>;
+export type CarrierVehicleUnitInput = z.infer<typeof carrierVehicleUnitInputSchema>;
 
 /** Carrier disable / retire vehicle or driver — reason shown in ops + audit. */
 export const fleetDisableReasonSchema = z.object({

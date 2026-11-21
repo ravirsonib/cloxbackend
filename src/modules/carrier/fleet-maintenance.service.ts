@@ -97,7 +97,13 @@ export class FleetMaintenanceService implements OnModuleInit, OnModuleDestroy {
           },
         ],
       },
-      select: { vehicleId: true, companyId: true, id: true },
+      select: {
+        vehicleId: true,
+        vehicleUnitId: true,
+        companyId: true,
+        id: true,
+        vehicleUnit: { select: { role: true, registration: true, label: true } },
+      },
     });
 
     for (const doc of expiredRwcs) {
@@ -112,11 +118,15 @@ export class FleetMaintenanceService implements OnModuleInit, OnModuleDestroy {
       if (vehicle.status !== VehicleStatus.ACTIVE && vehicle.status !== VehicleStatus.PENDING_REVIEW) {
         continue;
       }
+      const unit = doc.vehicleUnit;
+      const unitNote = unit
+        ? ` (${unit.label ?? unit.role}${unit.registration ? ` ${unit.registration}` : ''})`
+        : '';
       await this.fleetPlus.openMaintenance({
         vehicleId: vehicle.id,
         companyId: vehicle.companyId,
         cause: VehicleMaintenanceCause.RWC_EXPIRED,
-        notes: `RWC document ${doc.id} expired`,
+        notes: `RWC/COI document ${doc.id} expired${unitNote}`,
       });
       maintenanceOpened += 1;
       rwc += 1;

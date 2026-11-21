@@ -307,6 +307,7 @@ export class DocumentsService {
       companyId: string | null;
       driverId: string | null;
       vehicleId: string | null;
+      vehicleUnitId?: string | null;
       docType: string;
       status: ComplianceDocStatus;
       mimeType: string | null;
@@ -320,6 +321,7 @@ export class DocumentsService {
     links?: {
       vehicleRegistration?: string | null;
       vehicleLabel?: string | null;
+      vehicleUnitRole?: string | null;
       driverName?: string | null;
       driverEmail?: string | null;
     },
@@ -334,6 +336,8 @@ export class DocumentsService {
       companyId: doc.companyId,
       driverId: doc.driverId,
       vehicleId: doc.vehicleId,
+      vehicleUnitId: doc.vehicleUnitId ?? null,
+      vehicleUnitRole: links?.vehicleUnitRole ?? null,
       docType: doc.docType,
       status: doc.status,
       mimeType: doc.mimeType,
@@ -354,15 +358,49 @@ export class DocumentsService {
   private async resolveLinkedIds(
     principal: AuthenticatedPrincipal,
     input: CreateUploadIntentInput,
-  ): Promise<{ vehicleId: string | null; driverId: string | null }> {
+  ): Promise<{
+    vehicleId: string | null;
+    driverId: string | null;
+    vehicleUnitId: string | null;
+  }> {
     let vehicleId = input.vehicleId ?? null;
     let driverId = input.driverId ?? null;
+    let vehicleUnitId = input.vehicleUnitId ?? null;
 
     if (vehicleId) {
       const vehicle = await this.prisma.vehicle.findUnique({ where: { id: vehicleId } });
       if (!vehicle || vehicle.companyId !== input.companyId) {
         throw new BadRequestException('vehicleId must belong to companyId');
       }
+    }
+
+    if (vehicleUnitId) {
+      const unit = await this.prisma.vehicleUnit.findUnique({
+        where: { id: vehicleUnitId },
+        include: { vehicle: { select: { id: true, companyId: true } } },
+      });
+      if (!unit || unit.vehicle.companyId !== input.companyId) {
+        throw new BadRequestException('vehicleUnitId must belong to companyId');
+      }
+      if (vehicleId && vehicleId !== unit.vehicleId) {
+        throw new BadRequestException('vehicleUnitId must belong to vehicleId');
+      }
+      vehicleId = unit.vehicleId;
+    } else if (vehicleId && input.vehicleUnitRole) {
+      const unit = await this.prisma.vehicleUnit.findUnique({
+        where: {
+          vehicleId_role: {
+            vehicleId,
+            role: input.vehicleUnitRole as never,
+          },
+        },
+      });
+      if (!unit) {
+        throw new BadRequestException(
+          `No ${input.vehicleUnitRole} unit found for this vehicle — save combination units first`,
+        );
+      }
+      vehicleUnitId = unit.id;
     }
 
     if (driverId) {
@@ -389,12 +427,23 @@ export class DocumentsService {
       }
     }
 
+    if (input.docType === ComplianceDocType.RWC && vehicleId && !vehicleUnitId) {
+      // Backward compatible: default RWC without unit → POWERED unit when present.
+      const powered = await this.prisma.vehicleUnit.findUnique({
+        where: {
+          vehicleId_role: { vehicleId, role: 'POWERED' as never },
+        },
+        select: { id: true },
+      });
+      vehicleUnitId = powered?.id ?? null;
+    }
+
     if (input.docType === ComplianceDocType.RWC && !vehicleId) {
       // Company-level RWC allowed; expiry watchdog suspends entire fleet.
       // Prefer per-vehicle when UI supplies vehicleId.
     }
 
-    return { vehicleId, driverId };
+    return { vehicleId, driverId, vehicleUnitId };
   }
 
   async createUploadIntent(
@@ -434,6 +483,7 @@ export class DocumentsService {
         id: documentId,
         companyId: input.companyId,
         vehicleId: linked.vehicleId,
+        vehicleUnitId: linked.vehicleUnitId,
         driverId: linked.driverId,
         docType: input.docType,
         status: ComplianceDocStatus.UPLOAD_PENDING,
@@ -857,7 +907,10 @@ export class DocumentsService {
     const driverIds = [
       ...new Set(docs.map((d) => d.driverId).filter((id): id is string => Boolean(id))),
     ];
-    const [vehicles, drivers] = await Promise.all([
+    const unitIds = [
+      ...new Set(docs.map((d) => d.vehicleUnitId).filter((id): id is string => Boolean(id))),
+    ];
+    const [vehicles, drivers, units] = await Promise.all([
       vehicleIds.length === 0
         ? Promise.resolve([] as Array<{ id: string; registration: string | null; label: string | null }>)
         : this.prisma.vehicle.findMany({
@@ -878,17 +931,28 @@ export class DocumentsService {
               user: { select: { name: true, email: true } },
             },
           }),
+      unitIds.length === 0
+        ? Promise.resolve(
+            [] as Array<{ id: string; role: string; registration: string | null; label: string | null }>,
+          )
+        : this.prisma.vehicleUnit.findMany({
+            where: { id: { in: unitIds } },
+            select: { id: true, role: true, registration: true, label: true },
+          }),
     ]);
     const vehicleById = new Map(vehicles.map((v) => [v.id, v]));
     const driverById = new Map(drivers.map((d) => [d.id, d]));
+    const unitById = new Map(units.map((u) => [u.id, u]));
 
     return {
       items: docs.map((d) => {
         const vehicle = d.vehicleId ? vehicleById.get(d.vehicleId) : undefined;
+        const unit = d.vehicleUnitId ? unitById.get(d.vehicleUnitId) : undefined;
         const driver = d.driverId ? driverById.get(d.driverId) : undefined;
         return this.mapDocumentMeta(d, {
-          vehicleRegistration: vehicle?.registration ?? null,
+          vehicleRegistration: unit?.registration ?? vehicle?.registration ?? null,
           vehicleLabel: vehicle?.label ?? null,
+          vehicleUnitRole: unit?.role ?? null,
           driverName: driver?.user.name ?? null,
           driverEmail: driver?.user.email ?? null,
         });

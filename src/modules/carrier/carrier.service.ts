@@ -11,6 +11,7 @@ import {
 import { ConfigService } from '@nestjs/config';
 import {
   AssignmentStatus,
+  CombinationConfig,
   CompanyStatus,
   CompanyType,
   ComplianceCaseStatus,
@@ -26,6 +27,7 @@ import {
   TripStatus,
   UserStatus,
   VehicleStatus,
+  VehicleUnitRole,
 } from '@prisma/client';
 import type { AppEnv } from '../../config/env.validation';
 import type { AuthenticatedPrincipal } from '../../common/guards/jwt-auth.guard';
@@ -59,6 +61,16 @@ import { InAppNotificationsService } from '../notifications/in-app-notifications
 import { NotificationsService } from '../notifications/notifications.service';
 import { companyHasMockCarrierConnect } from '../payments/stripe-mock-ids.util';
 import { StripeService } from '../payments/stripe.service';
+import {
+  aggregateUnitPills,
+  assertUnitsComplete,
+  defaultCombinationConfigForClass,
+  requiredUnitsForVehicle,
+  VEHICLE_UNIT_ROLE_LABELS,
+  type CombinationConfigCode,
+  type UnitRwcPill,
+  type VehicleUnitRoleCode,
+} from './vehicle-units.util';
 
 /** Prisma Decimal (or number/null) → plain number for JSON responses. */
 function toNumberOrNull(n: { toNumber?: () => number } | number | null | undefined): number | null {
@@ -66,6 +78,14 @@ function toNumberOrNull(n: { toNumber?: () => number } | number | null | undefin
   if (typeof n === 'number') return n;
   if (typeof n.toNumber === 'function') return n.toNumber();
   return Number(n);
+}
+
+function toCombinationConfig(
+  vehicleClass: string,
+  explicit?: CombinationConfigCode | null,
+): CombinationConfig {
+  if (explicit) return explicit as CombinationConfig;
+  return defaultCombinationConfigForClass(vehicleClass) as CombinationConfig;
 }
 
 @Injectable()
@@ -99,7 +119,10 @@ export class CarrierService {
         company: {
           include: {
             homeRegion: true,
-            vehicles: { orderBy: { createdAt: 'asc' } },
+            vehicles: {
+              orderBy: { createdAt: 'asc' },
+              include: { units: { orderBy: { role: 'asc' } } },
+            },
             drivers: {
               include: { user: { select: { id: true, email: true, name: true, phone: true } } },
               orderBy: { createdAt: 'asc' },
@@ -129,9 +152,26 @@ export class CarrierService {
   }
 
   private fleetReady(company: {
-    vehicles: Array<{ id?: string; status: string }>;
+    vehicles: Array<{
+      id?: string;
+      status: string;
+      vehicleClass?: string | null;
+      combinationConfig?: CombinationConfig | CombinationConfigCode | null;
+      registration?: string | null;
+      units?: Array<{
+        role: VehicleUnitRole | VehicleUnitRoleCode;
+        registration?: string | null;
+        id?: string;
+      }>;
+    }>;
     drivers: Array<{ status: string }>;
-    complianceDocuments?: Array<{ docType: ComplianceDocType; vehicleId?: string | null }>;
+    complianceDocuments?: Array<{
+      docType: ComplianceDocType;
+      vehicleId?: string | null;
+      vehicleUnitId?: string | null;
+      status?: ComplianceDocStatus | string;
+      expiresAt?: Date | null;
+    }>;
   }) {
     const activeVehicles = company.vehicles.filter((v) => v.status === 'ACTIVE');
     const activeDrivers = company.drivers.filter((d) => d.status === 'ACTIVE').length;
@@ -139,19 +179,72 @@ export class CarrierService {
     return this.activeVehiclesHaveRwc(company);
   }
 
-  /** Every ACTIVE vehicle must have its own RWC (vehicleId set). Company-level RWC does not count. */
+  /**
+   * Every ACTIVE vehicle must have registration + eligible non-expired RWC/COI
+   * for each required combination unit. Company-level RWC does not count.
+   */
   private activeVehiclesHaveRwc(company: {
-    vehicles: Array<{ id?: string; status: string }>;
-    complianceDocuments?: Array<{ docType: ComplianceDocType; vehicleId?: string | null }>;
+    vehicles: Array<{
+      id?: string;
+      status: string;
+      vehicleClass?: string | null;
+      combinationConfig?: CombinationConfig | CombinationConfigCode | null;
+      registration?: string | null;
+      units?: Array<{
+        role: VehicleUnitRole | VehicleUnitRoleCode;
+        registration?: string | null;
+        id?: string;
+      }>;
+    }>;
+    complianceDocuments?: Array<{
+      docType: ComplianceDocType;
+      vehicleId?: string | null;
+      vehicleUnitId?: string | null;
+      status?: ComplianceDocStatus | string;
+      expiresAt?: Date | null;
+    }>;
   }) {
     const activeVehicles = company.vehicles.filter((v) => v.status === 'ACTIVE' && v.id);
     if (activeVehicles.length < 1) return false;
-    const rwcVehicleIds = new Set(
-      (company.complianceDocuments ?? [])
-        .filter((d) => d.docType === ComplianceDocType.RWC && d.vehicleId)
-        .map((d) => d.vehicleId as string),
+    const rwcDocs = (company.complianceDocuments ?? []).filter(
+      (d) => d.docType === ComplianceDocType.RWC && d.vehicleId,
     );
-    return activeVehicles.every((v) => rwcVehicleIds.has(v.id!));
+    return activeVehicles.every((v) => {
+      const config = (v.combinationConfig ??
+        defaultCombinationConfigForClass(v.vehicleClass)) as CombinationConfigCode;
+      const unitRows =
+        v.units && v.units.length > 0
+          ? v.units
+          : [
+              {
+                role: 'POWERED' as VehicleUnitRoleCode,
+                registration: v.registration,
+                id: undefined as string | undefined,
+              },
+            ];
+      const completenessInput = unitRows.map((u) => {
+        const unitId = u.id;
+        const rwc =
+          rwcDocs.find(
+            (d) =>
+              d.vehicleId === v.id &&
+              (unitId
+                ? d.vehicleUnitId === unitId
+                : !d.vehicleUnitId || u.role === 'POWERED'),
+          ) ??
+          (u.role === 'POWERED'
+            ? rwcDocs.find((d) => d.vehicleId === v.id && !d.vehicleUnitId)
+            : undefined);
+        return {
+          role: u.role as VehicleUnitRoleCode,
+          registration: u.registration,
+          rwc: rwc
+            ? { status: String(rwc.status ?? 'UPLOADED'), expiresAt: rwc.expiresAt ?? null }
+            : null,
+        };
+      });
+      return assertUnitsComplete(v.vehicleClass, config, completenessInput).ok;
+    });
   }
 
   private goNoGo(company: {
@@ -160,9 +253,26 @@ export class CarrierService {
     abn: string | null;
     capabilities: string[];
     serviceRegionCodes: string[];
-    vehicles: Array<{ id?: string; status: string }>;
+    vehicles: Array<{
+      id?: string;
+      status: string;
+      vehicleClass?: string | null;
+      combinationConfig?: CombinationConfig | CombinationConfigCode | null;
+      registration?: string | null;
+      units?: Array<{
+        role: VehicleUnitRole | VehicleUnitRoleCode;
+        registration?: string | null;
+        id?: string;
+      }>;
+    }>;
     drivers: Array<{ status: string }>;
-    complianceDocuments?: Array<{ docType: ComplianceDocType; vehicleId?: string | null }>;
+    complianceDocuments?: Array<{
+      docType: ComplianceDocType;
+      vehicleId?: string | null;
+      vehicleUnitId?: string | null;
+      status?: ComplianceDocStatus | string;
+      expiresAt?: Date | null;
+    }>;
   }) {
     const opsApproved = company.status === CompanyStatus.BID_ELIGIBLE;
     const connectOk = company.stripeConnectPayoutsEnabled;
@@ -435,10 +545,23 @@ export class CarrierService {
         reliabilityScore: company.reliabilityScore,
       },
       vehicles: company.vehicles.map((v) => {
-        // complianceDocuments are ordered updatedAt desc — first match is latest RWC.
-        const rwcDoc = company.complianceDocuments.find(
-          (d) => d.docType === ComplianceDocType.RWC && d.vehicleId === v.id,
+        const unitCompliance = this.buildUnitComplianceSnapshot(
+          v,
+          company.complianceDocuments.filter(
+            (d) => d.docType === ComplianceDocType.RWC && d.vehicleId === v.id,
+          ),
         );
+        // Latest powered / any unit RWC for backward-compatible hasRwc.
+        const rwcDoc =
+          unitCompliance.units.find((u) => u.role === 'POWERED')?.rwc.documentId
+            ? company.complianceDocuments.find(
+                (d) =>
+                  d.id ===
+                  unitCompliance.units.find((u) => u.role === 'POWERED')?.rwc.documentId,
+              )
+            : company.complianceDocuments.find(
+                (d) => d.docType === ComplianceDocType.RWC && d.vehicleId === v.id,
+              );
         const dgDoc = company.complianceDocuments.find(
           (d) => d.docType === ComplianceDocType.DG_LICENCE && d.vehicleId === v.id,
         );
@@ -448,13 +571,15 @@ export class CarrierService {
           label: v.label,
           registration: v.registration,
           vehicleClass: v.vehicleClass,
+          combinationConfig: unitCompliance.combinationConfig,
           tareKg: v.tareKg,
           gvmKg: v.gvmKg,
           gcmKg: v.gcmKg,
-          hasRwc: Boolean(rwcDoc),
+          hasRwc: unitCompliance.aggregate.state !== 'MISSING',
           rwcDocumentId: rwcDoc?.id ?? null,
           hasDg: Boolean(dgDoc),
           dgDocumentId: dgDoc?.id ?? null,
+          compliance: unitCompliance,
         };
       }),
       drivers: company.drivers.map((d) => ({
@@ -480,7 +605,139 @@ export class CarrierService {
         docType: d.docType,
         status: d.status,
         vehicleId: d.vehicleId ?? null,
+        vehicleUnitId: d.vehicleUnitId ?? null,
       })),
+    };
+  }
+
+  /** Sync VehicleUnit rows to match class / combinationConfig / provided registrations. */
+  private async syncVehicleUnits(
+    vehicleId: string,
+    vehicleClass: string,
+    combinationConfig: CombinationConfig,
+    registration: string,
+    unitsInput?: CarrierVehicleInput['units'],
+  ) {
+    const required = requiredUnitsForVehicle(
+      vehicleClass,
+      combinationConfig as CombinationConfigCode,
+    );
+    const byRole = new Map(
+      (unitsInput ?? []).map((u) => [u.role as VehicleUnitRoleCode, u] as const),
+    );
+    const existing = await this.prisma.vehicleUnit.findMany({ where: { vehicleId } });
+    const existingByRole = new Map(existing.map((u) => [u.role as VehicleUnitRoleCode, u]));
+
+    for (const role of required) {
+      const fromInput = byRole.get(role);
+      const registrationForRole =
+        role === 'POWERED'
+          ? registration
+          : (fromInput?.registration ?? existingByRole.get(role)?.registration ?? null);
+      const label =
+        fromInput?.label ??
+        existingByRole.get(role)?.label ??
+        VEHICLE_UNIT_ROLE_LABELS[role];
+      const current = existingByRole.get(role);
+      if (current) {
+        await this.prisma.vehicleUnit.update({
+          where: { id: current.id },
+          data: {
+            registration: registrationForRole?.toUpperCase() ?? null,
+            label,
+          },
+        });
+      } else {
+        await this.prisma.vehicleUnit.create({
+          data: {
+            vehicleId,
+            role: role as VehicleUnitRole,
+            registration: registrationForRole?.toUpperCase() ?? null,
+            label,
+          },
+        });
+      }
+    }
+
+    const requiredSet = new Set(required);
+    for (const row of existing) {
+      if (!requiredSet.has(row.role as VehicleUnitRoleCode)) {
+        await this.prisma.vehicleUnit.delete({ where: { id: row.id } });
+      }
+    }
+  }
+
+  private buildUnitComplianceSnapshot(
+    vehicle: {
+      id: string;
+      vehicleClass?: string | null;
+      combinationConfig?: CombinationConfig | CombinationConfigCode | null;
+      registration?: string | null;
+      units?: Array<{
+        id: string;
+        role: VehicleUnitRole | VehicleUnitRoleCode;
+        registration?: string | null;
+        label?: string | null;
+      }>;
+    },
+    rwcDocs: Array<{
+      id: string;
+      vehicleId?: string | null;
+      vehicleUnitId?: string | null;
+      status: ComplianceDocStatus;
+      expiresAt: Date | null;
+    }>,
+  ) {
+    const combinationConfig = (vehicle.combinationConfig ??
+      defaultCombinationConfigForClass(vehicle.vehicleClass)) as CombinationConfigCode;
+    const required = requiredUnitsForVehicle(vehicle.vehicleClass, combinationConfig);
+    const unitRows =
+      vehicle.units && vehicle.units.length > 0
+        ? vehicle.units
+        : required.map((role) => ({
+            id: '',
+            role,
+            registration: role === 'POWERED' ? vehicle.registration : null,
+            label: VEHICLE_UNIT_ROLE_LABELS[role],
+          }));
+    const byRole = new Map(unitRows.map((u) => [u.role as VehicleUnitRoleCode, u]));
+    const units = required.map((role) => {
+      const row = byRole.get(role);
+      const doc =
+        (row?.id
+          ? rwcDocs.find((d) => d.vehicleUnitId === row.id)
+          : undefined) ??
+        (role === 'POWERED'
+          ? rwcDocs.find((d) => !d.vehicleUnitId || d.vehicleUnitId === row?.id)
+          : undefined) ??
+        null;
+      const summarized = this.summarizeRwcDoc(doc);
+      return {
+        id: row?.id || null,
+        role,
+        label: row?.label ?? VEHICLE_UNIT_ROLE_LABELS[role],
+        registration: row?.registration ?? (role === 'POWERED' ? vehicle.registration : null),
+        rwc: summarized,
+      };
+    });
+    const pills = units.map((u) => u.rwc.state as UnitRwcPill);
+    const aggregateState = aggregateUnitPills(pills);
+    const okCount = units.filter((u) => u.rwc.state === 'OK' || u.rwc.state === 'EXPIRING' || u.rwc.state === 'PENDING').length;
+    return {
+      combinationConfig,
+      requiredRoles: required,
+      units,
+      aggregate: {
+        state: aggregateState,
+        label: `${okCount}/${units.length} ${aggregateState === 'OK' ? 'OK' : aggregateState}`,
+      },
+      rwc: this.summarizeRwcDoc(
+        units.find((u) => u.role === 'POWERED')?.rwc.documentId
+          ? rwcDocs.find(
+              (d) => d.id === units.find((u) => u.role === 'POWERED')?.rwc.documentId,
+            ) ?? null
+          : rwcDocs[0] ?? null,
+      ),
     };
   }
 
@@ -827,6 +1084,7 @@ export class CarrierService {
         label: true,
         registration: true,
         vehicleClass: true,
+        combinationConfig: true,
         tareKg: true,
         gvmKg: true,
         gcmKg: true,
@@ -847,11 +1105,20 @@ export class CarrierService {
         purchasePriceAud: true,
         residualValueAud: true,
         lifecycleMonths: true,
+        units: {
+          orderBy: { role: 'asc' },
+          select: {
+            id: true,
+            role: true,
+            registration: true,
+            label: true,
+          },
+        },
       },
     });
 
     const vehicleIds = items.map((v) => v.id);
-    // Per-vehicle RWC only — company-level (vehicleId null) docs do not satisfy fleetReady/canBid.
+    // Per-vehicle / per-unit RWC — company-level (vehicleId null) docs do not satisfy fleetReady/canBid.
     const rwcDocs =
       vehicleIds.length === 0
         ? []
@@ -864,17 +1131,19 @@ export class CarrierService {
             select: {
               id: true,
               vehicleId: true,
+              vehicleUnitId: true,
               companyId: true,
               status: true,
               expiresAt: true,
             },
           });
 
-    const byVehicle = new Map<string, (typeof rwcDocs)[number]>();
+    const rwcByVehicle = new Map<string, typeof rwcDocs>();
     for (const doc of rwcDocs) {
-      if (doc.vehicleId && !byVehicle.has(doc.vehicleId)) {
-        byVehicle.set(doc.vehicleId, doc);
-      }
+      if (!doc.vehicleId) continue;
+      const list = rwcByVehicle.get(doc.vehicleId) ?? [];
+      list.push(doc);
+      rwcByVehicle.set(doc.vehicleId, list);
     }
 
     const dgDocs =
@@ -1021,9 +1290,10 @@ export class CarrierService {
                 jobTitle: active!.job.title,
               }
             : null,
-          compliance: {
-            rwc: this.summarizeRwcDoc(byVehicle.get(v.id) ?? null),
-          },
+          compliance: this.buildUnitComplianceSnapshot(
+            v,
+            rwcByVehicle.get(v.id) ?? [],
+          ),
         };
       }),
     };
@@ -1212,24 +1482,34 @@ export class CarrierService {
       company.status === CompanyStatus.BID_ELIGIBLE
         ? VehicleStatus.PENDING_REVIEW
         : VehicleStatus.ACTIVE;
+    const vehicleClass = input.vehicleClass.toUpperCase();
+    const combinationConfig = toCombinationConfig(vehicleClass, input.combinationConfig ?? null);
     const vehicle = await this.prisma.vehicle.create({
       data: {
         companyId: company.id,
         status,
         label: input.label,
         registration,
-        vehicleClass: input.vehicleClass.toUpperCase(),
+        vehicleClass,
+        combinationConfig,
         tareKg: input.tareKg,
         gvmKg: input.gvmKg,
         gcmKg: input.gcmKg,
       },
     });
+    await this.syncVehicleUnits(
+      vehicle.id,
+      vehicleClass,
+      combinationConfig,
+      registration,
+      input.units,
+    );
     await this.audit.recordPlatform({
       action: AuditAction.CARRIER_VEHICLE_ADDED,
       actorUserId: user.id,
       entityType: 'Vehicle',
       entityId: vehicle.id,
-      metadata: { status },
+      metadata: { status, combinationConfig },
     });
     const onboarding = await this.getOnboarding(principal);
     return { ...onboarding, vehicleId: vehicle.id };
@@ -1264,17 +1544,28 @@ export class CarrierService {
       await this.assertCapacityEditable(company.id, vehicleId);
     }
 
+    const vehicleClass = input.vehicleClass.toUpperCase();
+    const combinationConfig = toCombinationConfig(vehicleClass, input.combinationConfig ?? null);
+    const registration = input.registration.toUpperCase();
     const updated = await this.prisma.vehicle.update({
       where: { id: vehicleId },
       data: {
         label: input.label,
-        registration: input.registration.toUpperCase(),
-        vehicleClass: input.vehicleClass.toUpperCase(),
+        registration,
+        vehicleClass,
+        combinationConfig,
         tareKg: input.tareKg ?? null,
         gvmKg: input.gvmKg,
         gcmKg: input.gcmKg ?? null,
       },
     });
+    await this.syncVehicleUnits(
+      vehicleId,
+      vehicleClass,
+      combinationConfig,
+      registration,
+      input.units,
+    );
 
     await this.audit.recordPlatform({
       action: AuditAction.CARRIER_VEHICLE_UPDATED,
@@ -1522,19 +1813,43 @@ export class CarrierService {
       throw new BadRequestException('Vehicle is not disabled, retired, or in maintenance');
     }
 
-    const rwcDoc = await this.prisma.complianceDocument.findFirst({
+    const vehicleWithUnits = await this.prisma.vehicle.findFirst({
+      where: { id: vehicleId, companyId: company.id },
+      include: { units: true },
+    });
+    const rwcDocs = await this.prisma.complianceDocument.findMany({
       where: {
         companyId: company.id,
         vehicleId,
         docType: ComplianceDocType.RWC,
       },
       orderBy: { updatedAt: 'desc' },
-      select: { id: true, status: true, expiresAt: true },
+      select: {
+        id: true,
+        status: true,
+        expiresAt: true,
+        vehicleId: true,
+        vehicleUnitId: true,
+      },
     });
-    const rwc = this.summarizeRwcDoc(rwcDoc);
-    if (rwc.state === 'MISSING' || rwc.state === 'EXPIRED') {
+    const snapshot = this.buildUnitComplianceSnapshot(
+      vehicleWithUnits ?? vehicle,
+      rwcDocs,
+    );
+    const completeness = assertUnitsComplete(
+      vehicle.vehicleClass,
+      snapshot.combinationConfig,
+      snapshot.units.map((u) => ({
+        role: u.role,
+        registration: u.registration,
+        rwc: u.rwc.documentId
+          ? { status: u.rwc.documentStatus ?? 'UPLOADED', expiresAt: u.rwc.expiresAt }
+          : null,
+      })),
+    );
+    if (!completeness.ok) {
       throw new BadRequestException(
-        'Upload a valid roadworthy certificate (RWC) before reactivating this vehicle',
+        'Upload a valid Roadworthy / Certificate of Inspection (RWC / COI) for every required unit before reactivating this vehicle',
       );
     }
 
