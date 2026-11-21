@@ -1983,6 +1983,10 @@ export const proposalSubmitSchema = z.object({
   jobId: z.string().uuid(),
   vehicleId: z.string().uuid(),
   driverId: z.string().uuid(),
+  /**
+   * Carrier take-home (net) inc GST in cents.
+   * Server converts to settlement gross via resolved carrier % before floor checks / persist.
+   */
   amountIncGstCents: z.number().int().positive().max(50_000_000),
   etaMinutes: z.number().int().positive().max(10_000),
   dgDocumentId: z.string().uuid().optional().nullable(),

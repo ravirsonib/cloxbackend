@@ -229,6 +229,8 @@ describe('MatchingService leftover paths', () => {
       etaMinutes: 60,
     };
 
+    const proposal = { findFirst: jest.fn(), create: jest.fn() };
+    const job = { update: jest.fn() };
     const prisma = {
       isConnected: () => true,
       user: {
@@ -241,12 +243,16 @@ describe('MatchingService leftover paths', () => {
       },
       vehicle: { findFirst: jest.fn() },
       driver: { findFirst: jest.fn() },
-      proposal: { findFirst: jest.fn(), create: jest.fn() },
+      proposal,
       assignment: { findFirst: jest.fn().mockResolvedValue(null) },
       complianceDocument: {
         findFirst: jest.fn().mockResolvedValue({ id: 'doc-ok' }),
+        findMany: jest.fn().mockResolvedValue([{ id: 'doc-ok', vehicleId: null }]),
       },
-      job: { update: jest.fn() },
+      job,
+      $transaction: jest.fn(async (fn: (tx: unknown) => Promise<unknown>) =>
+        fn({ proposal, job }),
+      ),
     };
     const carrierService = {
       getBidEligibility: jest.fn().mockResolvedValue({ canBid: true, goNoGo: {} }),
@@ -307,17 +313,23 @@ describe('MatchingService leftover paths', () => {
     }
     expect(jobsService.getMinBaseCents).toHaveBeenCalledWith('HOURLY');
 
-    // Duplicate proposal (null open bids elsewhere, then same-job SUBMITTED)
-    prisma.proposal.findFirst
-      .mockResolvedValueOnce(null)
-      .mockResolvedValueOnce(null)
-      .mockResolvedValueOnce({ id: 'prop-old' });
+    // Duplicate proposal — re-checked inside $transaction (not crew open-bid filter).
+    prisma.proposal.findFirst.mockImplementation(
+      async (args?: { where?: Record<string, unknown> }) => {
+        const where = args?.where ?? {};
+        if ('vehicleId' in where || 'driverId' in where) return null;
+        if ('jobId' in where && 'carrierCompanyId' in where) {
+          return { id: 'prop-old' };
+        }
+        return null;
+      },
+    );
     await expect(
       service.submitProposal(carrierPrincipal, {
         ...baseInput,
         amountIncGstCents: 50_000,
       }),
-    ).rejects.toThrow('Already submitted a proposal for this job');
+    ).rejects.toThrow(/Already submitted a proposal/);
   });
 
   it('submitProposal rejects undersized vehicle class', async () => {

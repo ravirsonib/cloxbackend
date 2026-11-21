@@ -52,6 +52,11 @@ type CompanyProfileRow = {
   invoiceState: string | null;
   invoicePostcode: string | null;
   gstRegistered: boolean;
+  referredAt: Date | null;
+  referredByAdminUser: {
+    name: string | null;
+    role: string;
+  } | null;
 };
 
 /** Stored on ComplianceCase.proposedChanges (no free-text note). */
@@ -144,6 +149,10 @@ export class CompanyProfileService {
             invoiceState: true,
             invoicePostcode: true,
             gstRegistered: true,
+            referredAt: true,
+            referredByAdminUser: {
+              select: { name: true, role: true },
+            },
           },
         },
       },
@@ -191,6 +200,14 @@ export class CompanyProfileService {
         invoiceState: company.invoiceState,
         invoicePostcode: company.invoicePostcode,
         gstRegistered: company.gstRegistered,
+        /** Read-only attribution — never self-serve / ops-gated editable. */
+        referredAt: company.referredAt ? company.referredAt.toISOString() : null,
+        onboardedBy: company.referredByAdminUser
+          ? {
+              name: company.referredByAdminUser.name?.trim() || null,
+              role: company.referredByAdminUser.role,
+            }
+          : null,
       },
       fieldTiers: {
         selfServe: ['tradingName', 'phone', ...(company.type === CompanyType.CARRIER

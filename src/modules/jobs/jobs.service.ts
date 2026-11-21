@@ -564,7 +564,9 @@ export class JobsService {
       createdAt: Date;
     }>;
     _count?: { proposals?: number };
-  }) {
+  }, options?: { revealCarrierIdentity?: boolean }) {
+    // Default reveal for admin/ops/carrier paths; sender detail passes false until job COMPLETED.
+    const revealCarrierIdentity = options?.revealCarrierIdentity !== false;
     const openProposalCount =
       job._count?.proposals ??
       (job.proposals ?? []).filter((p) => p.status === ProposalStatus.SUBMITTED).length;
@@ -657,10 +659,39 @@ export class JobsService {
         weightKg: s.weightKg ?? null,
       })),
       proposals: (job.proposals ?? []).map((p, idx) => {
+        const reliabilityScore = p.carrierCompany?.reliabilityScore ?? 100;
+        const anonymousLabel = `Offer ${String.fromCharCode(65 + (idx % 26))}`;
         const carrierName =
           p.carrierCompany?.tradingName?.trim() ||
           p.carrierCompany?.legalName?.trim() ||
-          `Carrier ${String.fromCharCode(65 + (idx % 26))}`;
+          anonymousLabel;
+
+        if (!revealCarrierIdentity) {
+          return {
+            id: p.id,
+            status: p.status,
+            amountIncGstCents: p.amountIncGstCents,
+            amountExGstCents: p.amountExGstCents,
+            amountGstCents: p.amountGstCents,
+            etaMinutes: p.etaMinutes,
+            vehicleClass: p.vehicle?.vehicleClass ?? null,
+            vehicleLabel: null,
+            vehicleRegistration: null,
+            carrierCompanyId: undefined,
+            carrierLabel: anonymousLabel,
+            carrierCompanyIdMasked: true,
+            carrierCompany: null,
+            reliabilityScore,
+            driver: null,
+            dgDocumentId: null,
+            dgDocumentFilename: null,
+            dgVerified: Boolean(p.dgDocumentId ?? p.dgDocument?.id),
+            // Omitted from sender responses in getJobForSender; kept for admin/internal mapJob callers.
+            netToCarrierCents: carrierNetPayoutCents(p.amountIncGstCents),
+            createdAt: p.createdAt,
+          };
+        }
+
         return {
           id: p.id,
           status: p.status,
@@ -682,9 +713,10 @@ export class JobsService {
                 email: p.carrierCompany.email ?? null,
                 phone: p.carrierCompany.phone ?? null,
                 abn: p.carrierCompany.abn ?? null,
-                reliabilityScore: p.carrierCompany.reliabilityScore ?? 100,
+                reliabilityScore,
               }
             : null,
+          reliabilityScore,
           driver: p.driver
             ? {
                 id: p.driver.id,
@@ -696,7 +728,7 @@ export class JobsService {
             : null,
           dgDocumentId: p.dgDocumentId ?? p.dgDocument?.id ?? null,
           dgDocumentFilename: p.dgDocument?.originalFilename ?? null,
-          // Enriched with uplift-aware net in getJob when RevenueSplitService is available.
+          dgVerified: Boolean(p.dgDocumentId ?? p.dgDocument?.id),
           netToCarrierCents: carrierNetPayoutCents(p.amountIncGstCents),
           createdAt: p.createdAt,
         };
@@ -707,8 +739,8 @@ export class JobsService {
           if (a.status !== ProposalStatus.SUBMITTED && b.status === ProposalStatus.SUBMITTED) return 1;
 
           // Performance Score weighting: prioritize carriers with higher reliability score (>= 10pt gap)
-          const aRel = a.carrierCompany?.reliabilityScore ?? 100;
-          const bRel = b.carrierCompany?.reliabilityScore ?? 100;
+          const aRel = a.reliabilityScore ?? a.carrierCompany?.reliabilityScore ?? 100;
+          const bRel = b.reliabilityScore ?? b.carrierCompany?.reliabilityScore ?? 100;
           if (Math.abs(aRel - bRel) >= 10) {
             return bRel - aRel;
           }
@@ -871,18 +903,13 @@ export class JobsService {
         },
       },
     });
-    const mapped = this.mapJob(job);
-    if (this.revenueSplit && mapped.proposals?.length) {
-      mapped.proposals = await Promise.all(
-        mapped.proposals.map(async (p) => ({
-          ...p,
-          netToCarrierCents: await this.revenueSplit!.carrierNetPayoutCents(
-            p.amountIncGstCents,
-            new Date(),
-            p.carrierCompanyId,
-          ),
-        })),
-      );
+    const revealCarrierIdentity = job.status === JobStatus.COMPLETED;
+    const mapped = this.mapJob(job, { revealCarrierIdentity });
+    // Never expose carrier-net / split math on sender job detail.
+    if (mapped.proposals?.length) {
+      mapped.proposals = mapped.proposals.map(
+        ({ netToCarrierCents: _net, ...rest }) => rest,
+      ) as typeof mapped.proposals;
     }
     return {
       ...mapped,
@@ -921,17 +948,45 @@ export class JobsService {
             note: openException.note,
             openedAt: openException.openedAt,
             escalatedAt: openException.escalatedAt,
-            proposedVehicleId: openException.proposedVehicleId,
-            proposedDriverId: openException.proposedDriverId,
-            proposedAt: openException.proposedAt,
-            proposedVehicle: openException.proposedVehicle,
-            proposedDriver: openException.proposedDriver
-              ? {
-                  id: openException.proposedDriver.id,
-                  email: openException.proposedDriver.user?.email ?? null,
-                  name: openException.proposedDriver.user?.name ?? null,
-                }
+            proposedVehicleId: revealCarrierIdentity
+              ? openException.proposedVehicleId
               : null,
+            proposedDriverId: revealCarrierIdentity
+              ? openException.proposedDriverId
+              : null,
+            proposedAt: openException.proposedAt,
+            proposedVehicle: revealCarrierIdentity
+              ? openException.proposedVehicle
+                ? {
+                    id: openException.proposedVehicle.id,
+                    registration: openException.proposedVehicle.registration,
+                    label: openException.proposedVehicle.label,
+                    vehicleClass: openException.proposedVehicle.vehicleClass,
+                  }
+                : null
+              : openException.proposedVehicle
+                ? {
+                    id: openException.proposedVehicle.id,
+                    registration: null,
+                    label: null,
+                    vehicleClass: openException.proposedVehicle.vehicleClass,
+                  }
+                : null,
+            proposedDriver: revealCarrierIdentity
+              ? openException.proposedDriver
+                ? {
+                    id: openException.proposedDriver.id,
+                    email: openException.proposedDriver.user?.email ?? null,
+                    name: openException.proposedDriver.user?.name ?? null,
+                  }
+                : null
+              : openException.proposedDriver
+                ? {
+                    id: openException.proposedDriver.id,
+                    email: null,
+                    name: null,
+                  }
+                : null,
           }
         : null,
     };

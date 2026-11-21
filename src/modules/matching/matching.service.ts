@@ -43,13 +43,18 @@ import {
 } from './driver-schedule.util';
 import {
   DEFAULT_VEHICLE_CLASSES,
-  carrierNetPayoutCents,
   gstSplitFromIncCents,
   isVehicleAdequateForJob,
   isVehicleClassAdequate,
   loadVehicleClassMaps,
   type VehicleClassSpec,
 } from '../jobs/job-pricing.util';
+import {
+  expectedCarrierNetFromProposalBase,
+  minCarrierNetClearingProposalBase,
+  proposalBaseFromTargetCarrierNet,
+  type SenderPlatformFeeMode,
+} from '../settlements/revenue-split.types';
 import { carrierMatchesJob } from './matching.eligibility';
 
 @Injectable()
@@ -184,25 +189,68 @@ export class MatchingService {
         ).percents.carrierPercent
       : carrierPercent;
 
-    return {
-      netPayoutHint: `${effectiveCarrierPercent}% of gross to carrier (CLOX pool is nested Super/State/Local)`,
-      carrierPercent: effectiveCarrierPercent,
-      nationalCarrierPercent: carrierPercent,
-      carrierReliabilityScore: reliabilityScore,
-      carrierReliabilityTier: reliabilityTier,
-      jobs: visible.map((j) => {
+    // Fee settings for board net (P7: net from expected settlement gross).
+    let boardFeePercent = 0;
+    let boardFeeMode: SenderPlatformFeeMode = 'EXCLUSIVE';
+    if (this.revenueSplit) {
+      const feeProbe = await this.revenueSplit.resolveSenderFee({
+        baseIncGstCents: 10_000,
+        senderCompanyId: null,
+      });
+      boardFeePercent = feeProbe.feePercent;
+      boardFeeMode = feeProbe.mode;
+    }
+
+    const jobsOut = await Promise.all(
+      visible.map(async (j) => {
         const discount = j.rescueDiscountPercent ?? 0;
         const discountedEstimate =
           j.estimateIncGstCents != null && discount > 0
             ? Math.round((j.estimateIncGstCents * (100 - discount)) / 100)
             : j.estimateIncGstCents;
         const myBidIncGstCents = j.proposals[0]?.amountIncGstCents ?? null;
-        const estimateNetToCarrierCents = discountedEstimate
-          ? carrierNetPayoutCents(discountedEstimate, effectiveCarrierPercent)
-          : null;
+
+        let feePercent = boardFeePercent;
+        let feeMode = boardFeeMode;
+        if (this.revenueSplit && j.senderCompanyId) {
+          const fee = await this.revenueSplit.resolveSenderFee({
+            baseIncGstCents: discountedEstimate ?? myBidIncGstCents ?? 10_000,
+            senderCompanyId: j.senderCompanyId,
+          });
+          feePercent = fee.feePercent;
+          feeMode = fee.mode;
+        }
+
+        const estimateNetToCarrierCents =
+          discountedEstimate != null
+            ? expectedCarrierNetFromProposalBase({
+                baseIncGstCents: discountedEstimate,
+                carrierPercent: effectiveCarrierPercent,
+                feePercent,
+                feeMode,
+              })
+            : null;
         const myNetToCarrierCents =
           myBidIncGstCents != null
-            ? carrierNetPayoutCents(myBidIncGstCents, effectiveCarrierPercent)
+            ? expectedCarrierNetFromProposalBase({
+                baseIncGstCents: myBidIncGstCents,
+                carrierPercent: effectiveCarrierPercent,
+                feePercent,
+                feeMode,
+              })
+            : null;
+        const hardFloorGross =
+          j.rateFloorIncGstCents != null && j.rateFloorIncGstCents > 0
+            ? j.rateFloorIncGstCents
+            : discountedEstimate;
+        const minBidNetToCarrierCents =
+          hardFloorGross != null
+            ? minCarrierNetClearingProposalBase({
+                minBaseIncGstCents: hardFloorGross,
+                carrierPercent: effectiveCarrierPercent,
+                feePercent,
+                feeMode,
+              })
             : null;
         return {
           id: j.id,
@@ -235,7 +283,10 @@ export class MatchingService {
           displayNetToCarrierCents: myNetToCarrierCents ?? estimateNetToCarrierCents,
           marketplacePriority: j.marketplacePriority,
           rescueDiscountPercent: j.rescueDiscountPercent,
-          minBidIncGstCents: discountedEstimate,
+          /** Gross floor (internal / sender settlement basis). */
+          minBidIncGstCents: hardFloorGross,
+          /** Carrier-facing minimum payout (net). */
+          minBidNetToCarrierCents,
           siteManeuverability: j.siteManeuverability,
           siteFacility: j.siteFacility,
           pickupAt: j.pickupAt,
@@ -279,6 +330,15 @@ export class MatchingService {
             .join(' → '),
         };
       }),
+    );
+
+    return {
+      netPayoutHint: 'Amounts show your payout (inc GST).',
+      carrierPercent: effectiveCarrierPercent,
+      nationalCarrierPercent: carrierPercent,
+      carrierReliabilityScore: reliabilityScore,
+      carrierReliabilityTier: reliabilityTier,
+      jobs: jobsOut,
     };
   }
 
@@ -368,6 +428,46 @@ export class MatchingService {
       excludeJobId: job.id,
     });
 
+    // Carrier types take-home (net). Convert → proposal base so fee-then-split ledger matches.
+    const carrierPercent = this.revenueSplit
+      ? (
+          await this.revenueSplit.resolvePercents({
+            referredByAdminUserId: null,
+            carrierCompanyId: company.id,
+            at: new Date(),
+          })
+        ).percents.carrierPercent
+      : 70;
+    const carrierNetIncGstCents = input.amountIncGstCents;
+    let feePercent = 0;
+    let feeMode: SenderPlatformFeeMode = 'EXCLUSIVE';
+    if (this.revenueSplit) {
+      const fee = await this.revenueSplit.resolveSenderFee({
+        baseIncGstCents: 10_000,
+        senderCompanyId: job.senderCompanyId,
+      });
+      feePercent = fee.feePercent;
+      feeMode = fee.mode;
+    }
+    const priced = proposalBaseFromTargetCarrierNet({
+      targetNetIncGstCents: carrierNetIncGstCents,
+      carrierPercent,
+      feePercent,
+      feeMode,
+    });
+    if (
+      !Number.isFinite(priced.baseIncGstCents) ||
+      priced.baseIncGstCents <= 0 ||
+      !Number.isFinite(priced.netIncGstCents) ||
+      priced.netIncGstCents <= 0
+    ) {
+      throw new BadRequestException({
+        message: 'Bid amount must be a positive payout (inc GST)',
+        code: 'BID_AMOUNT_INVALID',
+      });
+    }
+    const grossIncGstCents = priced.baseIncGstCents;
+
     const pricingModel = job.pricingModel === 'HOURLY' ? 'HOURLY' : 'PER_KM';
     const globalFloor = await this.jobsService.getMinBaseCents(pricingModel);
     const classQuote = await this.jobsService.quoteForVehicleClass({
@@ -419,10 +519,16 @@ export class MatchingService {
       minBase = Math.max(minBase, hardFloorInc);
     }
 
-    if (input.amountIncGstCents < minBase) {
-      const minAud = (minBase / 100).toFixed(2);
+    if (grossIncGstCents < minBase) {
+      const minNet = minCarrierNetClearingProposalBase({
+        minBaseIncGstCents: minBase,
+        carrierPercent,
+        feePercent,
+        feeMode,
+      });
+      const minAud = (minNet / 100).toFixed(2);
       const belowHardFloor =
-        hardFloorInc != null && input.amountIncGstCents < hardFloorInc;
+        hardFloorInc != null && grossIncGstCents < hardFloorInc;
       if (belowHardFloor && this.rateFloor && hardFloorVersionId && hardFloorEx != null) {
         const fuelIndexId =
           typeof hardFloorBreakdown?.fuelIndexId === 'string'
@@ -438,36 +544,39 @@ export class MatchingService {
             pricingModel,
             distanceKm: job.routeDistanceKm ?? 0,
             billableHours: job.billableHours,
-            offeredIncGstCents: input.amountIncGstCents,
+            offeredIncGstCents: grossIncGstCents,
+            offeredNetIncGstCents: carrierNetIncGstCents,
+            carrierPercent,
+            feePercent,
+            feeMode,
           },
           breakdown: hardFloorBreakdown ?? {},
           floorExGstCents: hardFloorEx,
           floorIncGstCents: hardFloorInc!,
-          offeredIncGstCents: input.amountIncGstCents,
+          offeredIncGstCents: grossIncGstCents,
           result: 'REJECT',
         });
       }
       throw new BadRequestException({
         message: belowHardFloor
-          ? `Bid below hard floor (A$${minAud} inc GST)`
-          : `Bid below minimum (A$${minAud})`,
+          ? `Bid below hard floor (your payout min A$${minAud} inc GST)`
+          : `Bid below minimum (your payout min A$${minAud})`,
         code: belowHardFloor ? 'PRICE_BELOW_FLOOR' : 'BID_BELOW_MIN_BASE',
         minBaseCents: minBase,
+        minNetIncGstCents: minNet,
         floorExGstCents: hardFloorEx,
         floorIncGstCents: hardFloorInc,
+        floorNetIncGstCents:
+          hardFloorInc != null
+            ? minCarrierNetClearingProposalBase({
+                minBaseIncGstCents: hardFloorInc,
+                carrierPercent,
+                feePercent,
+                feeMode,
+              })
+            : null,
         versionId: hardFloorVersionId,
       });
-    }
-
-    const existing = await this.prisma.proposal.findFirst({
-      where: {
-        jobId: job.id,
-        carrierCompanyId: company.id,
-        status: ProposalStatus.SUBMITTED,
-      },
-    });
-    if (existing) {
-      throw new BadRequestException('Already submitted a proposal for this job');
     }
 
     let resolvedDgDocumentId: string | null = null;
@@ -517,33 +626,59 @@ export class MatchingService {
     }
 
     const gstRatePercent = await this.getPlatformGstPercent();
-    const amounts = gstSplitFromIncCents(input.amountIncGstCents, gstRatePercent);
-    const proposal = await this.prisma.proposal.create({
-      data: {
-        jobId: job.id,
-        carrierCompanyId: company.id,
-        vehicleId: vehicle.id,
-        driverId: driver.id,
-        dgDocumentId: resolvedDgDocumentId,
-        etaMinutes: input.etaMinutes,
-        status: ProposalStatus.SUBMITTED,
-        ...amounts,
-      },
-    });
-
-    if (job.status === JobStatus.PUBLISHED) {
-      await this.prisma.job.update({
-        where: { id: job.id },
-        data: { status: JobStatus.BIDDING },
+    const amounts = gstSplitFromIncCents(grossIncGstCents, gstRatePercent);
+    // Re-check duplicate inside the same transaction to shrink double-submit race window.
+    const proposal = await this.prisma.$transaction(async (tx) => {
+      const existing = await tx.proposal.findFirst({
+        where: {
+          jobId: job.id,
+          carrierCompanyId: company.id,
+          status: ProposalStatus.SUBMITTED,
+        },
+        select: { id: true },
       });
-    }
+      if (existing) {
+        throw new BadRequestException({
+          message: 'Already submitted a proposal for this job',
+          code: 'BID_ALREADY_SUBMITTED',
+        });
+      }
+      const created = await tx.proposal.create({
+        data: {
+          jobId: job.id,
+          carrierCompanyId: company.id,
+          vehicleId: vehicle.id,
+          driverId: driver.id,
+          dgDocumentId: resolvedDgDocumentId,
+          etaMinutes: input.etaMinutes,
+          status: ProposalStatus.SUBMITTED,
+          ...amounts,
+        },
+      });
+      if (job.status === JobStatus.PUBLISHED) {
+        await tx.job.update({
+          where: { id: job.id },
+          data: { status: JobStatus.BIDDING },
+        });
+      }
+      return created;
+    });
 
     await this.audit.recordPlatform({
       action: AuditAction.PROPOSAL_SUBMITTED,
       actorUserId: user.id,
       entityType: 'Proposal',
       entityId: proposal.id,
-      metadata: { jobId: job.id, amountIncGstCents: input.amountIncGstCents },
+      metadata: {
+        jobId: job.id,
+        amountIncGstCents: grossIncGstCents,
+        carrierNetIncGstCents,
+        expectedNetIncGstCents: priced.netIncGstCents,
+        settlementGrossIncGstCents: priced.settlementGrossIncGstCents,
+        carrierPercent,
+        feePercent,
+        feeMode,
+      },
     });
 
     try {
@@ -611,14 +746,14 @@ export class MatchingService {
       id: proposal.id,
       jobId: job.id,
       status: proposal.status,
+      /** Proposal freight base (sender sees this before exclusive fee top-up). */
       amountIncGstCents: proposal.amountIncGstCents,
-      netToCarrierCents: this.revenueSplit
-        ? await this.revenueSplit.carrierNetPayoutCents(
-            proposal.amountIncGstCents,
-            new Date(),
-            company.id,
-          )
-        : carrierNetPayoutCents(proposal.amountIncGstCents),
+      /** Carrier take-home after fee-then-split — matches typed payout. */
+      netToCarrierCents: priced.netIncGstCents,
+      settlementGrossIncGstCents: priced.settlementGrossIncGstCents,
+      carrierPercent,
+      feePercent,
+      feeMode,
       etaMinutes: proposal.etaMinutes,
       vehicleId: proposal.vehicleId,
       driverId: proposal.driverId,

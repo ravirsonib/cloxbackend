@@ -48,6 +48,8 @@ describe('CompanyProfileService', () => {
       invoiceState: null,
       invoicePostcode: null,
       gstRegistered: false,
+      referredAt: null,
+      referredByAdminUser: null,
       ...overrides,
     };
   }
@@ -185,6 +187,54 @@ describe('CompanyProfileService', () => {
         homeRegion: { connect: { id: 'reg-nsw' } },
       },
     });
+  });
+
+  it('getProfile exposes read-only onboardedBy without email', async () => {
+    const referredAt = new Date('2026-09-01T04:00:00.000Z');
+    const company = carrierCompany({
+      referredAt,
+      referredByAdminUser: { name: 'Priya Local', role: 'LOCAL_BDE' },
+    });
+    const prisma = {
+      isConnected: () => true,
+      user: {
+        findUnique: jest.fn().mockResolvedValue({ id: 'user-c', company }),
+      },
+      complianceCase: {
+        findFirst: jest.fn().mockResolvedValue(null),
+        findMany: jest.fn().mockResolvedValue([]),
+      },
+    };
+
+    const result = await makeService(prisma).getProfile(carrierPrincipal);
+
+    expect(result.company.onboardedBy).toEqual({
+      name: 'Priya Local',
+      role: 'LOCAL_BDE',
+    });
+    expect(result.company.referredAt).toBe(referredAt.toISOString());
+    expect(result.company).not.toHaveProperty('referredByAdminUserId');
+    expect(JSON.stringify(result.company.onboardedBy)).not.toMatch(/@/);
+  });
+
+  it('getProfile returns null onboardedBy for organic signup', async () => {
+    const prisma = {
+      isConnected: () => true,
+      user: {
+        findUnique: jest.fn().mockResolvedValue({
+          id: 'user-c',
+          company: carrierCompany(),
+        }),
+      },
+      complianceCase: {
+        findFirst: jest.fn().mockResolvedValue(null),
+        findMany: jest.fn().mockResolvedValue([]),
+      },
+    };
+
+    const result = await makeService(prisma).getProfile(carrierPrincipal);
+    expect(result.company.onboardedBy).toBeNull();
+    expect(result.company.referredAt).toBeNull();
   });
 
   it('sender requestChange can include invoice fields', async () => {

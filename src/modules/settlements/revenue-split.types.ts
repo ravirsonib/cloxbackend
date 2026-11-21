@@ -303,6 +303,207 @@ export function applySenderPlatformFee(input: {
   };
 }
 
+function finiteInt(value: unknown, fallback: number): number {
+  const n = typeof value === 'number' ? value : Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.trunc(n);
+}
+
+/** Same carrier line as {@link allocateTwoStage} — single formula for bid UX ↔ ledger. */
+export function carrierShareOfSettlementGrossCents(
+  settlementGrossIncGstCents: number,
+  carrierPercent: number,
+): number {
+  const gross = Math.max(0, finiteInt(settlementGrossIncGstCents, 0));
+  const pct = Math.max(1, Math.min(99, finiteInt(carrierPercent, 70)));
+  return Math.round((gross * pct) / 100);
+}
+
+/**
+ * Carrier take-home after sender fee is applied to the proposal base
+ * (exclusive fee increases settlement gross; inclusive does not).
+ */
+export function expectedCarrierNetFromProposalBase(input: {
+  baseIncGstCents: number;
+  carrierPercent: number;
+  feePercent: number;
+  feeMode: SenderPlatformFeeMode;
+}): number {
+  const fee = applySenderPlatformFee({
+    baseIncGstCents: Math.max(0, finiteInt(input.baseIncGstCents, 0)),
+    feePercent: Math.max(0, Math.min(30, finiteInt(input.feePercent, 0))),
+    mode: input.feeMode,
+  });
+  return carrierShareOfSettlementGrossCents(
+    fee.chargeIncGstCents,
+    finiteInt(input.carrierPercent, 70),
+  );
+}
+
+function settlementGrossForTargetNet(targetNet: number, carrierPercent: number): number {
+  const pct = Math.max(1, Math.min(99, finiteInt(carrierPercent, 70)));
+  const net = Math.max(1, finiteInt(targetNet, 1));
+  let gross = Math.round((net * 100) / pct);
+  if (!Number.isFinite(gross) || gross < 1) gross = 1;
+  // Guarantee ledger net >= target (never under-pay the typed take-home).
+  let guard = 0;
+  while (carrierShareOfSettlementGrossCents(gross, pct) < net && guard++ < 10_000) {
+    gross += 1;
+  }
+  guard = 0;
+  while (
+    gross > 1 &&
+    carrierShareOfSettlementGrossCents(gross - 1, pct) >= net &&
+    guard++ < 10_000
+  ) {
+    gross -= 1;
+  }
+  return gross;
+}
+
+function proposalBaseForExclusiveCharge(
+  targetChargeIncGstCents: number,
+  feePercent: number,
+): number {
+  const fee = Math.max(0, Math.min(30, Math.trunc(feePercent)));
+  if (fee <= 0) return targetChargeIncGstCents;
+  let base = Math.round((targetChargeIncGstCents * 100) / (100 + fee));
+  // Nudge so exclusive charge matches (or clears) the target settlement gross.
+  let guard = 0;
+  while (
+    applySenderPlatformFee({
+      baseIncGstCents: base,
+      feePercent: fee,
+      mode: 'EXCLUSIVE',
+    }).chargeIncGstCents < targetChargeIncGstCents &&
+    guard++ < 10_000
+  ) {
+    base += 1;
+  }
+  guard = 0;
+  while (
+    base > 1 &&
+    applySenderPlatformFee({
+      baseIncGstCents: base - 1,
+      feePercent: fee,
+      mode: 'EXCLUSIVE',
+    }).chargeIncGstCents >= targetChargeIncGstCents &&
+    guard++ < 10_000
+  ) {
+    base -= 1;
+  }
+  return base;
+}
+
+export type ProposalBaseFromCarrierNetResult = {
+  /** Stored on Proposal.amountIncGstCents (freight base before exclusive top-up). */
+  baseIncGstCents: number;
+  settlementGrossIncGstCents: number;
+  /** Ledger carrier share after fee — matches what the carrier typed when possible. */
+  netIncGstCents: number;
+  feePercent: number;
+  feeMode: SenderPlatformFeeMode;
+};
+
+/**
+ * Convert carrier typed take-home → proposal base so settlement (fee then split)
+ * pays them that net. See P7 / exclusive fee examples in revenue-split plan.
+ */
+export function proposalBaseFromTargetCarrierNet(input: {
+  targetNetIncGstCents: number;
+  carrierPercent: number;
+  feePercent: number;
+  feeMode: SenderPlatformFeeMode;
+}): ProposalBaseFromCarrierNetResult {
+  const feePercent = Math.max(0, Math.min(30, finiteInt(input.feePercent, 0)));
+  const feeMode: SenderPlatformFeeMode =
+    input.feeMode === 'INCLUSIVE' ? 'INCLUSIVE' : 'EXCLUSIVE';
+  const carrierPercent = Math.max(1, Math.min(99, finiteInt(input.carrierPercent, 70)));
+  const rawTarget = finiteInt(input.targetNetIncGstCents, 0);
+  if (rawTarget <= 0) {
+    // NaN / 0 / negative — refuse to invent a phantom bid; caller must validate.
+    return {
+      baseIncGstCents: 0,
+      settlementGrossIncGstCents: 0,
+      netIncGstCents: 0,
+      feePercent,
+      feeMode,
+    };
+  }
+  const targetNet = rawTarget;
+
+  const settlementGross = settlementGrossForTargetNet(targetNet, carrierPercent);
+  const baseIncGstCents =
+    feeMode === 'EXCLUSIVE' && feePercent > 0
+      ? proposalBaseForExclusiveCharge(settlementGross, feePercent)
+      : settlementGross;
+
+  // Final nudge on base so expected net >= target (cent rounding / fee invert).
+  let base = Math.max(0, finiteInt(baseIncGstCents, 0));
+  let guard = 0;
+  while (
+    expectedCarrierNetFromProposalBase({
+      baseIncGstCents: base,
+      carrierPercent,
+      feePercent,
+      feeMode,
+    }) < targetNet &&
+    guard++ < 10_000
+  ) {
+    base += 1;
+  }
+
+  const fee = applySenderPlatformFee({
+    baseIncGstCents: base,
+    feePercent,
+    mode: feeMode,
+  });
+  return {
+    baseIncGstCents: base,
+    settlementGrossIncGstCents: fee.chargeIncGstCents,
+    netIncGstCents: carrierShareOfSettlementGrossCents(
+      fee.chargeIncGstCents,
+      carrierPercent,
+    ),
+    feePercent,
+    feeMode,
+  };
+}
+
+/**
+ * Smallest carrier take-home that still stores a proposal base ≥ minBase floor.
+ * Prevents “UI shows min net, submit rejects” rounding conflicts.
+ */
+export function minCarrierNetClearingProposalBase(input: {
+  minBaseIncGstCents: number;
+  carrierPercent: number;
+  feePercent: number;
+  feeMode: SenderPlatformFeeMode;
+}): number {
+  const minBase = Math.max(0, finiteInt(input.minBaseIncGstCents, 0));
+  if (minBase <= 0) return 1;
+  let net = expectedCarrierNetFromProposalBase({
+    baseIncGstCents: minBase,
+    carrierPercent: finiteInt(input.carrierPercent, 70),
+    feePercent: finiteInt(input.feePercent, 0),
+    feeMode: input.feeMode,
+  });
+  if (!Number.isFinite(net) || net < 1) net = 1;
+  let guard = 0;
+  while (
+    proposalBaseFromTargetCarrierNet({
+      targetNetIncGstCents: net,
+      carrierPercent: input.carrierPercent,
+      feePercent: input.feePercent,
+      feeMode: input.feeMode,
+    }).baseIncGstCents < minBase &&
+    guard++ < 10_000
+  ) {
+    net += 1;
+  }
+  return net;
+}
+
 /**
  * Two-stage allocate: Carrier | CLOX, then CLOX by pool %.
  * Local absorbs remainder inside the CLOX pool so sum(amounts) === gross.

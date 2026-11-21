@@ -151,6 +151,15 @@ export class CarrierService {
     return user;
   }
 
+  /** At least one ACTIVE driver (invite/pending alone does not unlock bidding). */
+  private driversReady(company: { drivers: Array<{ status: string }> }) {
+    return company.drivers.some((d) => d.status === 'ACTIVE');
+  }
+
+  /**
+   * Truck side only: at least one ACTIVE vehicle with complete multi-unit RWC.
+   * Drivers are {@link driversReady} — do not fold them in (checklist would blame trucks).
+   */
   private fleetReady(company: {
     vehicles: Array<{
       id?: string;
@@ -164,7 +173,6 @@ export class CarrierService {
         id?: string;
       }>;
     }>;
-    drivers: Array<{ status: string }>;
     complianceDocuments?: Array<{
       docType: ComplianceDocType;
       vehicleId?: string | null;
@@ -173,15 +181,15 @@ export class CarrierService {
       expiresAt?: Date | null;
     }>;
   }) {
-    const activeVehicles = company.vehicles.filter((v) => v.status === 'ACTIVE');
-    const activeDrivers = company.drivers.filter((d) => d.status === 'ACTIVE').length;
-    if (activeVehicles.length < 1 || activeDrivers < 1) return false;
     return this.activeVehiclesHaveRwc(company);
   }
 
   /**
-   * Every ACTIVE vehicle must have registration + eligible non-expired RWC/COI
-   * for each required combination unit. Company-level RWC does not count.
+   * True when at least one ACTIVE vehicle has registration + eligible
+   * non-expired RWC/COI for every required combination unit.
+   * Incomplete trucks (e.g. B-double missing Trailer 2) do not unlock bidding,
+   * but they must not block the company when another truck is ready.
+   * Company-level RWC does not count.
    */
   private activeVehiclesHaveRwc(company: {
     vehicles: Array<{
@@ -209,7 +217,7 @@ export class CarrierService {
     const rwcDocs = (company.complianceDocuments ?? []).filter(
       (d) => d.docType === ComplianceDocType.RWC && d.vehicleId,
     );
-    return activeVehicles.every((v) => {
+    return activeVehicles.some((v) => {
       const config = (v.combinationConfig ??
         defaultCombinationConfigForClass(v.vehicleClass)) as CombinationConfigCode;
       const unitRows =
@@ -277,15 +285,17 @@ export class CarrierService {
     const opsApproved = company.status === CompanyStatus.BID_ELIGIBLE;
     const connectOk = company.stripeConnectPayoutsEnabled;
     const fleetOk = this.fleetReady(company);
+    const driversOk = this.driversReady(company);
     const profileOk = Boolean(company.abn);
     const capsOk = company.serviceRegionCodes.length >= 1;
     return {
       profileComplete: profileOk,
       connectReady: connectOk,
       fleetReady: fleetOk,
+      driversReady: driversOk,
       capabilitiesSet: capsOk,
       opsApproved,
-      canBid: opsApproved && connectOk && fleetOk && profileOk && capsOk,
+      canBid: opsApproved && connectOk && fleetOk && driversOk && profileOk && capsOk,
       netPayoutHint:
         'Carrier receives national carrier % of settlement gross (default 70%); CLOX pool nests Super/State/Local',
     };

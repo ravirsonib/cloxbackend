@@ -3,7 +3,13 @@ import {
   NotFoundException,
   ServiceUnavailableException,
 } from '@nestjs/common';
-import { CompanyStatus, CompanyType } from '@prisma/client';
+import {
+  CompanyStatus,
+  CompanyType,
+  ComplianceDocType,
+  DriverStatus,
+  VehicleStatus,
+} from '@prisma/client';
 import type { AuthenticatedPrincipal } from '../../common/guards/jwt-auth.guard';
 import { CarrierService } from './carrier.service';
 
@@ -85,13 +91,13 @@ describe('CarrierService gate leftovers', () => {
     ).rejects.toBeInstanceOf(BadRequestException);
   });
 
-  it('updateCapabilities rejects when not draft/info-requested', async () => {
+  it('updateCapabilities rejects when company is suspended', async () => {
     const prisma = {
       isConnected: () => true,
       user: {
         findUnique: jest.fn().mockResolvedValue({
           id: 'user-carrier',
-          company: carrierCompany({ status: CompanyStatus.BID_ELIGIBLE }),
+          company: carrierCompany({ status: CompanyStatus.SUSPENDED }),
         }),
       },
     };
@@ -100,6 +106,171 @@ describe('CarrierService gate leftovers', () => {
         capabilities: ['DG'],
         serviceRegionCodes: ['VIC'],
       } as never),
-    ).rejects.toThrow('Capabilities editable only in draft or info-requested');
+    ).rejects.toThrow(/suspended or closed/i);
+  });
+
+  it('fleetReady / canBid when at least one ACTIVE truck is RWC-complete despite incomplete B-double', async () => {
+    const prisma = {
+      isConnected: () => true,
+      user: {
+        findUnique: jest.fn().mockResolvedValue({
+          id: 'user-carrier',
+          company: carrierCompany({
+            status: CompanyStatus.BID_ELIGIBLE,
+            abn: '51824753556',
+            stripeConnectPayoutsEnabled: true,
+            serviceRegionCodes: ['VIC'],
+            vehicles: [
+              {
+                id: 'veh-ute',
+                status: VehicleStatus.ACTIVE,
+                vehicleClass: 'UTE',
+                combinationConfig: 'NONE',
+                registration: 'UTE001',
+                units: [
+                  { id: 'u-pm', role: 'POWERED', registration: 'UTE001' },
+                ],
+              },
+              {
+                id: 'veh-bd',
+                status: VehicleStatus.ACTIVE,
+                vehicleClass: 'BDOUBLE',
+                combinationConfig: 'BDOUBLE',
+                registration: '1MR9FM',
+                units: [
+                  { id: 'bd-pm', role: 'POWERED', registration: '1MR9FM' },
+                  { id: 'bd-t1', role: 'TRAILER_1', registration: 'T1' },
+                  { id: 'bd-t2', role: 'TRAILER_2', registration: 'T2' },
+                ],
+              },
+            ],
+            drivers: [{ status: DriverStatus.ACTIVE }],
+            complianceDocuments: [
+              {
+                docType: ComplianceDocType.RWC,
+                vehicleId: 'veh-ute',
+                vehicleUnitId: 'u-pm',
+                status: 'APPROVED',
+                expiresAt: null,
+              },
+              {
+                docType: ComplianceDocType.RWC,
+                vehicleId: 'veh-bd',
+                vehicleUnitId: 'bd-pm',
+                status: 'APPROVED',
+                expiresAt: null,
+              },
+              {
+                docType: ComplianceDocType.RWC,
+                vehicleId: 'veh-bd',
+                vehicleUnitId: 'bd-t1',
+                status: 'APPROVED',
+                expiresAt: null,
+              },
+              // Trailer 2 missing — must not block company when another truck is ready
+            ],
+          }),
+        }),
+      },
+    };
+
+    const result = await makeService(prisma).getBidEligibility(carrier);
+    expect(result.goNoGo.fleetReady).toBe(true);
+    expect(result.goNoGo.driversReady).toBe(true);
+    expect(result.canBid).toBe(true);
+  });
+
+  it('driversReady false when only invited drivers exist (fleet alone does not unlock canBid)', async () => {
+    const prisma = {
+      isConnected: () => true,
+      user: {
+        findUnique: jest.fn().mockResolvedValue({
+          id: 'user-carrier',
+          company: carrierCompany({
+            status: CompanyStatus.BID_ELIGIBLE,
+            abn: '51824753556',
+            stripeConnectPayoutsEnabled: true,
+            serviceRegionCodes: ['VIC'],
+            vehicles: [
+              {
+                id: 'veh-ute',
+                status: VehicleStatus.ACTIVE,
+                vehicleClass: 'UTE',
+                combinationConfig: 'NONE',
+                registration: 'UTE001',
+                units: [{ id: 'u-pm', role: 'POWERED', registration: 'UTE001' }],
+              },
+            ],
+            drivers: [{ status: DriverStatus.INVITED }, { status: DriverStatus.PENDING_REVIEW }],
+            complianceDocuments: [
+              {
+                docType: ComplianceDocType.RWC,
+                vehicleId: 'veh-ute',
+                vehicleUnitId: 'u-pm',
+                status: 'APPROVED',
+                expiresAt: null,
+              },
+            ],
+          }),
+        }),
+      },
+    };
+
+    const result = await makeService(prisma).getBidEligibility(carrier);
+    expect(result.goNoGo.fleetReady).toBe(true);
+    expect(result.goNoGo.driversReady).toBe(false);
+    expect(result.canBid).toBe(false);
+  });
+
+  it('fleetReady false when every ACTIVE truck is incomplete', async () => {
+    const prisma = {
+      isConnected: () => true,
+      user: {
+        findUnique: jest.fn().mockResolvedValue({
+          id: 'user-carrier',
+          company: carrierCompany({
+            status: CompanyStatus.BID_ELIGIBLE,
+            abn: '51824753556',
+            stripeConnectPayoutsEnabled: true,
+            serviceRegionCodes: ['VIC'],
+            vehicles: [
+              {
+                id: 'veh-bd',
+                status: VehicleStatus.ACTIVE,
+                vehicleClass: 'BDOUBLE',
+                combinationConfig: 'BDOUBLE',
+                registration: '1MR9FM',
+                units: [
+                  { id: 'bd-pm', role: 'POWERED', registration: '1MR9FM' },
+                  { id: 'bd-t1', role: 'TRAILER_1', registration: 'T1' },
+                  { id: 'bd-t2', role: 'TRAILER_2', registration: 'T2' },
+                ],
+              },
+            ],
+            drivers: [{ status: DriverStatus.ACTIVE }],
+            complianceDocuments: [
+              {
+                docType: ComplianceDocType.RWC,
+                vehicleId: 'veh-bd',
+                vehicleUnitId: 'bd-pm',
+                status: 'APPROVED',
+                expiresAt: null,
+              },
+              {
+                docType: ComplianceDocType.RWC,
+                vehicleId: 'veh-bd',
+                vehicleUnitId: 'bd-t1',
+                status: 'APPROVED',
+                expiresAt: null,
+              },
+            ],
+          }),
+        }),
+      },
+    };
+
+    const result = await makeService(prisma).getBidEligibility(carrier);
+    expect(result.goNoGo.fleetReady).toBe(false);
+    expect(result.canBid).toBe(false);
   });
 });

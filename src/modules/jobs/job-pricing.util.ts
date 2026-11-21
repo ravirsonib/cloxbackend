@@ -573,8 +573,63 @@ export function carrierNetPayoutCents(
   grossIncGstCents: number,
   carrierPercent: number = 70,
 ): number {
+  if (!Number.isFinite(grossIncGstCents) || !Number.isFinite(carrierPercent)) {
+    return 0;
+  }
+  const gross = Math.max(0, Math.trunc(grossIncGstCents));
   const pct = Math.max(1, Math.min(99, Math.trunc(carrierPercent)));
-  return Math.round((grossIncGstCents * pct) / 100);
+  return Math.round((gross * pct) / 100);
+}
+
+/**
+ * Invert {@link carrierNetPayoutCents}: carrier types take-home (net);
+ * store / charge settlement gross = net / (carrier%/100).
+ * Nudges so {@link carrierNetPayoutCents}(result) >= net (never under-pay).
+ * Prefer {@link proposalBaseFromTargetCarrierNet} when sender platform fee applies.
+ */
+export function grossFromCarrierNetCents(
+  netIncGstCents: number,
+  carrierPercent: number = 70,
+): number {
+  if (!Number.isFinite(netIncGstCents) || netIncGstCents <= 0) {
+    return 0;
+  }
+  if (!Number.isFinite(carrierPercent)) {
+    return 0;
+  }
+  const pct = Math.max(1, Math.min(99, Math.trunc(carrierPercent)));
+  const net = Math.trunc(netIncGstCents);
+  let gross = Math.round((net * 100) / pct);
+  if (!Number.isFinite(gross) || gross < 1) gross = 1;
+  let guard = 0;
+  while (carrierNetPayoutCents(gross, pct) < net && guard++ < 10_000) gross += 1;
+  guard = 0;
+  while (gross > 1 && carrierNetPayoutCents(gross - 1, pct) >= net && guard++ < 10_000) {
+    gross -= 1;
+  }
+  return gross;
+}
+
+/**
+ * Smallest net such that {@link grossFromCarrierNetCents}(net) >= minGross.
+ * Avoids board “min payout” that still fails server floor checks.
+ */
+export function minCarrierNetClearingGrossFloor(
+  minGrossIncGstCents: number,
+  carrierPercent: number = 70,
+): number {
+  if (!Number.isFinite(minGrossIncGstCents) || !Number.isFinite(carrierPercent)) {
+    return 1;
+  }
+  const minGross = Math.max(0, Math.trunc(minGrossIncGstCents));
+  if (minGross <= 0) return 1;
+  let net = carrierNetPayoutCents(minGross, carrierPercent);
+  if (!Number.isFinite(net) || net < 1) net = 1;
+  let guard = 0;
+  while (grossFromCarrierNetCents(net, carrierPercent) < minGross && guard++ < 10_000) {
+    net += 1;
+  }
+  return net;
 }
 
 export async function loadVehicleClassMaps(prisma?: {

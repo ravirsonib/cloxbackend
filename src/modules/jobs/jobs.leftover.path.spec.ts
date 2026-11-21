@@ -183,6 +183,7 @@ describe('JobsService leftover list/get/publish/bidding paths', () => {
           paymentEvents: [
             {
               id: 'pe-1',
+              type: 'CHARGE',
               status: 'SUCCEEDED',
               amountIncGstCents: 11000,
               stripePaymentIntentId: 'pi_1',
@@ -200,11 +201,83 @@ describe('JobsService leftover list/get/publish/bidding paths', () => {
     expect(result.payment).toMatchObject({ id: 'pe-1', stripePaymentIntentId: 'pi_1' });
     const prop1 = result.proposals?.find((p: { id: string }) => p.id === 'prop-1');
     const prop2 = result.proposals?.find((p: { id: string }) => p.id === 'prop-2');
+    // Pre-completion: always mask carrier/driver identity (GAP-06).
     expect(prop1).toMatchObject({
       id: 'prop-1',
-      carrierLabel: expect.stringMatching(/^Carrier /),
+      carrierLabel: expect.stringMatching(/^Offer /),
       carrierCompanyIdMasked: true,
+      carrierCompany: null,
+      driver: null,
+      vehicleRegistration: null,
     });
+    expect(prop2).toMatchObject({
+      id: 'prop-2',
+      carrierLabel: expect.stringMatching(/^Offer /),
+      carrierCompanyIdMasked: true,
+      carrierCompany: null,
+      driver: null,
+      vehicleRegistration: null,
+    });
+    expect(prop2).not.toHaveProperty('netToCarrierCents');
+  });
+
+  it('getJobForSender reveals carrier identity after COMPLETED', async () => {
+    const prisma = {
+      isConnected: () => true,
+      user: {
+        findUnique: jest.fn().mockResolvedValue({
+          id: 'user-sender',
+          companyId: 'co-s',
+        }),
+      },
+      job: {
+        findFirst: jest.fn().mockResolvedValue({
+          ...mapJobFields({ status: JobStatus.COMPLETED }),
+          proposals: [
+            {
+              id: 'prop-2',
+              status: ProposalStatus.ACCEPTED,
+              amountIncGstCents: 12000,
+              amountExGstCents: 10909,
+              amountGstCents: 1091,
+              etaMinutes: 30,
+              carrierCompanyId: 'co-c2',
+              vehicleId: 'v2',
+              driverId: 'd2',
+              vehicle: { vehicleClass: 'RIGID_1_2T', registration: 'XYZ789', label: 'Rigid 1' },
+              carrierCompany: {
+                id: 'co-c2',
+                legalName: 'Acme Haulage Pty Ltd',
+                tradingName: 'Acme Haulage',
+                email: 'ops@acmehaulage.com.au',
+                phone: '0400111222',
+                abn: '12345678901',
+              },
+              driver: {
+                id: 'd2',
+                licenceClass: 'MR',
+                user: {
+                  name: 'J. Smith',
+                  email: 'jsmith@acmehaulage.com.au',
+                  phone: '0400333444',
+                },
+              },
+              createdAt: new Date(),
+            },
+          ],
+          assignment: {
+            id: 'asg-1',
+            status: 'COMPLETED',
+            lockedAt: new Date(),
+          },
+          trip: { id: 'trip-1', status: 'COMPLETED', completedAt: new Date() },
+          paymentEvents: [],
+        }),
+      },
+      tripException: { findFirst: jest.fn().mockResolvedValue(null) },
+    };
+    const result = await makeService(prisma).getJobForSender(sender, 'job-1');
+    const prop2 = result.proposals?.find((p: { id: string }) => p.id === 'prop-2');
     expect(prop2).toMatchObject({
       id: 'prop-2',
       carrierLabel: 'Acme Haulage',
@@ -221,6 +294,7 @@ describe('JobsService leftover list/get/publish/bidding paths', () => {
         email: 'jsmith@acmehaulage.com.au',
         licenceClass: 'MR',
       },
+      vehicleRegistration: 'XYZ789',
     });
   });
 

@@ -7,8 +7,11 @@ import {
   assertNationalPayload,
   CARRIER_PERCENT_FIXED,
   effectiveCarrierPercent,
+  expectedCarrierNetFromProposalBase,
   maxCarrierBonusPercent,
+  minCarrierNetClearingProposalBase,
   normalizeAdminPoolShares,
+  proposalBaseFromTargetCarrierNet,
 } from './revenue-split.types';
 
 describe('revenue-split.types', () => {
@@ -141,6 +144,144 @@ describe('revenue-split.types', () => {
     expect(parts.carrier).toBe(7140);
     expect(parts.cloxPoolPercent).toBe(30);
     expect(parts.superShare + parts.stateShare + parts.localShare).toBe(3060);
+  });
+
+  it('proposalBaseFromTargetCarrierNet matches exclusive fee-then-split payout', () => {
+    // Carrier types $70.00 take-home with 70% + exclusive 2% fee.
+    const priced = proposalBaseFromTargetCarrierNet({
+      targetNetIncGstCents: 7000,
+      carrierPercent: 70,
+      feePercent: 2,
+      feeMode: 'EXCLUSIVE',
+    });
+    expect(priced.netIncGstCents).toBeGreaterThanOrEqual(7000);
+    const fee = applySenderPlatformFee({
+      baseIncGstCents: priced.baseIncGstCents,
+      feePercent: 2,
+      mode: 'EXCLUSIVE',
+    });
+    expect(fee.chargeIncGstCents).toBe(priced.settlementGrossIncGstCents);
+    const ledger = allocateTwoStage(fee.chargeIncGstCents, 70, {
+      cloxSuperPercent: 50,
+      cloxStatePercent: 30,
+      cloxLocalPercent: 20,
+    });
+    expect(ledger.carrier).toBe(priced.netIncGstCents);
+    expect(
+      expectedCarrierNetFromProposalBase({
+        baseIncGstCents: priced.baseIncGstCents,
+        carrierPercent: 70,
+        feePercent: 2,
+        feeMode: 'EXCLUSIVE',
+      }),
+    ).toBe(priced.netIncGstCents);
+
+    // Floor-clearing net never under-converts below min base.
+    const minBase = 20_000;
+    const minNet = minCarrierNetClearingProposalBase({
+      minBaseIncGstCents: minBase,
+      carrierPercent: 70,
+      feePercent: 2,
+      feeMode: 'EXCLUSIVE',
+    });
+    const atFloor = proposalBaseFromTargetCarrierNet({
+      targetNetIncGstCents: minNet,
+      carrierPercent: 70,
+      feePercent: 2,
+      feeMode: 'EXCLUSIVE',
+    });
+    expect(atFloor.baseIncGstCents).toBeGreaterThanOrEqual(minBase);
+  });
+
+  it('proposalBaseFromTargetCarrierNet returns zeros for NaN / 0 / negative / Infinity', () => {
+    for (const bad of [Number.NaN, 0, -1, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+      const priced = proposalBaseFromTargetCarrierNet({
+        targetNetIncGstCents: bad,
+        carrierPercent: 70,
+        feePercent: 2,
+        feeMode: 'EXCLUSIVE',
+      });
+      expect(priced.baseIncGstCents).toBe(0);
+      expect(priced.settlementGrossIncGstCents).toBe(0);
+      expect(priced.netIncGstCents).toBe(0);
+    }
+  });
+
+  it('proposalBaseFromTargetCarrierNet tolerates NaN fee/carrier % via finiteInt fallbacks', () => {
+    const priced = proposalBaseFromTargetCarrierNet({
+      targetNetIncGstCents: 7000,
+      carrierPercent: Number.NaN,
+      feePercent: Number.NaN,
+      feeMode: 'EXCLUSIVE',
+    });
+    expect(priced.baseIncGstCents).toBeGreaterThan(0);
+    expect(priced.netIncGstCents).toBeGreaterThanOrEqual(7000);
+    // NaN carrier → fallback 70; NaN fee → 0
+    expect(priced.feePercent).toBe(0);
+  });
+
+  it('minCarrierNetClearingProposalBase handles NaN floor and odd fee modes', () => {
+    expect(
+      minCarrierNetClearingProposalBase({
+        minBaseIncGstCents: Number.NaN,
+        carrierPercent: 70,
+        feePercent: 2,
+        feeMode: 'EXCLUSIVE',
+      }),
+    ).toBe(1);
+    expect(
+      minCarrierNetClearingProposalBase({
+        minBaseIncGstCents: 0,
+        carrierPercent: 70,
+        feePercent: 2,
+        feeMode: 'INCLUSIVE',
+      }),
+    ).toBe(1);
+
+    for (const minBase of [1, 999, 10_001, 20_000, 50_123]) {
+      for (const fee of [0, 1, 2, 5]) {
+        for (const mode of ['EXCLUSIVE', 'INCLUSIVE'] as const) {
+          const minNet = minCarrierNetClearingProposalBase({
+            minBaseIncGstCents: minBase,
+            carrierPercent: 70,
+            feePercent: fee,
+            feeMode: mode,
+          });
+          expect(Number.isFinite(minNet)).toBe(true);
+          expect(minNet).toBeGreaterThan(0);
+          const priced = proposalBaseFromTargetCarrierNet({
+            targetNetIncGstCents: minNet,
+            carrierPercent: 70,
+            feePercent: fee,
+            feeMode: mode,
+          });
+          expect(priced.baseIncGstCents).toBeGreaterThanOrEqual(minBase);
+        }
+      }
+    }
+  });
+
+  it('fee-aware round-trip never under-pays across odd cents', () => {
+    for (const n of [1, 7, 70, 701, 7000, 12345]) {
+      for (const fee of [0, 2]) {
+        const priced = proposalBaseFromTargetCarrierNet({
+          targetNetIncGstCents: n,
+          carrierPercent: 70,
+          feePercent: fee,
+          feeMode: 'EXCLUSIVE',
+        });
+        expect(Number.isFinite(priced.baseIncGstCents)).toBe(true);
+        expect(priced.netIncGstCents).toBeGreaterThanOrEqual(n);
+        expect(
+          expectedCarrierNetFromProposalBase({
+            baseIncGstCents: priced.baseIncGstCents,
+            carrierPercent: 70,
+            feePercent: fee,
+            feeMode: 'EXCLUSIVE',
+          }),
+        ).toBe(priced.netIncGstCents);
+      }
+    }
   });
 
   it('allocateTwoStage with carrier uplift 80/20 keeps pool mix', () => {
