@@ -54,6 +54,7 @@ import { AuditService } from '../audit/audit.service';
 import { InAppNotificationsService } from '../notifications/in-app-notifications.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { NhvrService } from '../nhvr/nhvr.service';
+import { RealtimeGateway } from '../geolocation/realtime.gateway';
 import { PaymentsService } from '../payments/payments.service';
 import {
   DEFAULT_GEOFENCE_POLICY,
@@ -106,6 +107,7 @@ export class TripsService {
     @Optional() private readonly inbox?: InAppNotificationsService,
     /** EWD diary sync on break (NhvrModule). Optional so legacy path specs keep working. */
     @Optional() private readonly nhvr?: NhvrService,
+    @Optional() private readonly realtimeGateway?: RealtimeGateway,
   ) {}
 
   private ensureDatabase() {
@@ -2454,6 +2456,27 @@ export class TripsService {
       { lat: input.lat, lng: input.lng },
       user.id,
     ).catch(() => undefined);
+
+    // Broadcast real-time location via Socket.io
+    if (this.realtimeGateway) {
+      try {
+        const vehicleId = trip.assignment?.vehicleId ?? undefined;
+        const carrierCompanyId = trip.assignment?.carrierCompanyId ?? undefined;
+        this.realtimeGateway.emitVehicleLocation(
+          {
+            tripId: trip.id,
+            driverId: user.driver!.id,
+            vehicleId,
+            lat: input.lat,
+            lng: input.lng,
+            timestamp: sample.recordedAt.toISOString(),
+          },
+          carrierCompanyId,
+        );
+      } catch (err) {
+        this.logger.warn({ err }, 'Failed to emit realtime vehicle location');
+      }
+    }
 
     return {
       id: sample.id,

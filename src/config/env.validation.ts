@@ -90,6 +90,14 @@ export const envSchema = z.object({
   APPROACHING_ETA_MAX_MINUTES: z.coerce.number().nonnegative().default(30),
   /** Assumed average road speed for haversine ETA (km/h). */
   APPROACHING_ETA_SPEED_KMH: z.coerce.number().positive().default(40),
+  /** Valhalla routing engine base URL (e.g. http://localhost:8002). */
+  VALHALLA_BASE_URL: z.string().default('http://localhost:8002'),
+  /** Valhalla client timeout in milliseconds. */
+  VALHALLA_TIMEOUT_MS: z.coerce.number().int().positive().default(5000),
+  /** Valhalla costing profile (truck for heavy commercial vehicles). */
+  VALHALLA_COSTING: z.enum(['auto', 'truck', 'bicycle', 'pedestrian', 'motorcycle']).default('truck'),
+  /** Route deviation threshold in meters before alerting. */
+  ROUTE_DEVIATION_THRESHOLD_METERS: z.coerce.number().positive().default(500),
 });
 
 export type AppEnv = z.infer<typeof envSchema>;

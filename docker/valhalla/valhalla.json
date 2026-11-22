@@ -1,0 +1,75 @@
+{
+  "httpd": {
+    "service": {
+      "listen": "tcp://0.0.0.0:8002"
+    },
+    "timeout_ms": 10000
+  },
+  "mjolnir": {
+    "tile_dir": "/custom_files/valhalla_tiles",
+    "admin": "/custom_files/valhalla_tiles/admins.sqlite",
+    "timezone": "/custom_files/valhalla_tiles/tz_world.sqlite",
+    "max_cache_size": 1073741824,
+    "concurrency": 2
+  },
+  "loki": {
+    "actions": ["locate", "route", "isochrone", "trace_route", "trace_attributes", "height"],
+    "logging": {
+      "type": "std_out",
+      "color": false,
+      "file_name": "valhalla.log"
+    },
+    "max_distance_auto": 25000.0,
+    "max_distance_bicycle": 50000.0,
+    "max_distance_bus": 25000.0,
+    "max_distance_hov": 25000.0,
+    "max_distance_motor_scooter": 50000.0,
+    "max_distance_motorcycle": 500000.0,
+    "max_distance_multimodal": 500000.0,
+    "max_distance_pedestrian": 250000.0,
+    "max_distance_truck": 2000000.0,
+    "max_locations": 50
+  },
+  "thor": {
+    "logging": {
+      "type": "std_out",
+      "color": false,
+      "file_name": "valhalla.log"
+    },
+    "source_to_target_algorithm": "select_optimal"
+  },
+  "odin": {
+    "logging": {
+      "type": "std_out",
+      "color": false,
+      "file_name": "valhalla.log"
+    }
+  },
+  "costing_options": {
+    "auto": {
+      "maneuver_penalty": 5,
+      "country_crossing_penalty": 0,
+      "gate_penalty": 300
+    },
+    "truck": {
+      "maneuver_penalty": 5,
+      "country_crossing_penalty": 0,
+      "gate_penalty": 300,
+      "length": 21.5,
+      "width": 2.6,
+      "height": 4.11,
+      "weight": 44.0,
+      "axle_load": 11.5,
+      "hazmat": false,
+      "top_speed": 100
+    },
+    "pedestrian": {
+      "walking_speed": 5.1,
+      "walkway_factor": 1.0
+    },
+    "bicycle": {
+      "cycling_speed": 20.0
+    }
+  }
+}
+
