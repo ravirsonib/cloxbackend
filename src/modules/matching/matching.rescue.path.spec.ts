@@ -28,6 +28,17 @@ function carrierUser() {
   };
 }
 
+function stubJobsService(quoteIncGstCents = 100_000) {
+  return {
+    getMinBaseCents: jest.fn().mockResolvedValue(20_000),
+    quoteForVehicleClass: jest.fn().mockResolvedValue({
+      estimateIncGstCents: quoteIncGstCents,
+      ratesClassCode: 'UTE',
+      usedLegacyFallback: false,
+    }),
+  };
+}
+
 describe('MatchingService marketplace rescue', () => {
   it('listBoard exposes priority + discounted min bid', async () => {
     const prisma = {
@@ -68,7 +79,7 @@ describe('MatchingService marketplace rescue', () => {
       prisma as never,
       { recordPlatform: jest.fn() } as never,
       { getBidEligibility: jest.fn().mockResolvedValue({ canBid: true, goNoGo: {} }) } as never,
-      {} as never,
+      stubJobsService() as never,
     );
 
     const board = await service.listBoard(carrierPrincipal);
@@ -109,6 +120,9 @@ describe('MatchingService marketplace rescue', () => {
           id: 'veh-1',
           vehicleClass: 'UTE',
           status: VehicleStatus.ACTIVE,
+          combinationConfig: null,
+          registration: 'TEST1',
+          units: [],
         }),
       },
       driver: {
@@ -124,12 +138,26 @@ describe('MatchingService marketplace rescue', () => {
       assignment: { findFirst: jest.fn().mockResolvedValue(null) },
       complianceDocument: {
         findFirst: jest.fn().mockResolvedValue({ id: 'doc-ok' }),
+        findMany: jest.fn().mockResolvedValue([
+          {
+            id: 'rwc-ok',
+            status: 'APPROVED',
+            expiresAt: null,
+            vehicleUnitId: null,
+          },
+        ]),
       },
       job: { update: jest.fn() },
     };
     const jobsService = {
       assertJobOpenForBidding: jest.fn().mockResolvedValue(job),
       getMinBaseCents: jest.fn().mockResolvedValue(5_000),
+      quoteForVehicleClass: jest.fn().mockResolvedValue({
+        estimateIncGstCents: 100_000,
+        ratesClassCode: 'UTE',
+        usedLegacyFallback: false,
+      }),
+      getActiveVehicleClasses: jest.fn().mockResolvedValue(undefined),
     };
     const service = new MatchingService(
       prisma as never,
@@ -142,7 +170,8 @@ describe('MatchingService marketplace rescue', () => {
       jobId: 'job-1',
       vehicleId: 'veh-1',
       driverId: 'drv-1',
-      amountIncGstCents: 8_999,
+      // Carrier types take-home net; ~6000 net → ~8571 gross, below rescue min base 9000.
+      amountIncGstCents: 6_000,
       etaMinutes: 60,
     };
 

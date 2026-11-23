@@ -52,6 +52,7 @@ function boardJob(partial: {
   minVehicleClass?: string | null;
   originRegionCode?: string | null;
   estimateIncGstCents?: number | null;
+  rateFloorIncGstCents?: number | null;
 }) {
   return {
     id: partial.id,
@@ -69,6 +70,7 @@ function boardJob(partial: {
     billableHours: null,
     estimateIncGstCents:
       partial.estimateIncGstCents === undefined ? 10_000 : partial.estimateIncGstCents,
+    rateFloorIncGstCents: partial.rateFloorIncGstCents ?? null,
     marketplacePriority: false,
     rescueDiscountPercent: null,
     pickupAt: new Date('2026-10-10T10:00:00.000Z'),
@@ -78,6 +80,17 @@ function boardJob(partial: {
       : null,
     stops: [{ stopType: 'PICKUP', suburb: 'Melbourne' }],
     proposals: [{ id: 'existing-prop', amountIncGstCents: 12_200 }],
+  };
+}
+
+function stubJobsService(quoteIncGstCents = 50_000) {
+  return {
+    getMinBaseCents: jest.fn().mockResolvedValue(20_000),
+    quoteForVehicleClass: jest.fn().mockResolvedValue({
+      estimateIncGstCents: quoteIncGstCents,
+      ratesClassCode: 'UTE',
+      usedLegacyFallback: false,
+    }),
   };
 }
 
@@ -110,7 +123,7 @@ describe('MatchingService leftover paths', () => {
       prisma as never,
       { recordPlatform: jest.fn() } as never,
       { getBidEligibility: jest.fn().mockResolvedValue({ canBid: true, goNoGo: {} }) } as never,
-      {} as never,
+      stubJobsService() as never,
     );
 
     const result = await service.listBoard(carrierPrincipal);
@@ -124,6 +137,41 @@ describe('MatchingService leftover paths', () => {
       myNetToCarrierCents: 8_540,
       displayNetToCarrierCents: 8_540,
     });
+  });
+
+  it('listBoard min bid uses max(class quote, hard floor) not floor alone', async () => {
+    const prisma = {
+      isConnected: () => true,
+      user: {
+        findUnique: jest.fn().mockResolvedValue(
+          carrierUser({
+            capabilities: ['DG'],
+            serviceRegionCodes: ['VIC'],
+            homeRegionCode: 'VIC',
+          }),
+        ),
+      },
+      job: {
+        findMany: jest.fn().mockResolvedValue([
+          boardJob({
+            id: 'job-floor',
+            originRegionCode: 'VIC',
+            estimateIncGstCents: 1_894_320,
+            rateFloorIncGstCents: 442_008,
+          }),
+        ]),
+      },
+    };
+    const service = new MatchingService(
+      prisma as never,
+      { recordPlatform: jest.fn() } as never,
+      { getBidEligibility: jest.fn().mockResolvedValue({ canBid: true, goNoGo: {} }) } as never,
+      stubJobsService(1_894_320) as never,
+    );
+
+    const result = await service.listBoard(carrierPrincipal);
+    expect(result.jobs[0]?.minBidIncGstCents).toBe(1_894_320);
+    expect(result.jobs[0]?.minBidNetToCarrierCents).toBe(Math.round((1_894_320 * 70) / 100));
   });
 
   it('listBoard prefers bid net over estimate net when alreadyBid', async () => {
@@ -152,7 +200,7 @@ describe('MatchingService leftover paths', () => {
       prisma as never,
       { recordPlatform: jest.fn() } as never,
       { getBidEligibility: jest.fn().mockResolvedValue({ canBid: true, goNoGo: {} }) } as never,
-      {} as never,
+      stubJobsService() as never,
     );
 
     const result = await service.listBoard(carrierPrincipal);
@@ -187,7 +235,7 @@ describe('MatchingService leftover paths', () => {
       prisma as never,
       { recordPlatform: jest.fn() } as never,
       { getBidEligibility: jest.fn().mockResolvedValue({ canBid: true, goNoGo: {} }) } as never,
-      {} as never,
+      stubJobsService() as never,
     );
 
     const result = await service.listBoard(carrierPrincipal);
@@ -247,7 +295,14 @@ describe('MatchingService leftover paths', () => {
       assignment: { findFirst: jest.fn().mockResolvedValue(null) },
       complianceDocument: {
         findFirst: jest.fn().mockResolvedValue({ id: 'doc-ok' }),
-        findMany: jest.fn().mockResolvedValue([{ id: 'doc-ok', vehicleId: null }]),
+        findMany: jest.fn().mockResolvedValue([
+          {
+            id: 'rwc-ok',
+            status: 'APPROVED',
+            expiresAt: null,
+            vehicleUnitId: null,
+          },
+        ]),
       },
       job,
       $transaction: jest.fn(async (fn: (tx: unknown) => Promise<unknown>) =>
@@ -262,6 +317,8 @@ describe('MatchingService leftover paths', () => {
       getMinBaseCents: jest.fn().mockResolvedValue(20_000),
       quoteForVehicleClass: jest.fn().mockResolvedValue({
         estimateIncGstCents: 15_000,
+        ratesClassCode: 'SEMI',
+        usedLegacyFallback: false,
       }),
     };
     const service = new MatchingService(
@@ -292,7 +349,27 @@ describe('MatchingService leftover paths', () => {
       id: 'veh-1',
       vehicleClass: 'SEMI',
       status: VehicleStatus.ACTIVE,
+      combinationConfig: 'SEMI',
+      registration: 'SEMI1',
+      units: [
+        { id: 'unit-pm', role: 'POWERED', registration: 'SEMI1' },
+        { id: 'unit-t1', role: 'TRAILER_1', registration: 'TRL1' },
+      ],
     });
+    prisma.complianceDocument.findMany.mockResolvedValue([
+      {
+        id: 'rwc-pm',
+        status: 'APPROVED',
+        expiresAt: null,
+        vehicleUnitId: 'unit-pm',
+      },
+      {
+        id: 'rwc-t1',
+        status: 'APPROVED',
+        expiresAt: null,
+        vehicleUnitId: 'unit-t1',
+      },
+    ]);
     prisma.driver.findFirst.mockResolvedValue({
       id: 'drv-1',
       status: DriverStatus.ACTIVE,

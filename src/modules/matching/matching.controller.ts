@@ -1,5 +1,6 @@
-import { Body, Controller, Get, Param, Post, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Param, Post, Query, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
+import { z } from 'zod';
 import {
   AppRole,
   proposalSubmitSchema,
@@ -11,6 +12,10 @@ import { JwtAuthGuard, type AuthenticatedPrincipal } from '../../common/guards/j
 import { RolesGuard } from '../../common/guards/roles.guard';
 import { ZodValidationPipe } from '../../common/pipes/zod-validation.pipe';
 import { MatchingService } from './matching.service';
+
+const bidMinimumQuerySchema = z.object({
+  vehicleId: z.string().uuid(),
+});
 
 @ApiTags('matching')
 @Controller('matching')
@@ -30,6 +35,21 @@ export class MatchingController {
   @ApiOperation({ summary: 'Carrier job board (filtered, net 70% hint)' })
   board(@CurrentPrincipal() principal: AuthenticatedPrincipal) {
     return this.matchingService.listBoard(principal);
+  }
+
+  @Get('jobs/:jobId/bid-minimum')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(AppRole.TRANSPORT_COMPANY)
+  @ApiOperation({
+    summary: 'Preview carrier payout minimum for a job + vehicle (matches bid submit floors)',
+  })
+  previewBidMinimum(
+    @CurrentPrincipal() principal: AuthenticatedPrincipal,
+    @Param('jobId') jobId: string,
+    @Query(new ZodValidationPipe(bidMinimumQuerySchema)) query: z.infer<typeof bidMinimumQuerySchema>,
+  ) {
+    return this.matchingService.previewBidMinimum(principal, jobId, query.vehicleId);
   }
 
   @Post('bids')

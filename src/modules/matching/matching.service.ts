@@ -63,6 +63,7 @@ import {
   type SenderPlatformFeeMode,
 } from '../settlements/revenue-split.types';
 import { carrierMatchesJob } from './matching.eligibility';
+import { resolveProposalMinBaseCents } from './proposal-min-base.util';
 
 @Injectable()
 export class MatchingService {
@@ -102,6 +103,164 @@ export class MatchingService {
     } catch {
       return 10.0;
     }
+  }
+
+  /**
+   * Live hard floor for the bid vehicle class, falling back to job snapshot.
+   */
+  private async resolveHardFloorForBid(params: {
+    job: {
+      id: string;
+      routeDistanceKm: number | null;
+      billableHours: number | null;
+      pickupAt: Date | null;
+      requiresReefer: boolean;
+      requiresDg: boolean;
+      isBackhaul?: boolean | null;
+      rateFloorIncGstCents?: number | null;
+      rateFloorExGstCents?: number | null;
+      rateFloorVersionId?: string | null;
+      rateFloorBreakdown?: unknown;
+      stops?: Array<{ stopType: string; state?: string | null }>;
+    };
+    vehicleClass: string;
+    pricingModel: 'PER_KM' | 'HOURLY';
+  }): Promise<{
+    hardFloorInc: number | null;
+    hardFloorEx: number | null;
+    hardFloorVersionId: string | null;
+    hardFloorBreakdown: Record<string, unknown> | null;
+  }> {
+    let hardFloorInc: number | null =
+      params.job.rateFloorIncGstCents != null && params.job.rateFloorIncGstCents > 0
+        ? params.job.rateFloorIncGstCents
+        : null;
+    let hardFloorEx: number | null = params.job.rateFloorExGstCents ?? null;
+    let hardFloorVersionId: string | null = params.job.rateFloorVersionId ?? null;
+    let hardFloorBreakdown: Record<string, unknown> | null =
+      (params.job.rateFloorBreakdown as Record<string, unknown> | null) ?? null;
+    if (this.rateFloor) {
+      try {
+        const pickupStop =
+          params.job.stops?.find((s) => s.stopType === 'PICKUP') ??
+          params.job.stops?.[0] ??
+          null;
+        const floor = await this.rateFloor.calculate({
+          vehicleClassCode: params.vehicleClass,
+          pricingModel: params.pricingModel,
+          distanceKm: params.job.routeDistanceKm ?? 0,
+          billableHours: params.job.billableHours,
+          at: params.job.pickupAt,
+          pickupState: pickupStop?.state ?? null,
+          requiresReefer: params.job.requiresReefer,
+          requiresDg: params.job.requiresDg,
+          backhaul: params.job.isBackhaul,
+          jobId: params.job.id,
+        });
+        hardFloorInc = floor.floorIncGstCents;
+        hardFloorEx = floor.floorExGstCents;
+        hardFloorVersionId = floor.versionId;
+        hardFloorBreakdown = floor.breakdown;
+      } catch {
+        // Keep job snapshot when live calc fails.
+      }
+    }
+    return { hardFloorInc, hardFloorEx, hardFloorVersionId, hardFloorBreakdown };
+  }
+
+  /**
+   * Carrier-facing bid minimum for a job + vehicle (same formula as submitProposal).
+   */
+  async previewBidMinimum(
+    principal: AuthenticatedPrincipal,
+    jobId: string,
+    vehicleId: string,
+  ) {
+    this.ensureDatabase();
+    const eligibility = await this.carrierService.getBidEligibility(principal);
+    if (!eligibility.canBid) {
+      throw new ForbiddenException({
+        message: 'Carrier cannot preview bid minimum until bid-eligible',
+        code: 'CARRIER_NOT_BID_ELIGIBLE',
+        goNoGo: eligibility.goNoGo,
+      });
+    }
+    const user = await this.requireCarrierCompany(principal);
+    const company = user.company!;
+    const job = await this.jobsService.assertJobOpenForBidding(jobId);
+    const vehicle = await this.prisma.vehicle.findFirst({
+      where: {
+        id: vehicleId,
+        companyId: company.id,
+        status: VehicleStatus.ACTIVE,
+      },
+      select: { id: true, vehicleClass: true },
+    });
+    if (!vehicle?.vehicleClass) {
+      throw new BadRequestException({
+        message: 'Active vehicle with class required',
+        code: 'VEHICLE_NOT_ACTIVE',
+      });
+    }
+    const vehicleClass = vehicle.vehicleClass;
+    const pricingModel = job.pricingModel === 'HOURLY' ? 'HOURLY' : 'PER_KM';
+    const floorResolved = await this.resolveHardFloorForBid({
+      job,
+      vehicleClass,
+      pricingModel,
+    });
+    const globalFloor = await this.jobsService.getMinBaseCents(pricingModel);
+    const classQuote = await this.jobsService.quoteForVehicleClass({
+      pricingModel,
+      vehicleClass,
+      distanceKm: job.routeDistanceKm ?? 0,
+      billableHours: job.billableHours,
+    });
+    const minBidIncGstCents = resolveProposalMinBaseCents({
+      globalFloorCents: globalFloor,
+      classQuoteIncGstCents: classQuote.estimateIncGstCents,
+      hardFloorIncGstCents: floorResolved.hardFloorInc,
+      estimateIncGstCents: job.estimateIncGstCents,
+      rescueDiscountPercent: job.rescueDiscountPercent,
+    });
+
+    const carrierPercent = this.revenueSplit
+      ? (
+          await this.revenueSplit.resolvePercents({
+            referredByAdminUserId: null,
+            carrierCompanyId: company.id,
+            at: new Date(),
+          })
+        ).percents.carrierPercent
+      : 70;
+    let feePercent = 0;
+    let feeMode: SenderPlatformFeeMode = 'EXCLUSIVE';
+    if (this.revenueSplit) {
+      const fee = await this.revenueSplit.resolveSenderFee({
+        baseIncGstCents: minBidIncGstCents || 10_000,
+        senderCompanyId: job.senderCompanyId,
+      });
+      feePercent = fee.feePercent;
+      feeMode = fee.mode;
+    }
+    const minBidNetToCarrierCents = minCarrierNetClearingProposalBase({
+      minBaseIncGstCents: minBidIncGstCents,
+      carrierPercent,
+      feePercent,
+      feeMode,
+    });
+    return {
+      jobId: job.id,
+      vehicleId: vehicle.id,
+      vehicleClass,
+      minBidIncGstCents,
+      minBidNetToCarrierCents,
+      rateFloorIncGstCents: floorResolved.hardFloorInc,
+      rateFloorVersionId: floorResolved.hardFloorVersionId,
+      carrierPercent,
+      feePercent,
+      feeMode,
+    };
   }
 
   private async requireCarrierCompany(principal: AuthenticatedPrincipal) {
@@ -209,6 +368,9 @@ export class MatchingService {
       boardFeeMode = feeProbe.mode;
     }
 
+    const quoteCache = new Map<string, number>();
+    const globalFloorByModel = new Map<'PER_KM' | 'HOURLY', number>();
+
     const jobsOut = await Promise.all(
       visible.map(async (j) => {
         const discount = j.rescueDiscountPercent ?? 0;
@@ -247,19 +409,44 @@ export class MatchingService {
                 feeMode,
               })
             : null;
-        const hardFloorGross =
+
+        const pricingModel = j.pricingModel === 'HOURLY' ? 'HOURLY' : 'PER_KM';
+        if (!globalFloorByModel.has(pricingModel)) {
+          globalFloorByModel.set(
+            pricingModel,
+            await this.jobsService.getMinBaseCents(pricingModel),
+          );
+        }
+        const vehicleClass = j.minVehicleClass?.trim() || 'UTE';
+        const quoteKey = `${pricingModel}|${vehicleClass}|${j.routeDistanceKm ?? 0}|${j.billableHours ?? ''}`;
+        let classQuoteInc = quoteCache.get(quoteKey);
+        if (classQuoteInc == null) {
+          const classQuote = await this.jobsService.quoteForVehicleClass({
+            pricingModel,
+            vehicleClass,
+            distanceKm: j.routeDistanceKm ?? 0,
+            billableHours: j.billableHours,
+          });
+          classQuoteInc = classQuote.estimateIncGstCents;
+          quoteCache.set(quoteKey, classQuoteInc);
+        }
+        const hardFloorInc =
           j.rateFloorIncGstCents != null && j.rateFloorIncGstCents > 0
             ? j.rateFloorIncGstCents
-            : discountedEstimate;
-        const minBidNetToCarrierCents =
-          hardFloorGross != null
-            ? minCarrierNetClearingProposalBase({
-                minBaseIncGstCents: hardFloorGross,
-                carrierPercent: effectiveCarrierPercent,
-                feePercent,
-                feeMode,
-              })
             : null;
+        const minBidIncGstCents = resolveProposalMinBaseCents({
+          globalFloorCents: globalFloorByModel.get(pricingModel) ?? 0,
+          classQuoteIncGstCents: classQuoteInc,
+          hardFloorIncGstCents: hardFloorInc,
+          estimateIncGstCents: j.estimateIncGstCents,
+          rescueDiscountPercent: j.rescueDiscountPercent,
+        });
+        const minBidNetToCarrierCents = minCarrierNetClearingProposalBase({
+          minBaseIncGstCents: minBidIncGstCents,
+          carrierPercent: effectiveCarrierPercent,
+          feePercent,
+          feeMode,
+        });
         return {
           id: j.id,
           title: j.title,
@@ -291,8 +478,8 @@ export class MatchingService {
           displayNetToCarrierCents: myNetToCarrierCents ?? estimateNetToCarrierCents,
           marketplacePriority: j.marketplacePriority,
           rescueDiscountPercent: j.rescueDiscountPercent,
-          /** Gross floor (internal / sender settlement basis). */
-          minBidIncGstCents: hardFloorGross,
+          /** Effective min proposal base (class quote + hard floor). */
+          minBidIncGstCents,
           /** Carrier-facing minimum payout (net). */
           minBidNetToCarrierCents,
           rateFloorVersionId: j.rateFloorVersionId ?? j.rateFloorVersion?.id ?? null,
@@ -537,6 +724,11 @@ export class MatchingService {
     const grossIncGstCents = priced.baseIncGstCents;
 
     const pricingModel = job.pricingModel === 'HOURLY' ? 'HOURLY' : 'PER_KM';
+    const floorResolved = await this.resolveHardFloorForBid({
+      job,
+      vehicleClass,
+      pricingModel,
+    });
     const globalFloor = await this.jobsService.getMinBaseCents(pricingModel);
     const classQuote = await this.jobsService.quoteForVehicleClass({
       pricingModel,
@@ -544,48 +736,17 @@ export class MatchingService {
       distanceKm: job.routeDistanceKm ?? 0,
       billableHours: job.billableHours,
     });
-    let minBase = Math.max(globalFloor, classQuote.estimateIncGstCents);
-    const discount = job.rescueDiscountPercent ?? 0;
-    if (discount > 0 && job.estimateIncGstCents != null) {
-      // Rescue listing: carrier may bid down to discounted sender estimate.
-      minBase = Math.round((job.estimateIncGstCents * (100 - discount)) / 100);
-    }
-
-    let hardFloorInc: number | null =
-      job.rateFloorIncGstCents != null && job.rateFloorIncGstCents > 0
-        ? job.rateFloorIncGstCents
-        : null;
-    let hardFloorEx: number | null = job.rateFloorExGstCents ?? null;
-    let hardFloorVersionId: string | null = job.rateFloorVersionId ?? null;
-    let hardFloorBreakdown: Record<string, unknown> | null =
-      (job.rateFloorBreakdown as Record<string, unknown> | null) ?? null;
-    if (this.rateFloor) {
-      try {
-        const pickupStop =
-          job.stops?.find((s) => s.stopType === 'PICKUP') ?? job.stops?.[0] ?? null;
-        const floor = await this.rateFloor.calculate({
-          vehicleClassCode: vehicleClass,
-          pricingModel,
-          distanceKm: job.routeDistanceKm ?? 0,
-          billableHours: job.billableHours,
-          at: job.pickupAt,
-          pickupState: pickupStop?.state ?? null,
-          requiresReefer: job.requiresReefer,
-          requiresDg: job.requiresDg,
-          backhaul: job.isBackhaul,
-          jobId: job.id,
-        });
-        hardFloorInc = floor.floorIncGstCents;
-        hardFloorEx = floor.floorExGstCents;
-        hardFloorVersionId = floor.versionId;
-        hardFloorBreakdown = floor.breakdown;
-      } catch {
-        // Fail closed only when we have no job snapshot either — keep legacy minBase.
-      }
-    }
-    if (hardFloorInc != null) {
-      minBase = Math.max(minBase, hardFloorInc);
-    }
+    const hardFloorInc = floorResolved.hardFloorInc;
+    const hardFloorEx = floorResolved.hardFloorEx;
+    const hardFloorVersionId = floorResolved.hardFloorVersionId;
+    const hardFloorBreakdown = floorResolved.hardFloorBreakdown;
+    const minBase = resolveProposalMinBaseCents({
+      globalFloorCents: globalFloor,
+      classQuoteIncGstCents: classQuote.estimateIncGstCents,
+      hardFloorIncGstCents: hardFloorInc,
+      estimateIncGstCents: job.estimateIncGstCents,
+      rescueDiscountPercent: job.rescueDiscountPercent,
+    });
 
     if (grossIncGstCents < minBase) {
       const minNet = minCarrierNetClearingProposalBase({

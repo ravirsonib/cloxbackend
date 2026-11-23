@@ -142,11 +142,19 @@ describe('MatchingService path (mocked Prisma)', () => {
     const carrierService = {
       getBidEligibility: jest.fn().mockResolvedValue({ canBid: true, goNoGo: {} }),
     };
+    const jobsService = {
+      getMinBaseCents: jest.fn().mockResolvedValue(20_000),
+      quoteForVehicleClass: jest.fn().mockResolvedValue({
+        estimateIncGstCents: 50_000,
+        ratesClassCode: 'UTE',
+        usedLegacyFallback: false,
+      }),
+    };
     const service = new MatchingService(
       prisma as never,
       { recordPlatform: jest.fn() } as never,
       carrierService as never,
-      {} as never,
+      jobsService as never,
     );
 
     const result = await service.listBoard(carrierPrincipal);
