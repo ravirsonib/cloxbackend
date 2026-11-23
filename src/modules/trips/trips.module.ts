@@ -6,6 +6,7 @@ import { AuditModule } from '../audit/audit.module';
 import { NhvrModule } from '../nhvr/nhvr.module';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { PaymentsModule } from '../payments/payments.module';
+import { GeolocationModule } from '../geolocation/geolocation.module';
 import { TripsController } from './trips.controller';
 import { TripsService } from './trips.service';
 
@@ -15,6 +16,7 @@ import { TripsService } from './trips.service';
     AuditModule,
     NotificationsModule,
     NhvrModule,
+    GeolocationModule,
     forwardRef(() => PaymentsModule),
   ],
   controllers: [TripsController],
