@@ -898,6 +898,133 @@ export class CarrierService {
     return this.getOnboarding(principal);
   }
 
+  /**
+   * Read-only Connect payout status + masked default bank summary for the carrier.
+   * Also syncs `stripeConnectPayoutsEnabled` if Stripe's live status changed.
+   */
+  async getConnectStatus(principal: AuthenticatedPrincipal) {
+    this.ensureDatabase();
+    const user = await this.requireCarrier(principal);
+    const company = user.company!;
+    const accountId = company.stripeConnectAccountId;
+
+    if (!accountId) {
+      return {
+        connected: false,
+        accountId: null,
+        payoutsEnabled: false,
+        requirementsDue: false,
+        bankAccount: null,
+        mock: this.stripe.isMockMode(),
+      };
+    }
+
+    if (
+      companyHasMockCarrierConnect({ stripeConnectAccountId: accountId }) &&
+      !this.stripe.isMockMode()
+    ) {
+      return {
+        connected: false,
+        accountId,
+        payoutsEnabled: false,
+        requirementsDue: true,
+        bankAccount: null,
+        mock: false,
+      };
+    }
+
+    const summary = await this.stripe.getConnectPayoutSummary(accountId);
+    if (company.stripeConnectPayoutsEnabled !== summary.payoutsEnabled) {
+      await this.prisma.company.update({
+        where: { id: company.id },
+        data: { stripeConnectPayoutsEnabled: summary.payoutsEnabled },
+      });
+    }
+
+    return {
+      connected: true,
+      accountId,
+      payoutsEnabled: summary.payoutsEnabled,
+      requirementsDue: summary.requirementsDue,
+      bankAccount: summary.bankAccount,
+      mock: summary.mock,
+    };
+  }
+
+  /**
+   * Single-use Stripe management URL so a carrier can update their payout bank
+   * account (BSB / account number) or resolve requirements without creating a
+   * new Connected Account.
+   */
+  async createConnectManageLink(
+    principal: AuthenticatedPrincipal,
+    options?: { returnPath?: string },
+  ) {
+    this.ensureDatabase();
+    const user = await this.requireCarrier(principal);
+    const company = user.company!;
+
+    const ALLOWED_RETURN_PATHS = new Set([
+      '/account',
+      '/carrier/earnings',
+      '/carrier/onboarding',
+    ]);
+    const safePath =
+      options?.returnPath && ALLOWED_RETURN_PATHS.has(options.returnPath)
+        ? options.returnPath
+        : '/account';
+    const adminOrigin = this.config
+      .get('ADMIN_APP_URL', { infer: true })
+      .replace(/\/$/, '');
+    const returnUrl = `${adminOrigin}${safePath}?connect=return`;
+    const refreshUrl = returnUrl;
+
+    const existingAccountId = company.stripeConnectAccountId;
+    const needsFreshSetup =
+      !existingAccountId ||
+      (companyHasMockCarrierConnect({ stripeConnectAccountId: existingAccountId }) &&
+        !this.stripe.isMockMode());
+
+    if (needsFreshSetup) {
+      const setup = await this.createConnectOnboarding(principal, {
+        refreshUrl,
+        returnUrl,
+      });
+      return {
+        accountId: setup.accountId,
+        url: setup.url,
+        kind: 'account_onboarding' as const,
+        mock: setup.mock,
+      };
+    }
+
+    const link = await this.stripe.createConnectManageLink({
+      accountId: existingAccountId,
+      payoutsEnabled: company.stripeConnectPayoutsEnabled,
+      refreshUrl,
+      returnUrl,
+    });
+
+    await this.audit.recordPlatform({
+      action: AuditAction.CARRIER_CONNECT_MANAGE_OPENED,
+      actorUserId: user.id,
+      entityType: 'Company',
+      entityId: company.id,
+      metadata: {
+        accountId: existingAccountId,
+        kind: link.kind,
+        mock: link.mock,
+      },
+    });
+
+    return {
+      accountId: existingAccountId,
+      url: link.url,
+      kind: link.kind,
+      mock: link.mock,
+    };
+  }
+
   /** Fleet may grow after bid-eligible; blocked only when suspended/rejected. */
   private assertCanManageFleet(company: { status: CompanyStatus }) {
     if (
@@ -2346,6 +2473,40 @@ export class CarrierService {
         safetyReset: driverChanged,
       },
     });
+
+    if (driverChanged && this.inbox) {
+      const jobLabel = updated.job?.title || updated.jobId.slice(0, 8);
+      const vehicleLabel = updated.vehicle?.registration ?? 'Vehicle';
+      const tripId = updated.trip?.id ?? assignment.trip.id;
+      const [newDriverUserId, prevDriverUserId] = await Promise.all([
+        this.inbox.userIdForDriver(driver.id),
+        this.inbox.userIdForDriver(previousDriverId),
+      ]);
+      if (newDriverUserId) {
+        void this.inbox.notifyUsersLocalized({
+          userIds: [newDriverUserId],
+          type: NotificationType.TRIP_ASSIGNED,
+          titleKey: 'trip.assigned.title',
+          bodyKey: 'trip.assigned.body',
+          vars: { jobTitle: jobLabel, vehicle: vehicleLabel },
+          href: `/trips/${tripId}`,
+          entityType: 'Trip',
+          entityId: tripId,
+        });
+      }
+      if (prevDriverUserId) {
+        void this.inbox.notifyUsersLocalized({
+          userIds: [prevDriverUserId],
+          type: NotificationType.TRIP_REASSIGNED,
+          titleKey: 'trip.reassigned.title',
+          bodyKey: 'trip.reassigned.body',
+          vars: { jobTitle: jobLabel },
+          href: `/trips/${tripId}`,
+          entityType: 'Trip',
+          entityId: tripId,
+        });
+      }
+    }
 
     return {
       id: updated.id,

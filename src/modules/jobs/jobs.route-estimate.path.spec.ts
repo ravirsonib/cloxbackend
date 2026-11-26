@@ -61,4 +61,57 @@ describe('JobsService previewRoute', () => {
     });
     expect(route.billableHours).toBe(4);
   });
+
+  it('uses Valhalla route when available and returns encodedPolyline', async () => {
+    const valhalla = {
+      isEnabled: true,
+      getRoute: jest.fn().mockResolvedValue({
+        encodedPolyline: 'abc_polyline6',
+        distanceKm: 23.45,
+        durationMin: 28,
+      }),
+    };
+    const service = new JobsService(
+      { isConnected: () => true } as never,
+      { recordPlatform: jest.fn() } as never,
+      { getBookingEligibility: jest.fn() } as never,
+      { acceptProposal: jest.fn() } as never,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      valhalla as never,
+    );
+    const route = await service.previewRoute({ pricingModel: 'PER_KM', stops });
+    expect(valhalla.getRoute).toHaveBeenCalledTimes(1);
+    expect(route.mock).toBe(false);
+    expect(route.routeSource).toBe('valhalla');
+    expect(route.encodedPolyline).toBe('abc_polyline6');
+    expect(route.distanceKm).toBe(23.5);
+    expect(route.drivingMinutes).toBe(28);
+  });
+
+  it('falls back to mock route when Valhalla returns null', async () => {
+    const valhalla = {
+      isEnabled: true,
+      getRoute: jest.fn().mockResolvedValue(null),
+    };
+    const service = new JobsService(
+      { isConnected: () => true } as never,
+      { recordPlatform: jest.fn() } as never,
+      { getBookingEligibility: jest.fn() } as never,
+      { acceptProposal: jest.fn() } as never,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      valhalla as never,
+    );
+    const route = await service.previewRoute({ pricingModel: 'PER_KM', stops });
+    expect(valhalla.getRoute).toHaveBeenCalledTimes(1);
+    expect(route.mock).toBe(true);
+    expect(route.routeSource).toBe('mock');
+    expect(route.encodedPolyline).toBeNull();
+    expect(route.distanceKm).toBeGreaterThan(0);
+  });
 });

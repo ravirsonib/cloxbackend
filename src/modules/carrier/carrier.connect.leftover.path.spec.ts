@@ -17,6 +17,8 @@ describe('CarrierService connect leftover paths', () => {
   const stripe = {
     createConnectAccount: jest.fn(),
     createAccountLink: jest.fn(),
+    createConnectManageLink: jest.fn(),
+    getConnectPayoutSummary: jest.fn(),
     retrieveConnectAccount: jest.fn(),
     isMockMode: jest.fn().mockReturnValue(true),
   };
@@ -141,5 +143,123 @@ describe('CarrierService connect leftover paths', () => {
     await expect(
       makeService(prisma).confirmConnect(carrierPrincipal),
     ).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('getConnectStatus returns masked bank summary and syncs payoutsEnabled drift', async () => {
+    stripe.getConnectPayoutSummary.mockResolvedValue({
+      id: 'acct_1',
+      payoutsEnabled: false,
+      chargesEnabled: true,
+      requirementsDue: true,
+      bankAccount: {
+        bankName: 'Commonwealth Bank',
+        last4: '4321',
+        routingNumber: '062-000',
+        currency: 'aud',
+      },
+      mock: false,
+    });
+    const prisma = {
+      isConnected: () => true,
+      user: {
+        findUnique: jest.fn().mockResolvedValue(
+          carrierUser({
+            stripeConnectAccountId: 'acct_1',
+            stripeConnectPayoutsEnabled: true,
+          }),
+        ),
+      },
+      company: { update: jest.fn().mockResolvedValue({}) },
+    };
+
+    const res = await makeService(prisma).getConnectStatus(carrierPrincipal);
+    expect(res).toMatchObject({
+      connected: true,
+      accountId: 'acct_1',
+      payoutsEnabled: false,
+      requirementsDue: true,
+      bankAccount: {
+        bankName: 'Commonwealth Bank',
+        last4: '4321',
+        routingNumber: '062-000',
+        currency: 'aud',
+      },
+    });
+    expect(prisma.company.update).toHaveBeenCalledWith({
+      where: { id: 'co-c' },
+      data: { stripeConnectPayoutsEnabled: false },
+    });
+  });
+
+  it('createConnectManageLink returns Express dashboard link, audits, and sanitizes returnPath', async () => {
+    stripe.createConnectManageLink.mockResolvedValue({
+      url: 'https://connect.stripe.com/express/login_123',
+      kind: 'dashboard',
+      mock: false,
+    });
+    const prisma = {
+      isConnected: () => true,
+      user: {
+        findUnique: jest.fn().mockResolvedValue(
+          carrierUser({
+            stripeConnectAccountId: 'acct_1',
+            stripeConnectPayoutsEnabled: true,
+          }),
+        ),
+      },
+    };
+
+    const res = await makeService(prisma).createConnectManageLink(carrierPrincipal, {
+      returnPath: 'https://evil.example/phish',
+    });
+
+    expect(stripe.createConnectManageLink).toHaveBeenCalledWith({
+      accountId: 'acct_1',
+      payoutsEnabled: true,
+      refreshUrl: 'http://localhost:5174/account?connect=return',
+      returnUrl: 'http://localhost:5174/account?connect=return',
+    });
+    expect(audit.recordPlatform).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'carrier.connect_manage_opened',
+        entityId: 'co-c',
+      }),
+    );
+    expect(res).toEqual({
+      accountId: 'acct_1',
+      url: 'https://connect.stripe.com/express/login_123',
+      kind: 'dashboard',
+      mock: false,
+    });
+  });
+
+  it('createConnectManageLink falls back to onboarding when company has no Connect account yet', async () => {
+    stripe.createConnectAccount.mockResolvedValue({ id: 'acct_fresh', mock: true });
+    stripe.createAccountLink.mockResolvedValue({
+      url: 'https://connect.stripe.test/onboard',
+      mock: true,
+    });
+    const prisma = {
+      isConnected: () => true,
+      user: {
+        findUnique: jest.fn().mockResolvedValue(
+          carrierUser({
+            stripeConnectAccountId: null,
+            stripeConnectPayoutsEnabled: false,
+          }),
+        ),
+      },
+      company: { update: jest.fn().mockResolvedValue({}) },
+    };
+
+    const res = await makeService(prisma).createConnectManageLink(carrierPrincipal, {
+      returnPath: '/carrier/earnings',
+    });
+    expect(res).toEqual({
+      accountId: 'acct_fresh',
+      url: 'https://connect.stripe.test/onboard',
+      kind: 'account_onboarding',
+      mock: true,
+    });
   });
 });

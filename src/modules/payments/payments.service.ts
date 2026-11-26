@@ -701,6 +701,15 @@ export class PaymentsService {
       },
     });
 
+    if (params.kind === SurchargeKind.WAITING && this.inbox) {
+      void this.notifyDetentionStartedSafe({
+        jobId: params.jobId,
+        tripId: params.tripId,
+        jobTitle: job.title ?? '',
+        senderCompanyId: job.senderCompanyId,
+      });
+    }
+
     if (!chargeNow) {
       return this.mapSurcharge(created.surcharge);
     }
@@ -866,6 +875,14 @@ export class PaymentsService {
         paymentEventId: pe.id,
         paymentIntentId: pi.id,
         source: pi.mock ? 'mock' : 'pi_immediate',
+      });
+    } else if (peStatus === PaymentEventStatus.REQUIRES_ACTION && this.inbox) {
+      void this.notifySurchargeActionRequiredSafe({
+        jobId: surcharge.jobId,
+        tripId: surcharge.tripId,
+        jobTitle: surcharge.job?.title ?? '',
+        senderCompanyId: surcharge.job?.senderCompanyId ?? null,
+        amountIncGstCents: surcharge.amountIncGstCents,
       });
     }
 
@@ -1591,7 +1608,8 @@ export class PaymentsService {
         vehicle: { select: { registration: true, label: true } },
         driver: {
           select: {
-            user: { select: { email: true, name: true } },
+            userId: true,
+            user: { select: { id: true, email: true, name: true } },
           },
         },
         carrierCompany: {
@@ -1607,13 +1625,15 @@ export class PaymentsService {
       },
     });
     if (locked) {
-      await this.trips.ensureTripForAssignment(locked.id);
+      const ensuredTrip = await this.trips.ensureTripForAssignment(locked.id);
       await this.notifyAssignmentLockedAfterPay({
         jobId: pe.jobId,
+        tripId: ensuredTrip?.id ?? null,
         jobTitle: locked.job?.title ?? '',
         amountIncGstCents: pe.amountIncGstCents,
         vehicleLabel:
           locked.vehicle?.registration ?? locked.vehicle?.label ?? 'Vehicle',
+        driverUserId: locked.driver?.user?.id ?? locked.driver?.userId ?? null,
         driverName: locked.driver?.user.name ?? locked.driver?.user.email ?? 'Driver',
         driverEmail: locked.driver?.user.email ?? null,
         carrierUserIds: locked.carrierCompany?.users?.map((u) => u.id) ?? [],
@@ -1782,9 +1802,11 @@ export class PaymentsService {
 
   private async notifyAssignmentLockedAfterPay(params: {
     jobId: string;
+    tripId?: string | null;
     jobTitle: string;
     amountIncGstCents: number;
     vehicleLabel: string;
+    driverUserId?: string | null;
     driverName: string;
     driverEmail: string | null;
     carrierUserIds: string[];
@@ -1807,6 +1829,21 @@ export class PaymentsService {
         href: `/jobs/${params.jobId}`,
         entityType: 'Job',
         entityId: params.jobId,
+      });
+    }
+    if (this.inbox && params.driverUserId) {
+      void this.inbox.notifyUsersLocalized({
+        userIds: [params.driverUserId],
+        type: NotificationType.TRIP_ASSIGNED,
+        titleKey: 'trip.assigned.title',
+        bodyKey: 'trip.assigned.body',
+        vars: {
+          jobTitle: jobLabel,
+          vehicle: params.vehicleLabel,
+        },
+        href: params.tripId ? `/trips/${params.tripId}` : `/jobs/${params.jobId}`,
+        entityType: params.tripId ? 'Trip' : 'Job',
+        entityId: params.tripId ?? params.jobId,
       });
     }
     if (!this.notifications) return;
@@ -1867,6 +1904,88 @@ export class PaymentsService {
     } catch (err) {
       this.logger.warn(
         `Expired-bid notify failed for job ${params.jobId}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+  }
+
+  private async notifyDetentionStartedSafe(params: {
+    jobId: string;
+    tripId: string;
+    jobTitle: string;
+    senderCompanyId: string | null;
+  }) {
+    if (!this.inbox) return;
+    try {
+      const userIds: string[] = [];
+      if (params.senderCompanyId) {
+        const senderIds = await this.inbox.userIdsForCompanies({
+          companyIds: [params.senderCompanyId],
+          roles: [PlatformRole.SENDER],
+        });
+        userIds.push(...senderIds);
+      }
+      if (this.prisma.trip?.findUnique) {
+        const tripRow = await this.prisma.trip.findUnique({
+          where: { id: params.tripId },
+          select: {
+            assignment: { select: { driver: { select: { userId: true } } } },
+          },
+        });
+        const driverUserId = tripRow?.assignment?.driver?.userId;
+        if (driverUserId) userIds.push(driverUserId);
+      }
+      if (userIds.length === 0) return;
+      const jobLabel = params.jobTitle || params.jobId.slice(0, 8);
+      await this.inbox.notifyUsersLocalized({
+        userIds,
+        type: NotificationType.DETENTION_STARTED,
+        titleKey: 'surcharge.detention.title',
+        bodyKey: 'surcharge.detention.body',
+        vars: { jobTitle: jobLabel },
+        href: `/jobs/${params.jobId}`,
+        entityType: 'Trip',
+        entityId: params.tripId,
+      });
+    } catch (err) {
+      this.logger.warn(
+        `Detention notify failed for trip ${params.tripId}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+  }
+
+  private async notifySurchargeActionRequiredSafe(params: {
+    jobId: string;
+    tripId: string;
+    jobTitle: string;
+    senderCompanyId: string | null;
+    amountIncGstCents: number;
+  }) {
+    if (!this.inbox || !params.senderCompanyId) return;
+    try {
+      const senderIds = await this.inbox.userIdsForCompanies({
+        companyIds: [params.senderCompanyId],
+        roles: [PlatformRole.SENDER],
+      });
+      if (senderIds.length === 0) return;
+      const jobLabel = params.jobTitle || params.jobId.slice(0, 8);
+      const amount = (params.amountIncGstCents / 100).toFixed(2);
+      await this.inbox.notifyUsersLocalized({
+        userIds: senderIds,
+        type: NotificationType.SURCHARGE_ACTION_REQUIRED,
+        titleKey: 'surcharge.actionRequired.title',
+        bodyKey: 'surcharge.actionRequired.body',
+        vars: { jobTitle: jobLabel, amount },
+        href: `/jobs/${params.jobId}`,
+        entityType: 'Trip',
+        entityId: params.tripId,
+      });
+    } catch (err) {
+      this.logger.warn(
+        `Surcharge action-required notify failed for trip ${params.tripId}: ${
           err instanceof Error ? err.message : String(err)
         }`,
       );
@@ -2032,6 +2151,34 @@ export class PaymentsService {
         paymentEventId: pi.metadata?.paymentEventId,
         paymentIntentId: pi.id,
       });
+    }
+
+    if (event.type === 'account.updated') {
+      const acct = event.data.object as {
+        id?: string;
+        payouts_enabled?: boolean;
+        capabilities?: { transfers?: string };
+      };
+      if (acct.id) {
+        const company = await this.prisma.company.findFirst({
+          where: { stripeConnectAccountId: acct.id },
+          select: { id: true, stripeConnectPayoutsEnabled: true },
+        });
+        if (company) {
+          const nextEnabled = Boolean(
+            acct.payouts_enabled || acct.capabilities?.transfers === 'active',
+          );
+          if (company.stripeConnectPayoutsEnabled !== nextEnabled) {
+            await this.prisma.company.update({
+              where: { id: company.id },
+              data: { stripeConnectPayoutsEnabled: nextEnabled },
+            });
+            this.logger.log(
+              `Synced Connect payoutsEnabled=${nextEnabled} for company ${company.id} (${acct.id}) via account.updated webhook`,
+            );
+          }
+        }
+      }
     }
 
     // Record only after successful processing so failures remain retryable.

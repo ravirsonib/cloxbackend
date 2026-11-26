@@ -55,6 +55,7 @@ import { InAppNotificationsService } from '../notifications/in-app-notifications
 import { NotificationsService } from '../notifications/notifications.service';
 import { NhvrService } from '../nhvr/nhvr.service';
 import { RealtimeGateway } from '../geolocation/realtime.gateway';
+import { ValhallaClientService } from '../geolocation/valhalla-client.service';
 import { PaymentsService } from '../payments/payments.service';
 import {
   DEFAULT_GEOFENCE_POLICY,
@@ -108,6 +109,7 @@ export class TripsService {
     /** EWD diary sync on break (NhvrModule). Optional so legacy path specs keep working. */
     @Optional() private readonly nhvr?: NhvrService,
     @Optional() private readonly realtimeGateway?: RealtimeGateway,
+    @Optional() private readonly valhalla?: ValhallaClientService,
   ) {}
 
   private ensureDatabase() {
@@ -2457,11 +2459,14 @@ export class TripsService {
       user.id,
     ).catch(() => undefined);
 
-    // Broadcast real-time location via Socket.io
-    if (this.realtimeGateway) {
+    // Broadcast real-time location via Socket.io (suppressed while driver is on break)
+    if (this.realtimeGateway && !trip.onBreak) {
       try {
         const vehicleId = trip.assignment?.vehicleId ?? undefined;
         const carrierCompanyId = trip.assignment?.carrierCompanyId ?? undefined;
+        const snapped = this.valhalla?.isEnabled
+          ? await this.valhalla.snapToRoad(input.lat, input.lng)
+          : null;
         this.realtimeGateway.emitVehicleLocation(
           {
             tripId: trip.id,
@@ -2469,10 +2474,16 @@ export class TripsService {
             vehicleId,
             lat: input.lat,
             lng: input.lng,
+            ...(snapped ? { snappedLat: snapped.lat, snappedLng: snapped.lng } : {}),
             timestamp: sample.recordedAt.toISOString(),
           },
           carrierCompanyId,
         );
+        void this.emitLiveEtaUpdate(
+          trip,
+          { lat: snapped?.lat ?? input.lat, lng: snapped?.lng ?? input.lng },
+          sample.recordedAt,
+        ).catch(() => undefined);
       } catch (err) {
         this.logger.warn({ err }, 'Failed to emit realtime vehicle location');
       }
@@ -2524,6 +2535,70 @@ export class TripsService {
     }
 
     const samples = trip.onBreak ? [] : trip.locations;
+    const latest = samples[0]
+      ? {
+          lat: Number(samples[0].lat),
+          lng: Number(samples[0].lng),
+          recordedAt: samples[0].recordedAt,
+        }
+      : null;
+
+    let route: {
+      encodedPolyline: string;
+      distanceKm: number;
+      durationMinutes: number;
+      source: 'valhalla';
+    } | null = null;
+    let etaMinutes: number | null = null;
+    let distanceKmRemaining: number | null = null;
+    let nextStopId: string | null = null;
+
+    if (!trip.onBreak) {
+      const remainingStops = this.getRemainingTripStops(trip.job.stops, trip.stopProgress);
+      nextStopId = remainingStops[0]?.id ?? null;
+
+      const plannedStops = trip.job.stops
+        .filter((s) => s.lat != null && s.lng != null)
+        .map((s) => ({ lat: Number(s.lat), lng: Number(s.lng) }));
+
+      const waypoints = latest
+        ? [{ lat: latest.lat, lng: latest.lng }, ...remainingStops.map((s) => ({ lat: s.lat, lng: s.lng }))]
+        : plannedStops;
+
+      if (waypoints.length >= 2) {
+        const valRoute = this.valhalla?.isEnabled
+          ? await this.valhalla.getRoute(waypoints)
+          : null;
+        if (valRoute && valRoute.encodedPolyline) {
+          const roundedKm = Math.round(valRoute.distanceKm * 10) / 10;
+          route = {
+            encodedPolyline: valRoute.encodedPolyline,
+            distanceKm: roundedKm,
+            durationMinutes: valRoute.durationMin,
+            source: 'valhalla',
+          };
+          etaMinutes = valRoute.durationMin;
+          distanceKmRemaining = roundedKm;
+        } else {
+          let totalMeters = 0;
+          for (let i = 0; i < waypoints.length - 1; i += 1) {
+            totalMeters += haversineMeters(
+              waypoints[i].lat,
+              waypoints[i].lng,
+              waypoints[i + 1].lat,
+              waypoints[i + 1].lng,
+            );
+          }
+          const distKm = Math.round((totalMeters / 1000) * 10) / 10;
+          distanceKmRemaining = distKm;
+          etaMinutes = distKm > 0 ? Math.max(1, Math.ceil((distKm / 40) * 60)) : 0;
+        }
+      } else if (remainingStops.length === 0) {
+        etaMinutes = 0;
+        distanceKmRemaining = 0;
+      }
+    }
+
     return {
       visible: true,
       tripId: trip.id,
@@ -2535,6 +2610,7 @@ export class TripsService {
         id: trip.jobId,
         title: trip.job.title,
         stops: trip.job.stops.map((s) => ({
+          id: s.id,
           sequence: s.sequence,
           stopType: s.stopType,
           suburb: s.suburb,
@@ -2547,19 +2623,101 @@ export class TripsService {
         lng: Number(l.lng),
         recordedAt: l.recordedAt,
       })),
-      latest: samples[0]
-        ? {
-            lat: Number(samples[0].lat),
-            lng: Number(samples[0].lng),
-            recordedAt: samples[0].recordedAt,
-          }
-        : null,
+      latest,
+      route,
+      etaMinutes,
+      distanceKmRemaining,
+      nextStopId,
       stopsProgress: this.mapStopProgress(trip.stopProgress),
       surcharges: this.mapSurcharges(trip.surcharges),
       taxInvoiceStorageKey: trip.taxInvoiceStorageKey,
       runSheetStorageKey: trip.runSheetStorageKey,
       podStorageKey: trip.podStorageKey,
     };
+  }
+
+  private getRemainingTripStops(
+    stops: Array<{
+      id: string;
+      sequence: number;
+      stopType: string;
+      lat: unknown;
+      lng: unknown;
+    }>,
+    stopProgress: Array<{
+      jobStopId: string;
+      exitedAt: Date | null;
+      podStatus?: string | null;
+    }>,
+  ): Array<{ id: string; sequence: number; stopType: string; lat: number; lng: number }> {
+    const progressByStop = new Map(stopProgress.map((p) => [p.jobStopId, p]));
+    return stops
+      .slice()
+      .sort((a, b) => a.sequence - b.sequence)
+      .filter((s) => {
+        if (s.lat == null || s.lng == null) return false;
+        const prog = progressByStop.get(s.id);
+        if (!prog) return true;
+        if (s.stopType === 'DROPOFF') {
+          return prog.podStatus !== 'FINALIZED' && prog.exitedAt == null;
+        }
+        return prog.exitedAt == null;
+      })
+      .map((s) => ({
+        id: s.id,
+        sequence: s.sequence,
+        stopType: s.stopType,
+        lat: Number(s.lat),
+        lng: Number(s.lng),
+      }));
+  }
+
+  private async emitLiveEtaUpdate(
+    trip: {
+      id: string;
+      jobId: string;
+      job?: {
+        stops?: Array<{
+          id: string;
+          sequence: number;
+          stopType: string;
+          lat: unknown;
+          lng: unknown;
+        }>;
+      } | null;
+      stopProgress?: Array<{
+        jobStopId: string;
+        exitedAt: Date | null;
+        podStatus?: string | null;
+      }>;
+    },
+    origin: { lat: number; lng: number },
+    recordedAt: Date,
+  ): Promise<void> {
+    if (!this.realtimeGateway) return;
+    const stops = trip.job?.stops ?? [];
+    const remaining = this.getRemainingTripStops(stops, trip.stopProgress ?? []);
+    const nextStop = remaining[0];
+    if (!nextStop) return;
+
+    const etaMinutes = this.valhalla?.isEnabled
+      ? await this.valhalla.etaMinutes(origin, { lat: nextStop.lat, lng: nextStop.lng })
+      : Math.max(
+          1,
+          Math.ceil(
+            (haversineMeters(origin.lat, origin.lng, nextStop.lat, nextStop.lng) / 1000 / 40) * 60,
+          ),
+        );
+
+    this.realtimeGateway.emitEtaUpdate(
+      {
+        jobId: trip.jobId,
+        nextStopId: nextStop.id,
+        etaMinutes,
+        timestamp: recordedAt.toISOString(),
+      },
+      trip.id,
+    );
   }
 
   private storageRoot(): string {
@@ -2853,6 +3011,43 @@ export class TripsService {
       sentTo = mail.sentTo;
     } catch {
       // Best-effort email after state is recorded.
+    }
+
+    if (this.inbox && parties.jobId) {
+      try {
+        const tripRow = await this.prisma.trip.findUnique({
+          where: { id: params.tripId },
+          select: { job: { select: { senderCompanyId: true } } },
+        });
+        const senderCompanyId = tripRow?.job?.senderCompanyId;
+        if (senderCompanyId) {
+          const senderUserIds = await this.inbox.userIdsForCompanies({
+            companyIds: [senderCompanyId],
+            roles: [PlatformRole.SENDER],
+          });
+          if (senderUserIds.length > 0) {
+            const jobLabel = parties.jobTitle || parties.jobId.slice(0, 8);
+            const location = parties.dropSuburb || 'your drop-off location';
+            const etaSuffix = params.etaLabel ? ` (ETA ${params.etaLabel})` : '';
+            void this.inbox.notifyUsersLocalized({
+              userIds: senderUserIds,
+              type: NotificationType.TRIP_APPROACHING,
+              titleKey: 'trip.approaching.title',
+              bodyKey: 'trip.approaching.body',
+              vars: {
+                jobTitle: jobLabel,
+                location,
+                etaSuffix,
+              },
+              href: `/jobs/${parties.jobId}`,
+              entityType: 'Trip',
+              entityId: params.tripId,
+            });
+          }
+        }
+      } catch {
+        // Best-effort approaching inbox/push notification.
+      }
     }
 
     await this.audit.recordPlatform({

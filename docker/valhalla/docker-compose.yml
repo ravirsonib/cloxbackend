@@ -1,0 +1,50 @@
+# =============================================================================
+# Valhalla Open-Source Routing Engine — CLOX Self-Hosted
+# Australia OSM tiles (all vehicle profiles: van, rigid, semi, truck)
+#
+# FIRST RUN: tile build takes ~10–15 min from Geofabrik OSM download.
+# Subsequent restarts are instant (tiles cached in named volume).
+#
+# Usage:
+#   cd backend/docker/valhalla
+#   docker compose -f docker-compose.valhalla.yml up -d
+#
+# Health: GET http://localhost:8002/status
+# =============================================================================
+services:
+  valhalla:
+    image: ghcr.io/gis-ops/docker-valhalla/valhalla:latest
+    container_name: clox_valhalla
+    restart: unless-stopped
+    ports:
+      - "8002:8002"
+    volumes:
+      - valhalla_tiles:/custom_files
+      - ./valhalla.json:/valhalla.json:ro
+    environment:
+      # Australia-Oceania OSM — valid direct URL
+      - tile_urls=https://download.geofabrik.de/australia-oceania/australia-oceania-latest.osm.pbf
+      - serve_tiles=True
+      - build_admins=True
+      - build_time_zones=True
+      - force_rebuild=False        # set True to force tile rebuild on restart
+      - use_tiles_ignore_pbf=False
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8002/status"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 300s  # allow tile build time on first run
+    networks:
+      - clox_internal
+
+networks:
+  clox_internal:
+    name: clox_internal
+    external: true  # shared with main docker-compose (clox-api + postgres + redis)
+
+volumes:
+  valhalla_tiles:
+    name: clox_valhalla_tiles
+    # Persist across restarts — do NOT wipe this unless forcing a full rebuild
+

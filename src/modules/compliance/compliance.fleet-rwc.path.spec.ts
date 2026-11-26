@@ -5,6 +5,7 @@ import {
   ComplianceCaseStatus,
   ComplianceCaseType,
   ComplianceDocStatus,
+  ComplianceDocType,
   DriverStatus,
   VehicleStatus,
 } from '@prisma/client';
@@ -549,5 +550,291 @@ describe('ComplianceService CARRIER_FLEET_RWC + CARRIER_DRIVER_LICENCE', () => {
     // Crucial: CARRIER_KYB case itself and company MUST NOT be approved yet!
     expect(tx.complianceCase.update).not.toHaveBeenCalled();
     expect(tx.company.update).not.toHaveBeenCalled();
+  });
+
+  it('approving 1 of 2 pending documents for a vehicle keeps vehicle in PENDING_REVIEW', async () => {
+    const tx = {
+      complianceDocument: {
+        updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+        findMany: jest.fn().mockResolvedValue([
+          {
+            vehicleId: 'veh-semi',
+            docType: ComplianceDocType.RWC,
+            vehicleUnitId: 'unit-powered',
+            status: ComplianceDocStatus.APPROVED,
+          },
+          {
+            vehicleId: 'veh-semi',
+            docType: ComplianceDocType.RWC,
+            vehicleUnitId: 'unit-trailer-1',
+            status: ComplianceDocStatus.UPLOADED,
+          },
+        ]),
+        count: jest.fn().mockResolvedValue(1),
+      },
+      vehicle: {
+        findMany: jest.fn(),
+        updateMany: jest.fn(),
+      },
+      driver: { updateMany: jest.fn() },
+      complianceCase: { update: jest.fn() },
+      company: { update: jest.fn() },
+    };
+
+    const prisma = {
+      isConnected: () => true,
+      complianceCase: {
+        findUnique: jest.fn().mockResolvedValue({
+          id: 'case-semi',
+          caseType: ComplianceCaseType.CARRIER_FLEET_RWC,
+          status: ComplianceCaseStatus.OPEN,
+          companyId: 'co-1',
+          region: { code: 'VIC' },
+          company: {
+            id: 'co-1',
+            type: CompanyType.CARRIER,
+            status: CompanyStatus.BID_ELIGIBLE,
+            email: 'c@yopmail.com',
+            legalName: 'Carrier',
+            homeRegion: { code: 'VIC' },
+            referredByAdminUserId: null,
+          },
+          documents: [
+            {
+              id: 'doc-powered',
+              docType: ComplianceDocType.RWC,
+              vehicleId: 'veh-semi',
+              vehicleUnitId: 'unit-powered',
+              status: ComplianceDocStatus.UPLOADED,
+            },
+            {
+              id: 'doc-trailer',
+              docType: ComplianceDocType.RWC,
+              vehicleId: 'veh-semi',
+              vehicleUnitId: 'unit-trailer-1',
+              status: ComplianceDocStatus.UPLOADED,
+            },
+          ],
+        }),
+      },
+      $transaction: jest.fn().mockImplementation((cb) => cb(tx)),
+    };
+
+    const result = await makeService(prisma).approve(superAdmin, 'case-semi', {
+      documentId: 'doc-powered',
+    });
+
+    expect(result).toMatchObject({
+      id: 'case-semi',
+      status: ComplianceCaseStatus.OPEN,
+    });
+    expect(tx.vehicle.updateMany).not.toHaveBeenCalled();
+    expect(tx.complianceCase.update).not.toHaveBeenCalled();
+  });
+
+  it('approving the final pending document activates multi-unit vehicle only when all required unit RWCs are approved', async () => {
+    const futureExpiry = new Date(Date.now() + 90 * 86_400_000);
+    const tx = {
+      complianceDocument: {
+        updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+        findMany: jest
+          .fn()
+          // 1st call: case documents for veh-semi (includes an older REJECTED doc replaced by APPROVED)
+          .mockResolvedValueOnce([
+            {
+              vehicleId: 'veh-semi',
+              docType: ComplianceDocType.RWC,
+              vehicleUnitId: 'unit-trailer-1',
+              status: ComplianceDocStatus.APPROVED,
+            },
+            {
+              vehicleId: 'veh-semi',
+              docType: ComplianceDocType.RWC,
+              vehicleUnitId: 'unit-trailer-1',
+              status: ComplianceDocStatus.REJECTED,
+            },
+            {
+              vehicleId: 'veh-semi',
+              docType: ComplianceDocType.RWC,
+              vehicleUnitId: 'unit-powered',
+              status: ComplianceDocStatus.APPROVED,
+            },
+          ])
+          // 2nd call: RWC docs for multi-unit completeness
+          .mockResolvedValueOnce([
+            {
+              vehicleId: 'veh-semi',
+              vehicleUnitId: 'unit-trailer-1',
+              status: ComplianceDocStatus.APPROVED,
+              expiresAt: futureExpiry,
+            },
+            {
+              vehicleId: 'veh-semi',
+              vehicleUnitId: 'unit-powered',
+              status: ComplianceDocStatus.APPROVED,
+              expiresAt: futureExpiry,
+            },
+          ]),
+        count: jest.fn().mockResolvedValue(0),
+      },
+      vehicle: {
+        findMany: jest.fn().mockResolvedValue([
+          {
+            id: 'veh-semi',
+            vehicleClass: 'SEMI',
+            combinationConfig: 'SEMI',
+            registration: 'PM-01',
+            units: [
+              { id: 'unit-powered', role: 'POWERED', registration: 'PM-01' },
+              { id: 'unit-trailer-1', role: 'TRAILER_1', registration: 'TR-01' },
+            ],
+          },
+        ]),
+        updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+      },
+      driver: { updateMany: jest.fn() },
+      complianceCase: { update: jest.fn() },
+      company: { update: jest.fn() },
+    };
+
+    const prisma = {
+      isConnected: () => true,
+      complianceCase: {
+        findUnique: jest.fn().mockResolvedValue({
+          id: 'case-semi',
+          caseType: ComplianceCaseType.CARRIER_FLEET_RWC,
+          status: ComplianceCaseStatus.OPEN,
+          companyId: 'co-1',
+          region: { code: 'VIC' },
+          company: {
+            id: 'co-1',
+            type: CompanyType.CARRIER,
+            status: CompanyStatus.BID_ELIGIBLE,
+            email: 'c@yopmail.com',
+            legalName: 'Carrier',
+            homeRegion: { code: 'VIC' },
+            referredByAdminUserId: null,
+          },
+          documents: [
+            {
+              id: 'doc-powered',
+              docType: ComplianceDocType.RWC,
+              vehicleId: 'veh-semi',
+              vehicleUnitId: 'unit-powered',
+              status: ComplianceDocStatus.APPROVED,
+            },
+            {
+              id: 'doc-trailer',
+              docType: ComplianceDocType.RWC,
+              vehicleId: 'veh-semi',
+              vehicleUnitId: 'unit-trailer-1',
+              status: ComplianceDocStatus.UPLOADED,
+            },
+          ],
+        }),
+      },
+      $transaction: jest.fn().mockImplementation((cb) => cb(tx)),
+    };
+
+    const result = await makeService(prisma).approve(superAdmin, 'case-semi', {
+      documentId: 'doc-trailer',
+    });
+
+    expect(result).toMatchObject({
+      id: 'case-semi',
+      status: ComplianceCaseStatus.APPROVED,
+    });
+    expect(tx.vehicle.updateMany).toHaveBeenCalledWith({
+      where: {
+        id: { in: ['veh-semi'] },
+        companyId: 'co-1',
+        status: VehicleStatus.PENDING_REVIEW,
+      },
+      data: { status: VehicleStatus.ACTIVE },
+    });
+  });
+
+  it('SEMI with only prime-mover RWC approved (missing trailer RWC) stays PENDING_REVIEW', async () => {
+    const futureExpiry = new Date(Date.now() + 90 * 86_400_000);
+    const tx = {
+      complianceDocument: {
+        updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+        findMany: jest
+          .fn()
+          .mockResolvedValueOnce([
+            {
+              vehicleId: 'veh-semi',
+              docType: ComplianceDocType.RWC,
+              vehicleUnitId: 'unit-powered',
+              status: ComplianceDocStatus.APPROVED,
+            },
+          ])
+          .mockResolvedValueOnce([
+            {
+              vehicleId: 'veh-semi',
+              vehicleUnitId: 'unit-powered',
+              status: ComplianceDocStatus.APPROVED,
+              expiresAt: futureExpiry,
+            },
+          ]),
+        count: jest.fn().mockResolvedValue(0),
+      },
+      vehicle: {
+        findMany: jest.fn().mockResolvedValue([
+          {
+            id: 'veh-semi',
+            vehicleClass: 'SEMI',
+            combinationConfig: 'SEMI',
+            registration: 'PM-01',
+            units: [
+              { id: 'unit-powered', role: 'POWERED', registration: 'PM-01' },
+              { id: 'unit-trailer-1', role: 'TRAILER_1', registration: 'TR-01' },
+            ],
+          },
+        ]),
+        updateMany: jest.fn(),
+      },
+      driver: { updateMany: jest.fn() },
+      complianceCase: { update: jest.fn() },
+      company: { update: jest.fn() },
+    };
+
+    const prisma = {
+      isConnected: () => true,
+      complianceCase: {
+        findUnique: jest.fn().mockResolvedValue({
+          id: 'case-semi-partial',
+          caseType: ComplianceCaseType.CARRIER_FLEET_RWC,
+          status: ComplianceCaseStatus.OPEN,
+          companyId: 'co-1',
+          region: { code: 'VIC' },
+          company: {
+            id: 'co-1',
+            type: CompanyType.CARRIER,
+            status: CompanyStatus.BID_ELIGIBLE,
+            email: 'c@yopmail.com',
+            legalName: 'Carrier',
+            homeRegion: { code: 'VIC' },
+            referredByAdminUserId: null,
+          },
+          documents: [
+            {
+              id: 'doc-powered',
+              docType: ComplianceDocType.RWC,
+              vehicleId: 'veh-semi',
+              vehicleUnitId: 'unit-powered',
+              status: ComplianceDocStatus.UPLOADED,
+            },
+          ],
+        }),
+      },
+      $transaction: jest.fn().mockImplementation((cb) => cb(tx)),
+    };
+
+    await makeService(prisma).approve(superAdmin, 'case-semi-partial', {
+      documentId: 'doc-powered',
+    });
+
+    expect(tx.vehicle.updateMany).not.toHaveBeenCalled();
   });
 });

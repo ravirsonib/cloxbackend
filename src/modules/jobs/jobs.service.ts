@@ -54,12 +54,19 @@ import {
   isVehicleClassAdequate,
   recommendVehicleClass,
 } from './job-pricing.util';
-import { estimateRoute, orderStopsTspObjects, routeFromDistanceKm } from './routing.mock';
+import {
+  estimateRoute,
+  orderStopsTspObjects,
+  routeFromDistanceKm,
+  routeFromValhalla,
+  type RouteEstimate,
+} from './routing.mock';
 import {
   buildStopLoadProfile,
   classWeightKgFromProfile,
 } from './job-stop-load.util';
 import { RateFloorService } from '../rate-floor/rate-floor.service';
+import { ValhallaClientService } from '../geolocation/valhalla-client.service';
 
 /** Soft cap so one unverified sender cannot flood DRAFT rows. */
 const MAX_OPEN_DRAFT_JOBS_PER_SENDER = 10;
@@ -100,7 +107,41 @@ export class JobsService {
     @Optional() private readonly inbox?: InAppNotificationsService,
     @Optional() private readonly revenueSplit?: import('../settlements/revenue-split.service').RevenueSplitService,
     @Optional() private readonly rateFloor?: RateFloorService,
+    @Optional() private readonly valhalla?: ValhallaClientService,
   ) {}
+
+  /**
+   * Estimate route via self-hosted Valhalla (truck profile) with automatic fallback
+   * to mock haversine when Valhalla is unavailable or disabled.
+   */
+  private async resolveRouteForStops(params: {
+    stops: Array<{ lat: number; lng: number }>;
+    pricingModel: 'PER_KM' | 'HOURLY';
+    hourlyFloorHours: number;
+  }): Promise<RouteEstimate> {
+    if (this.valhalla?.isEnabled && params.stops.length >= 2) {
+      const valRoute = await this.valhalla.getRoute(params.stops);
+      if (valRoute && valRoute.distanceKm > 0) {
+        return routeFromValhalla({
+          distanceKm: valRoute.distanceKm,
+          drivingMinutes: valRoute.durationMin,
+          encodedPolyline: valRoute.encodedPolyline,
+          pricingModel: params.pricingModel,
+          hourlyFloorHours: params.hourlyFloorHours,
+        });
+      }
+    }
+    const mockRoute = estimateRoute({
+      stops: params.stops,
+      pricingModel: params.pricingModel,
+      hourlyFloorHours: params.hourlyFloorHours,
+    });
+    return {
+      ...mockRoute,
+      encodedPolyline: null,
+      routeSource: 'mock',
+    };
+  }
 
   /**
    * Sender-facing hard floor (Wave 1). Market quote is raised to floor when needed.
@@ -1005,7 +1046,7 @@ export class JobsService {
       input.pricingModel === 'HOURLY' && sortedStops.length > 2
         ? orderStopsTspObjects(sortedStops)
         : sortedStops;
-    const route = estimateRoute({
+    const route = await this.resolveRouteForStops({
       stops: orderedStops.map((s) => ({ lat: s.lat, lng: s.lng })),
       pricingModel: input.pricingModel,
       hourlyFloorHours: config.hourlyMinFloorHours,
@@ -1086,6 +1127,8 @@ export class JobsService {
       rateFloorIncGstCents: floored.rateFloorIncGstCents,
       rateFloorVersionId: floored.rateFloorVersionId,
       mock: route.mock,
+      routeSource: route.routeSource ?? (route.mock ? 'mock' : 'valhalla'),
+      encodedPolyline: route.encodedPolyline ?? null,
     };
   }
 
@@ -1207,7 +1250,7 @@ export class JobsService {
     const route =
       input.distanceKm != null && Number.isFinite(input.distanceKm) && input.distanceKm > 0
         ? routeFromDistanceKm(input.distanceKm, input.pricingModel, config.hourlyMinFloorHours)
-        : estimateRoute({
+        : await this.resolveRouteForStops({
             stops: persistedStops.map((s) => ({ lat: s.lat, lng: s.lng })),
             pricingModel: input.pricingModel,
             hourlyFloorHours: config.hourlyMinFloorHours,
@@ -1491,7 +1534,7 @@ export class JobsService {
     const route =
       input.distanceKm != null && Number.isFinite(input.distanceKm) && input.distanceKm > 0
         ? routeFromDistanceKm(input.distanceKm, input.pricingModel, config.hourlyMinFloorHours)
-        : estimateRoute({
+        : await this.resolveRouteForStops({
             stops: persistedStops.map((s) => ({ lat: s.lat, lng: s.lng })),
             pricingModel: input.pricingModel,
             hourlyFloorHours: config.hourlyMinFloorHours,

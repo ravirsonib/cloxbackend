@@ -5,12 +5,15 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  Optional,
   ServiceUnavailableException,
 } from '@nestjs/common';
 import {
   AssignmentStatus,
   DriverAvailabilityType,
   DriverScheduleStatus,
+  NotificationType,
+  PlatformRole,
   TripStatus,
   UserStatus,
 } from '@prisma/client';
@@ -27,6 +30,7 @@ import {
   calculateJobExecutionWindow,
   intervalsOverlap,
 } from '../matching/driver-schedule.util';
+import { InAppNotificationsService } from '../notifications/in-app-notifications.service';
 
 @Injectable()
 export class DriverScheduleService {
@@ -35,6 +39,7 @@ export class DriverScheduleService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
+    @Optional() private readonly inbox?: InAppNotificationsService,
   ) {}
 
   private ensureDatabase() {
@@ -189,6 +194,30 @@ export class DriverScheduleService {
         endAt: created.endAt.toISOString(),
       },
     });
+
+    if (this.inbox && driver.companyId) {
+      const carrierUserIds = await this.inbox.userIdsForCompanies({
+        companyIds: [driver.companyId],
+        roles: [PlatformRole.TRANSPORT_COMPANY],
+      });
+      if (carrierUserIds.length > 0) {
+        const windowLabel = `${created.startAt.toISOString().slice(0, 10)} → ${created.endAt.toISOString().slice(0, 10)}`;
+        void this.inbox.notifyUsersLocalized({
+          userIds: carrierUserIds,
+          type: NotificationType.SCHEDULE_REQUESTED,
+          titleKey: 'schedule.requested.title',
+          bodyKey: 'schedule.requested.body',
+          vars: {
+            driverName: user.name || user.email,
+            type: created.type.replace(/_/g, ' ').toLowerCase(),
+            window: windowLabel,
+          },
+          href: '/carrier/fleet/schedule',
+          entityType: 'DriverScheduleEntry',
+          entityId: created.id,
+        });
+      }
+    }
 
     return created;
   }
@@ -355,6 +384,38 @@ export class DriverScheduleService {
         rejectionReason: updated.rejectionReason,
       },
     });
+
+    if (
+      this.inbox &&
+      (updated.status === DriverScheduleStatus.APPROVED ||
+        updated.status === DriverScheduleStatus.REJECTED)
+    ) {
+      const driverUserId = await this.inbox.userIdForDriver(entry.driverId);
+      if (driverUserId) {
+        const isApproved = updated.status === DriverScheduleStatus.APPROVED;
+        const windowLabel = `${entry.startAt.toISOString().slice(0, 10)} → ${entry.endAt.toISOString().slice(0, 10)}`;
+        void this.inbox.notifyUsersLocalized({
+          userIds: [driverUserId],
+          type: isApproved
+            ? NotificationType.SCHEDULE_APPROVED
+            : NotificationType.SCHEDULE_REJECTED,
+          titleKey: isApproved
+            ? 'schedule.approved.title'
+            : 'schedule.rejected.title',
+          bodyKey: isApproved
+            ? 'schedule.approved.body'
+            : 'schedule.rejected.body',
+          vars: {
+            type: entry.type.replace(/_/g, ' ').toLowerCase(),
+            window: windowLabel,
+            reason: updated.rejectionReason || 'Not specified',
+          },
+          href: '/driver/schedule',
+          entityType: 'DriverScheduleEntry',
+          entityId: entry.id,
+        });
+      }
+    }
 
     return updated;
   }

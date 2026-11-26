@@ -159,6 +159,31 @@ export class CarrierController {
     return this.carrierService.confirmConnect(principal);
   }
 
+  @Get('connect/status')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(AppRole.TRANSPORT_COMPANY)
+  @ApiOperation({ summary: 'Carrier Stripe Connect payout status & masked default bank account' })
+  connectStatus(@CurrentPrincipal() principal: AuthenticatedPrincipal) {
+    return this.carrierService.getConnectStatus(principal);
+  }
+
+  @Post('connect/manage-link')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(AppRole.TRANSPORT_COMPANY)
+  @ApiOperation({
+    summary: 'Create single-use Stripe Express Dashboard or account update link to change payout bank details',
+  })
+  connectManageLink(
+    @CurrentPrincipal() principal: AuthenticatedPrincipal,
+    @Body() body?: { returnPath?: string },
+  ) {
+    return this.carrierService.createConnectManageLink(principal, {
+      returnPath: typeof body?.returnPath === 'string' ? body.returnPath : undefined,
+    });
+  }
+
   @Get('vehicles')
   @ApiBearerAuth()
   @UseGuards(JwtAuthGuard, RolesGuard)

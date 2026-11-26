@@ -39,9 +39,14 @@ export class ExpiryWatchdogService implements OnModuleInit, OnModuleDestroy {
     try {
       const result = await this.compliance.runExpiryWatchdog();
       const driverResult = await this.drivers.suspendExpiredLicences();
-      if (result.expired > 0 || driverResult.suspended > 0) {
+      const expiryReminders = await this.drivers.notifyExpiringDriverLicences();
+      if (
+        result.expired > 0 ||
+        driverResult.suspended > 0 ||
+        expiryReminders.notified > 0
+      ) {
         this.logger.warn(
-          `Expiry watchdog: expired=${result.expired} vehicles=${result.suspendedVehicles} companies=${result.suspendedCompanies} drivers=${driverResult.suspended}`,
+          `Expiry watchdog: expired=${result.expired} vehicles=${result.suspendedVehicles} companies=${result.suspendedCompanies} drivers=${driverResult.suspended} reminders=${expiryReminders.notified}`,
         );
       }
     } catch (error) {

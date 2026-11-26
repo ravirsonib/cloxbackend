@@ -38,6 +38,13 @@ import {
 } from '../../shared/types';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
+import {
+  assertUnitsComplete,
+  defaultCombinationConfigForClass,
+  RWC_BID_READY_STATUSES,
+  type CombinationConfigCode,
+  type VehicleUnitRoleCode,
+} from '../carrier/vehicle-units.util';
 import { InAppNotificationsService } from '../notifications/in-app-notifications.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { AbrService } from './abr.service';
@@ -619,6 +626,211 @@ export class ComplianceService {
     }
   }
 
+  /**
+   * Check whether every latest document per `(docType, vehicleUnitId)` slot is APPROVED.
+   * Expects docs ordered newest-first (`createdAt desc`). A previously REJECTED doc that
+   * was replaced by a newer APPROVED doc for the same slot does not block activation.
+   */
+  private allLatestSlotDocsApproved(
+    docs: ReadonlyArray<{
+      docType?: ComplianceDocType | string | null;
+      vehicleUnitId?: string | null;
+      status?: ComplianceDocStatus | string | null;
+    }>,
+  ): boolean {
+    if (docs.length === 0) return false;
+    const seenSlots = new Set<string>();
+    for (const doc of docs) {
+      const slot = `${String(doc.docType ?? '')}:${doc.vehicleUnitId ?? ''}`;
+      if (seenSlots.has(slot)) continue;
+      seenSlots.add(slot);
+      if (doc.status && doc.status !== ComplianceDocStatus.APPROVED) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  private async resolveReadyVehicleIds(
+    tx: Prisma.TransactionClient,
+    params: {
+      caseId: string;
+      companyId: string;
+      vehicleIds: string[];
+      caseDocuments: ReadonlyArray<{
+        id: string;
+        vehicleId?: string | null;
+        docType?: ComplianceDocType | string | null;
+        vehicleUnitId?: string | null;
+        status?: ComplianceDocStatus | string | null;
+      }>;
+      approvedDocMatcher: (doc: { id: string; vehicleId?: string | null }) => boolean;
+    },
+  ): Promise<string[]> {
+    const { caseId, companyId, vehicleIds, caseDocuments, approvedDocMatcher } = params;
+    if (vehicleIds.length === 0) return [];
+
+    // 1) Require every latest document for the vehicle in this case to be APPROVED.
+    let docsReadyIds: string[];
+    if (typeof tx.complianceDocument?.findMany === 'function') {
+      const caseDocs = await tx.complianceDocument.findMany({
+        where: { caseId, vehicleId: { in: vehicleIds } },
+        orderBy: { createdAt: 'desc' },
+        select: {
+          vehicleId: true,
+          docType: true,
+          vehicleUnitId: true,
+          status: true,
+        },
+      });
+      const byVehicle = new Map<string, typeof caseDocs>();
+      for (const doc of caseDocs) {
+        if (!doc.vehicleId) continue;
+        const list = byVehicle.get(doc.vehicleId) ?? [];
+        list.push(doc);
+        byVehicle.set(doc.vehicleId, list);
+      }
+      docsReadyIds = vehicleIds.filter((vid) =>
+        this.allLatestSlotDocsApproved(byVehicle.get(vid) ?? []),
+      );
+    } else {
+      docsReadyIds = vehicleIds.filter((vid) => {
+        const docsForVehicle = caseDocuments
+          .filter((d) => d.vehicleId === vid)
+          .map((d) => ({
+            ...d,
+            status: approvedDocMatcher(d) ? ComplianceDocStatus.APPROVED : d.status,
+          }));
+        return this.allLatestSlotDocsApproved(docsForVehicle);
+      });
+    }
+
+    if (docsReadyIds.length === 0) return [];
+
+    // 2) For multi-unit / RWC completeness, require every required unit to have an APPROVED,
+    //    non-expired RWC before flipping PENDING_REVIEW -> ACTIVE.
+    if (
+      typeof tx.vehicle?.findMany !== 'function' ||
+      typeof tx.complianceDocument?.findMany !== 'function'
+    ) {
+      return docsReadyIds;
+    }
+
+    const vehicles = await tx.vehicle.findMany({
+      where: {
+        id: { in: docsReadyIds },
+        companyId,
+        status: VehicleStatus.PENDING_REVIEW,
+      },
+      include: { units: true },
+    });
+    if (vehicles.length === 0) return [];
+
+    const rwcDocs = await tx.complianceDocument.findMany({
+      where: {
+        companyId,
+        vehicleId: { in: vehicles.map((v) => v.id) },
+        docType: ComplianceDocType.RWC,
+      },
+      orderBy: { createdAt: 'desc' },
+      select: {
+        vehicleId: true,
+        vehicleUnitId: true,
+        status: true,
+        expiresAt: true,
+      },
+    });
+
+    const now = new Date();
+    const ready: string[] = [];
+    for (const vehicle of vehicles) {
+      const vRwcs = rwcDocs.filter((d) => d.vehicleId === vehicle.id);
+      const combinationConfig = (vehicle.combinationConfig ??
+        defaultCombinationConfigForClass(vehicle.vehicleClass)) as CombinationConfigCode;
+      const unitRows =
+        vehicle.units && vehicle.units.length > 0
+          ? vehicle.units
+          : [
+              {
+                id: null as string | null,
+                role: 'POWERED' as const,
+                registration: vehicle.registration,
+              },
+            ];
+      const unitInputs = unitRows.map((u) => {
+        const doc =
+          (u.id ? vRwcs.find((d) => d.vehicleUnitId === u.id) : undefined) ??
+          (u.role === 'POWERED' ? vRwcs.find((d) => !d.vehicleUnitId) ?? null : null);
+        return {
+          role: u.role as VehicleUnitRoleCode,
+          registration: u.registration,
+          rwc: doc ? { status: String(doc.status), expiresAt: doc.expiresAt } : null,
+        };
+      });
+      const unitsReady = assertUnitsComplete(
+        vehicle.vehicleClass,
+        combinationConfig,
+        unitInputs,
+        now,
+        RWC_BID_READY_STATUSES,
+      );
+      if (unitsReady.ok) {
+        ready.push(vehicle.id);
+      }
+    }
+    return ready;
+  }
+
+  private async resolveReadyDriverIds(
+    tx: Prisma.TransactionClient,
+    params: {
+      caseId: string;
+      driverIds: string[];
+      caseDocuments: ReadonlyArray<{
+        id: string;
+        driverId?: string | null;
+        docType?: ComplianceDocType | string | null;
+        status?: ComplianceDocStatus | string | null;
+      }>;
+      approvedDocMatcher: (doc: { id: string; driverId?: string | null }) => boolean;
+    },
+  ): Promise<string[]> {
+    const { caseId, driverIds, caseDocuments, approvedDocMatcher } = params;
+    if (driverIds.length === 0) return [];
+
+    if (typeof tx.complianceDocument?.findMany === 'function') {
+      const caseDocs = await tx.complianceDocument.findMany({
+        where: { caseId, driverId: { in: driverIds } },
+        orderBy: { createdAt: 'desc' },
+        select: {
+          driverId: true,
+          docType: true,
+          status: true,
+        },
+      });
+      const byDriver = new Map<string, typeof caseDocs>();
+      for (const doc of caseDocs) {
+        if (!doc.driverId) continue;
+        const list = byDriver.get(doc.driverId) ?? [];
+        list.push(doc);
+        byDriver.set(doc.driverId, list);
+      }
+      return driverIds.filter((did) =>
+        this.allLatestSlotDocsApproved(byDriver.get(did) ?? []),
+      );
+    }
+
+    return driverIds.filter((did) => {
+      const docsForDriver = caseDocuments
+        .filter((d) => d.driverId === did)
+        .map((d) => ({
+          ...d,
+          status: approvedDocMatcher(d) ? ComplianceDocStatus.APPROVED : d.status,
+        }));
+      return this.allLatestSlotDocsApproved(docsForDriver);
+    });
+  }
+
   async approve(
     principal: AuthenticatedPrincipal,
     caseId: string,
@@ -672,6 +884,8 @@ export class ComplianceService {
         : [];
 
       let caseResolved = false;
+      let activatedVehicleIds: string[] = [];
+      let activatedDriverIds: string[] = [];
       await this.prisma.$transaction(async (tx) => {
         const docWhere: any = { caseId };
         if (isSpecificDocument) {
@@ -686,20 +900,45 @@ export class ComplianceService {
           data: { status: ComplianceDocStatus.APPROVED, reviewedAt: new Date() },
         });
 
-        if (vehicleIds.length) {
+        const approvedDocMatcher = (doc: {
+          id: string;
+          vehicleId?: string | null;
+          driverId?: string | null;
+        }) => {
+          if (isSpecificDocument) return doc.id === input.documentId;
+          if (isSpecificDriver) return doc.driverId === input.driverId;
+          if (isSpecificVehicle) return doc.vehicleId === input.vehicleId;
+          return true;
+        };
+
+        activatedVehicleIds = await this.resolveReadyVehicleIds(tx, {
+          caseId,
+          companyId: complianceCase.companyId,
+          vehicleIds,
+          caseDocuments: complianceCase.documents,
+          approvedDocMatcher,
+        });
+        if (activatedVehicleIds.length) {
           await tx.vehicle.updateMany({
             where: {
-              id: { in: vehicleIds },
+              id: { in: activatedVehicleIds },
               companyId: complianceCase.companyId,
               status: VehicleStatus.PENDING_REVIEW,
             },
             data: { status: VehicleStatus.ACTIVE },
           });
         }
-        if (driverIds.length) {
+
+        activatedDriverIds = await this.resolveReadyDriverIds(tx, {
+          caseId,
+          driverIds,
+          caseDocuments: complianceCase.documents,
+          approvedDocMatcher,
+        });
+        if (activatedDriverIds.length) {
           await tx.driver.updateMany({
             where: {
-              id: { in: driverIds },
+              id: { in: activatedDriverIds },
               companyId: complianceCase.companyId,
               status: DriverStatus.PENDING_REVIEW,
             },
@@ -743,16 +982,16 @@ export class ComplianceService {
           nextCompanyStatus: complianceCase.company.status,
           note: input.note ?? null,
           caseType: complianceCase.caseType,
-          activatedVehicleIds: vehicleIds,
-          activatedDriverIds: driverIds,
+          activatedVehicleIds,
+          activatedDriverIds,
           caseResolved,
         },
       });
       if (
         complianceCase.caseType === ComplianceCaseType.CARRIER_DRIVER_LICENCE &&
-        driverIds.length
+        activatedDriverIds.length
       ) {
-        for (const driverId of driverIds) {
+        for (const driverId of activatedDriverIds) {
           await this.audit.recordPlatform({
             action: AuditAction.DRIVER_ACTIVATED,
             actorAdminId: principal.id,

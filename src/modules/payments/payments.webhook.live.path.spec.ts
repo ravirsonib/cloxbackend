@@ -266,5 +266,48 @@ describe('PaymentsService waiting accrual + live webhook success', () => {
       ).resolves.toEqual({ received: true, duplicate: true });
       expect(prisma.stripeWebhookEvent.create).not.toHaveBeenCalled();
     });
+
+    it('syncs company stripeConnectPayoutsEnabled on account.updated webhook', async () => {
+      stripe.isMockMode.mockReturnValue(false);
+      stripe.constructWebhookEvent.mockReturnValue({
+        id: 'evt_acct_1',
+        type: 'account.updated',
+        data: {
+          object: {
+            id: 'acct_carrier_99',
+            payouts_enabled: false,
+            capabilities: { transfers: 'inactive' },
+          },
+        },
+      });
+      const prisma = {
+        isConnected: () => true,
+        stripeWebhookEvent: {
+          findUnique: jest.fn().mockResolvedValue(null),
+          create: jest.fn().mockResolvedValue({}),
+        },
+        company: {
+          findFirst: jest.fn().mockResolvedValue({
+            id: 'co-carrier-99',
+            stripeConnectPayoutsEnabled: true,
+          }),
+          update: jest.fn().mockResolvedValue({}),
+        },
+      };
+      const service = makeService(prisma);
+      await expect(
+        service.handleStripeWebhook(Buffer.from('raw'), 'sig'),
+      ).resolves.toEqual({ received: true });
+      expect(prisma.company.update).toHaveBeenCalledWith({
+        where: { id: 'co-carrier-99' },
+        data: { stripeConnectPayoutsEnabled: false },
+      });
+      expect(prisma.stripeWebhookEvent.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          stripeEventId: 'evt_acct_1',
+          type: 'account.updated',
+        }),
+      });
+    });
   });
 });

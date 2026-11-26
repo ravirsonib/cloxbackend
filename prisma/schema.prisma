@@ -80,6 +80,9 @@ model AdminUser {
   notes         LeadNote[]
   events        LeadEvent[]     @relation("EventActor")
   otpChallenges OtpChallenge[]
+  pushDevices   PushDevice[]
+  notificationPreference NotificationPreference?
+  pushDeliveries PushDelivery[]
   sessions      AuthSession[]
   scopes        AdminScope[]
   auditEvents   AuditEvent[]    @relation("AuditActor")
@@ -215,6 +218,8 @@ model AuthSession {
   lastUsedAt       DateTime          @default(now())
   createdAt        DateTime          @default(now())
 
+  pushDevices      PushDevice[]
+
   @@index([adminUserId, revokedAt])
   @@index([userId, revokedAt])
   @@index([refreshTokenHash])
@@ -333,6 +338,9 @@ model User {
   otpChallenges   OtpChallenge[]
   sessions        AuthSession[]
   notifications   Notification[]
+  pushDevices     PushDevice[]
+  notificationPreference NotificationPreference?
+  pushDeliveries  PushDelivery[]
   disputesOpened  Dispute[]      @relation("DisputeOpenedBy")
   driverSchedulesCreated  DriverScheduleEntry[] @relation("ScheduleCreatedBy")
   driverSchedulesReviewed DriverScheduleEntry[] @relation("ScheduleReviewedBy")
@@ -387,6 +395,17 @@ enum NotificationType {
   DRIVER_LICENCE_REVIEW_OPENED
   /// W3.6 — diesel index older than fuelStaleDays (Ops Super inbox).
   FUEL_INDEX_STALE
+  /// Mobile push & companion marketplace events.
+  TRIP_ASSIGNED
+  TRIP_REASSIGNED
+  TRIP_APPROACHING
+  TRIP_REMINDER
+  DETENTION_STARTED
+  SURCHARGE_ACTION_REQUIRED
+  SCHEDULE_REQUESTED
+  SCHEDULE_APPROVED
+  SCHEDULE_REJECTED
+  DOCUMENT_EXPIRING
 }
 
 /// In-app inbox row (email remains separate via NotificationsService).
@@ -408,10 +427,108 @@ model Notification {
   readAt      DateTime?
   createdAt   DateTime         @default(now())
 
+  pushDeliveries PushDelivery[]
+
   @@index([userId, readAt, createdAt])
   @@index([userId, createdAt])
   @@index([adminUserId, readAt, createdAt])
   @@index([adminUserId, createdAt])
+}
+
+enum PushPlatform {
+  ANDROID
+  IOS
+  WEB
+}
+
+enum PushDeliveryStatus {
+  PENDING
+  SENT
+  FAILED
+  SKIPPED
+}
+
+/// Registered mobile/web push device token, optionally bound to an AuthSession.
+/// Exactly one of userId (marketplace) or adminUserId (Ops) must be set — enforced in app.
+model PushDevice {
+  id            String       @id @default(uuid())
+  userId        String?
+  user          User?        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  adminUserId   String?
+  adminUser     AdminUser?   @relation(fields: [adminUserId], references: [id], onDelete: Cascade)
+  sessionId     String?
+  session       AuthSession? @relation(fields: [sessionId], references: [id], onDelete: SetNull)
+  platform      PushPlatform
+  token         String       @unique
+  deviceId      String?
+  appVersion    String?
+  osVersion     String?
+  deviceModel   String?
+  locale        String?
+  isActive      Boolean      @default(true)
+  lastSeenAt    DateTime     @default(now())
+  disabledAt    DateTime?
+  disableReason String?
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+
+  deliveries PushDelivery[]
+
+  @@index([userId, isActive])
+  @@index([adminUserId, isActive])
+  @@index([sessionId])
+  @@index([userId, deviceId])
+  @@index([adminUserId, deviceId])
+}
+
+/// Per-user or per-admin push notification category preferences and quiet hours.
+model NotificationPreference {
+  id                    String     @id @default(uuid())
+  userId                String?    @unique
+  user                  User?      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  adminUserId           String?    @unique
+  adminUser             AdminUser? @relation(fields: [adminUserId], references: [id], onDelete: Cascade)
+  pushEnabled           Boolean    @default(true)
+  tripUpdates           Boolean    @default(true)
+  jobsAndBids           Boolean    @default(true)
+  scheduleAndCompliance Boolean    @default(true)
+  paymentsAndBilling    Boolean    @default(true)
+  quietHoursEnabled     Boolean    @default(false)
+  /// Minutes from midnight in `timezone` (0..1439). Default 22:00 (1320) -> 06:00 (360).
+  quietStartMinute      Int        @default(1320)
+  quietEndMinute        Int        @default(360)
+  timezone              String     @default("Australia/Sydney")
+  createdAt             DateTime   @default(now())
+  updatedAt             DateTime   @updatedAt
+}
+
+/// Durable push outbox / delivery audit log (supports retries, dedup, and stale token cleanup).
+model PushDelivery {
+  id                String             @id @default(uuid())
+  notificationId    String?
+  notification      Notification?      @relation(fields: [notificationId], references: [id], onDelete: SetNull)
+  userId            String?
+  user              User?              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  adminUserId       String?
+  adminUser         AdminUser?         @relation(fields: [adminUserId], references: [id], onDelete: Cascade)
+  deviceId          String
+  device            PushDevice         @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  type              NotificationType
+  payload           Json
+  status            PushDeliveryStatus @default(PENDING)
+  attempts          Int                @default(0)
+  nextAttemptAt     DateTime           @default(now())
+  providerMessageId String?
+  lastError         String?
+  sentAt            DateTime?
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
+
+  @@unique([notificationId, deviceId])
+  @@index([status, nextAttemptAt])
+  @@index([userId, createdAt])
+  @@index([adminUserId, createdAt])
+  @@index([deviceId, status])
 }
 
 enum SenderAccountType {

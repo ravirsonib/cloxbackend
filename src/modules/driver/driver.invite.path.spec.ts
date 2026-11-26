@@ -125,6 +125,16 @@ describe('DriverService invite + assignability paths', () => {
       email: 'driver.clox@yopmail.com',
       next: 'otp_login',
     });
+    expect(prisma.driver.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: 'drv-1' },
+        data: expect.objectContaining({
+          inviteAcceptedAt: expect.any(Date),
+          status: DriverStatus.PENDING_REVIEW,
+        }),
+      }),
+    );
+    expect(prisma.driver.update.mock.calls[0]?.[0]?.data).not.toHaveProperty('inviteTokenHash');
     expect(prisma.$transaction).toHaveBeenCalled();
     expect(audit.recordPlatform).toHaveBeenCalled();
   });

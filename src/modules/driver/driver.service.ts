@@ -206,7 +206,7 @@ export class DriverService {
 
   async peekInvite(token: string) {
     this.ensureDatabase();
-    const hash = hashValue(token);
+    const hash = hashValue(token.trim());
     const driver = await this.prisma.driver.findFirst({
       where: { inviteTokenHash: hash },
       include: {
@@ -217,8 +217,8 @@ export class DriverService {
     if (!driver) {
       throw new NotFoundException('Invite not found');
     }
-    const expired = !driver.inviteExpiresAt || driver.inviteExpiresAt < new Date();
     const consumed = Boolean(driver.inviteAcceptedAt);
+    const expired = !consumed && (!driver.inviteExpiresAt || driver.inviteExpiresAt < new Date());
     return {
       email: driver.user.email,
       name: driver.user.name,
@@ -232,7 +232,7 @@ export class DriverService {
 
   async acceptInvite(input: DriverAcceptInviteInput) {
     this.ensureDatabase();
-    const hash = hashValue(input.token);
+    const hash = hashValue(input.token.trim());
     const driver = await this.prisma.driver.findFirst({
       where: { inviteTokenHash: hash },
       include: {
@@ -258,8 +258,6 @@ export class DriverService {
         where: { id: driver.id },
         data: {
           inviteAcceptedAt: new Date(),
-          inviteTokenHash: null,
-          inviteExpiresAt: null,
           status: DriverStatus.PENDING_REVIEW,
         },
       }),
@@ -640,5 +638,65 @@ export class DriverService {
       suspended += 1;
     }
     return { suspended };
+  }
+
+  /**
+   * Notifies ACTIVE drivers whose licence expires within `withinDays` (default 14).
+   * Deduplicated to at most once per 7 days per driver so hourly watchdogs do not spam.
+   */
+  async notifyExpiringDriverLicences(
+    withinDays = 14,
+    now: Date = new Date(),
+  ): Promise<{ notified: number }> {
+    if (!this.prisma.isConnected() || !this.inbox) {
+      return { notified: 0 };
+    }
+    const cutoff = new Date(now.getTime() + withinDays * 24 * 60 * 60 * 1000);
+    const recentWindow = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+    const expiring = await this.prisma.driver.findMany({
+      where: {
+        status: DriverStatus.ACTIVE,
+        licenceExpiry: { gt: now, lte: cutoff },
+      },
+      select: { id: true, userId: true, licenceExpiry: true },
+      take: 100,
+    });
+
+    let notified = 0;
+    for (const d of expiring) {
+      if (!d.userId || !d.licenceExpiry) continue;
+      const alreadyNotified = await this.prisma.notification.findFirst({
+        where: {
+          userId: d.userId,
+          type: NotificationType.DOCUMENT_EXPIRING,
+          entityType: 'Driver',
+          entityId: d.id,
+          createdAt: { gte: recentWindow },
+        },
+        select: { id: true },
+      });
+      if (alreadyNotified) continue;
+
+      const daysLeft = Math.max(
+        1,
+        Math.ceil((d.licenceExpiry.getTime() - now.getTime()) / (24 * 60 * 60 * 1000)),
+      );
+      const count = await this.inbox.notifyUsersLocalized({
+        userIds: [d.userId],
+        type: NotificationType.DOCUMENT_EXPIRING,
+        titleKey: 'document.expiring.title',
+        bodyKey: 'document.expiring.body',
+        vars: {
+          docLabel: 'driver licence',
+          days: daysLeft,
+        },
+        href: '/driver/onboarding',
+        entityType: 'Driver',
+        entityId: d.id,
+      });
+      if (count > 0) notified += 1;
+    }
+
+    return { notified };
   }
 }

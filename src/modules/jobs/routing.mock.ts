@@ -28,14 +28,53 @@ const FATIGUE_THRESHOLD_HOURS = 5.25;
 const FATIGUE_BREAK_MINUTES = 15;
 const HOURLY_FLOOR_HOURS = 4;
 
+export type RouteSource = 'valhalla' | 'mock';
+
 export type RouteEstimate = {
   distanceKm: number;
   drivingMinutes: number;
   fatigueBreakMinutes: number;
   totalDurationMinutes: number;
   billableHours: number | null;
-  mock: true;
+  mock: boolean;
+  encodedPolyline?: string | null;
+  routeSource?: RouteSource;
 };
+
+/**
+ * Derive fatigue / billable hours from a real Valhalla road route result.
+ * Preserves identical NHVR rest (>5.25 h → +15 min) and hourly floor/quarter-hour rules.
+ */
+export function routeFromValhalla(params: {
+  distanceKm: number;
+  drivingMinutes: number;
+  encodedPolyline: string;
+  pricingModel: 'PER_KM' | 'HOURLY';
+  hourlyFloorHours?: number;
+}): RouteEstimate {
+  const { pricingModel, hourlyFloorHours = HOURLY_FLOOR_HOURS } = params;
+  const km = Math.round(Math.max(0, params.distanceKm) * 10) / 10;
+  const drivingMinutes = Math.max(0, Math.round(params.drivingMinutes));
+  const drivingHours = drivingMinutes / 60;
+  const fatigueBreakMinutes =
+    drivingHours > FATIGUE_THRESHOLD_HOURS ? FATIGUE_BREAK_MINUTES : 0;
+  const totalDurationMinutes = drivingMinutes + fatigueBreakMinutes;
+  const billableHours =
+    pricingModel === 'HOURLY'
+      ? Math.max(hourlyFloorHours, Math.ceil((totalDurationMinutes / 60) * 4) / 4)
+      : null;
+
+  return {
+    distanceKm: km,
+    drivingMinutes,
+    fatigueBreakMinutes,
+    totalDurationMinutes,
+    billableHours,
+    mock: false,
+    encodedPolyline: params.encodedPolyline || null,
+    routeSource: 'valhalla',
+  };
+}
 
 /**
  * Derive duration / fatigue / billable from an effective distance (sender km or suggested).

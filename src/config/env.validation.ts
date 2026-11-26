@@ -98,6 +98,22 @@ export const envSchema = z.object({
   VALHALLA_COSTING: z.enum(['auto', 'truck', 'bicycle', 'pedestrian', 'motorcycle']).default('truck'),
   /** Route deviation threshold in meters before alerting. */
   ROUTE_DEVIATION_THRESHOLD_METERS: z.coerce.number().positive().default(500),
+  /** Enable mobile push notification delivery. */
+  PUSH_ENABLED: booleanFromString.default(true),
+  /** Force mock push provider even when Firebase credentials are set (local QA). */
+  PUSH_MOCK: booleanFromString.default(false),
+  /** Firebase Cloud Messaging (HTTP v1) service account credentials. */
+  FIREBASE_PROJECT_ID: z.string().optional(),
+  FIREBASE_CLIENT_EMAIL: z.string().optional(),
+  FIREBASE_PRIVATE_KEY: z.string().optional(),
+  /** Optional raw or base64-encoded Firebase service account JSON. */
+  FIREBASE_SERVICE_ACCOUNT_JSON: z.string().optional(),
+  /** Push outbox worker poll interval ms (default 5s). Set 0 to disable polling timer. */
+  PUSH_WORKER_INTERVAL_MS: z.coerce.number().int().nonnegative().default(5_000),
+  /** Max retry attempts per push delivery before marking FAILED. */
+  PUSH_MAX_ATTEMPTS: z.coerce.number().int().min(1).max(10).default(4),
+  /** Pre-trip pickup reminder watchdog interval ms (default 5 min). Set 0 to disable. */
+  TRIP_REMINDER_WATCHDOG_MS: z.coerce.number().int().nonnegative().default(300_000),
 });
 
 export type AppEnv = z.infer<typeof envSchema>;

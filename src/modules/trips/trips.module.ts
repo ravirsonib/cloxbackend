@@ -8,6 +8,7 @@ import { NotificationsModule } from '../notifications/notifications.module';
 import { PaymentsModule } from '../payments/payments.module';
 import { GeolocationModule } from '../geolocation/geolocation.module';
 import { TripsController } from './trips.controller';
+import { TripReminderWatchdog } from './trip-reminder.watchdog';
 import { TripsService } from './trips.service';
 
 @Module({
@@ -20,7 +21,7 @@ import { TripsService } from './trips.service';
     forwardRef(() => PaymentsModule),
   ],
   controllers: [TripsController],
-  providers: [TripsService, JwtAuthGuard, RolesGuard],
+  providers: [TripsService, TripReminderWatchdog, JwtAuthGuard, RolesGuard],
   exports: [TripsService],
 })
 export class TripsModule {}

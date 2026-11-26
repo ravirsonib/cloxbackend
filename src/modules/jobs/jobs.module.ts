@@ -8,6 +8,7 @@ import { PaymentsModule } from '../payments/payments.module';
 import { SenderModule } from '../sender/sender.module';
 import { SettlementsModule } from '../settlements/settlements.module';
 import { RateFloorModule } from '../rate-floor/rate-floor.module';
+import { GeolocationModule } from '../geolocation/geolocation.module';
 import { JobsController } from './jobs.controller';
 import { JobsService } from './jobs.service';
 
@@ -20,6 +21,7 @@ import { JobsService } from './jobs.service';
     NotificationsModule,
     SettlementsModule,
     RateFloorModule,
+    GeolocationModule,
   ],
   controllers: [JobsController],
   providers: [JobsService, JwtAuthGuard, RolesGuard],

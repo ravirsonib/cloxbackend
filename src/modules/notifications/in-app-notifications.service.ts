@@ -3,12 +3,15 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  Optional,
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { AdminRole, AdminUserStatus, NotificationType, PlatformRole } from '@prisma/client';
+import { randomUUID } from 'node:crypto';
 import type { AuthenticatedPrincipal } from '../../common/guards/jwt-auth.guard';
 import { tNotify } from '../../i18n/notify.util';
 import { PrismaService } from '../../prisma/prisma.service';
+import { PushDispatchService } from './push-dispatch.service';
 
 export type NotifyUsersInput = {
   userIds: string[];
@@ -58,7 +61,10 @@ export type NotifyAdminsLocalizedInput = {
 export class InAppNotificationsService {
   private readonly logger = new Logger(InAppNotificationsService.name);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    @Optional() private readonly pushDispatch?: PushDispatchService,
+  ) {}
 
   private ensureDatabase() {
     if (!this.prisma.isConnected()) {
@@ -108,13 +114,16 @@ export class InAppNotificationsService {
 
   async listForPrincipal(
     principal: AuthenticatedPrincipal,
-    opts?: { limit?: number; cursor?: string },
+    opts?: { limit?: number; cursor?: string; unreadOnly?: boolean },
   ) {
     this.ensureDatabase();
     const actor = this.requireInboxPrincipal(principal);
     const take = Math.min(Math.max(opts?.limit ?? 20, 1), 50);
     const rows = await this.prisma.notification.findMany({
-      where: this.recipientWhere(actor),
+      where: {
+        ...this.recipientWhere(actor),
+        ...(opts?.unreadOnly ? { readAt: null } : {}),
+      },
       orderBy: { createdAt: 'desc' },
       take: take + 1,
       ...(opts?.cursor
@@ -172,18 +181,34 @@ export class InAppNotificationsService {
       return 0;
     }
     try {
+      const rows = userIds.map((userId) => ({
+        id: randomUUID(),
+        userId,
+        adminUserId: null,
+        type: input.type,
+        title: input.title,
+        body: input.body ?? null,
+        href: input.href ?? null,
+        entityType: input.entityType ?? null,
+        entityId: input.entityId ?? null,
+      }));
       const result = await this.prisma.notification.createMany({
-        data: userIds.map((userId) => ({
-          userId,
-          adminUserId: null,
-          type: input.type,
-          title: input.title,
-          body: input.body ?? null,
-          href: input.href ?? null,
-          entityType: input.entityType ?? null,
-          entityId: input.entityId ?? null,
-        })),
+        data: rows,
       });
+      if (this.pushDispatch) {
+        void this.pushDispatch.enqueueForNotifications(
+          rows.map((r) => ({
+            notificationId: r.id,
+            userId: r.userId,
+            type: r.type,
+            title: r.title,
+            body: r.body,
+            href: r.href,
+            entityType: r.entityType,
+            entityId: r.entityId,
+          })),
+        );
+      }
       return result.count;
     } catch (error: unknown) {
       this.logger.warn(
@@ -212,23 +237,39 @@ export class InAppNotificationsService {
         select: { id: true, locale: true },
       });
       const localeById = new Map(users.map((u) => [u.id, u.locale]));
-      const result = await this.prisma.notification.createMany({
-        data: userIds.map((userId) => {
-          const locale = localeById.get(userId);
-          return {
-            userId,
-            adminUserId: null,
-            type: input.type,
-            title: tNotify(locale, input.titleKey, input.vars),
-            body: input.bodyKey
-              ? tNotify(locale, input.bodyKey, input.vars)
-              : null,
-            href: input.href ?? null,
-            entityType: input.entityType ?? null,
-            entityId: input.entityId ?? null,
-          };
-        }),
+      const rows = userIds.map((userId) => {
+        const locale = localeById.get(userId);
+        return {
+          id: randomUUID(),
+          userId,
+          adminUserId: null,
+          type: input.type,
+          title: tNotify(locale, input.titleKey, input.vars),
+          body: input.bodyKey
+            ? tNotify(locale, input.bodyKey, input.vars)
+            : null,
+          href: input.href ?? null,
+          entityType: input.entityType ?? null,
+          entityId: input.entityId ?? null,
+        };
       });
+      const result = await this.prisma.notification.createMany({
+        data: rows,
+      });
+      if (this.pushDispatch) {
+        void this.pushDispatch.enqueueForNotifications(
+          rows.map((r) => ({
+            notificationId: r.id,
+            userId: r.userId,
+            type: r.type,
+            title: r.title,
+            body: r.body,
+            href: r.href,
+            entityType: r.entityType,
+            entityId: r.entityId,
+          })),
+        );
+      }
       return result.count;
     } catch (error: unknown) {
       this.logger.warn(
@@ -249,19 +290,35 @@ export class InAppNotificationsService {
       return 0;
     }
     try {
+      const rows = adminUserIds.map((adminUserId) => ({
+        id: randomUUID(),
+        adminUserId,
+        userId: null,
+        type: input.type,
+        title: input.title,
+        body: input.body ?? null,
+        href: input.href ?? null,
+        entityType: input.entityType ?? null,
+        entityId: input.entityId ?? null,
+        regionId: input.regionId ?? null,
+      }));
       const result = await this.prisma.notification.createMany({
-        data: adminUserIds.map((adminUserId) => ({
-          adminUserId,
-          userId: null,
-          type: input.type,
-          title: input.title,
-          body: input.body ?? null,
-          href: input.href ?? null,
-          entityType: input.entityType ?? null,
-          entityId: input.entityId ?? null,
-          regionId: input.regionId ?? null,
-        })),
+        data: rows,
       });
+      if (this.pushDispatch) {
+        void this.pushDispatch.enqueueForNotifications(
+          rows.map((r) => ({
+            notificationId: r.id,
+            adminUserId: r.adminUserId,
+            type: r.type,
+            title: r.title,
+            body: r.body,
+            href: r.href,
+            entityType: r.entityType,
+            entityId: r.entityId,
+          })),
+        );
+      }
       return result.count;
     } catch (error: unknown) {
       this.logger.warn(
@@ -289,24 +346,40 @@ export class InAppNotificationsService {
         select: { id: true, locale: true },
       });
       const localeById = new Map(admins.map((a) => [a.id, a.locale]));
-      const result = await this.prisma.notification.createMany({
-        data: adminUserIds.map((adminUserId) => {
-          const locale = localeById.get(adminUserId);
-          return {
-            adminUserId,
-            userId: null,
-            type: input.type,
-            title: tNotify(locale, input.titleKey, input.vars),
-            body: input.bodyKey
-              ? tNotify(locale, input.bodyKey, input.vars)
-              : null,
-            href: input.href ?? null,
-            entityType: input.entityType ?? null,
-            entityId: input.entityId ?? null,
-            regionId: input.regionId ?? null,
-          };
-        }),
+      const rows = adminUserIds.map((adminUserId) => {
+        const locale = localeById.get(adminUserId);
+        return {
+          id: randomUUID(),
+          adminUserId,
+          userId: null,
+          type: input.type,
+          title: tNotify(locale, input.titleKey, input.vars),
+          body: input.bodyKey
+            ? tNotify(locale, input.bodyKey, input.vars)
+            : null,
+          href: input.href ?? null,
+          entityType: input.entityType ?? null,
+          entityId: input.entityId ?? null,
+          regionId: input.regionId ?? null,
+        };
       });
+      const result = await this.prisma.notification.createMany({
+        data: rows,
+      });
+      if (this.pushDispatch) {
+        void this.pushDispatch.enqueueForNotifications(
+          rows.map((r) => ({
+            notificationId: r.id,
+            adminUserId: r.adminUserId,
+            type: r.type,
+            title: r.title,
+            body: r.body,
+            href: r.href,
+            entityType: r.entityType,
+            entityId: r.entityId,
+          })),
+        );
+      }
       return result.count;
     } catch (error: unknown) {
       this.logger.warn(

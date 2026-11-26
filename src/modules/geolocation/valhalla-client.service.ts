@@ -4,6 +4,7 @@ import type { AppEnv } from '../../config/env.validation';
 import {
   haversineMeters,
 } from '../trips/geofence.util';
+import { mergePolylines6 } from './polyline6.util';
 import type {
   IsochroneResult,
   RouteResult,
@@ -110,13 +111,13 @@ export class ValhallaClientService {
       const ms = Date.now() - t0;
       if (!data?.trip?.legs?.length) return null;
 
-      const firstLeg = data.trip.legs[0];
+      const encodedPolyline = mergePolylines6(data.trip.legs.map((leg) => leg.shape));
       this.logger.debug(
         { valhallaMs: ms, op: 'getRoute', legs: data.trip.legs.length },
         'Valhalla route OK',
       );
       return {
-        encodedPolyline: firstLeg.shape,
+        encodedPolyline,
         distanceKm: data.trip.summary.length,
         durationMin: Math.ceil(data.trip.summary.time / 60),
       };

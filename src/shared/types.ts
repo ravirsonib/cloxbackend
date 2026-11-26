@@ -160,6 +160,7 @@ export const AuditAction = {
   CARRIER_PROFILE_UPDATED: 'carrier.profile_updated',
   CARRIER_CONNECT_SETUP: 'carrier.connect_setup',
   CARRIER_CONNECT_READY: 'carrier.connect_ready',
+  CARRIER_CONNECT_MANAGE_OPENED: 'carrier.connect_manage_opened',
   CARRIER_VEHICLE_ADDED: 'carrier.vehicle_added',
   CARRIER_VEHICLE_UPDATED: 'carrier.vehicle_updated',
   CARRIER_VEHICLE_DISABLED: 'carrier.vehicle_disabled',
@@ -1869,7 +1870,7 @@ export const adminJobListQuerySchema = z.object({
 
 export type AdminJobListQuery = z.infer<typeof adminJobListQuerySchema>;
 
-/** Preview suggested distance/duration from pickup + drop (mock Valhalla today). */
+/** Preview suggested distance/duration from pickup + drop (Valhalla with mock fallback). */
 export const jobRouteEstimateSchema = z
   .object({
     pricingModel: z.enum(['PER_KM', 'HOURLY']),
@@ -1882,6 +1883,7 @@ export const jobRouteEstimateSchema = z
   });
 
 export type JobRouteEstimateInput = z.infer<typeof jobRouteEstimateSchema>;
+export type JobRouteSource = 'valhalla' | 'mock';
 
 /** Preview sender-facing hard rate floor (Wave 1 + W2 modifiers). */
 export const rateFloorPreviewSchema = z.object({
@@ -2417,8 +2419,65 @@ export const notificationTypeSchema = z.enum([
   'TRIP_EXCEPTION_ESCALATED',
   'FLEET_RWC_REVIEW_OPENED',
   'DRIVER_LICENCE_REVIEW_OPENED',
+  'FUEL_INDEX_STALE',
+  'TRIP_ASSIGNED',
+  'TRIP_REASSIGNED',
+  'TRIP_APPROACHING',
+  'TRIP_REMINDER',
+  'DETENTION_STARTED',
+  'SURCHARGE_ACTION_REQUIRED',
+  'SCHEDULE_REQUESTED',
+  'SCHEDULE_APPROVED',
+  'SCHEDULE_REJECTED',
+  'DOCUMENT_EXPIRING',
 ]);
 export type NotificationTypeDto = z.infer<typeof notificationTypeSchema>;
+
+export const pushPlatformSchema = z.enum(['ANDROID', 'IOS', 'WEB']);
+export type PushPlatformDto = z.infer<typeof pushPlatformSchema>;
+
+export const registerPushDeviceSchema = z.object({
+  token: z.string().trim().min(16).max(4096),
+  platform: pushPlatformSchema,
+  deviceId: z.string().trim().min(1).max(200).optional(),
+  appVersion: z.string().trim().max(64).optional(),
+  osVersion: z.string().trim().max(64).optional(),
+  deviceModel: z.string().trim().max(120).optional(),
+  locale: z.enum(['en', 'hi', 'pa']).optional(),
+});
+export type RegisterPushDeviceInput = z.infer<typeof registerPushDeviceSchema>;
+
+export const unregisterPushDeviceSchema = z
+  .object({
+    token: z.string().trim().min(16).max(4096).optional(),
+    deviceId: z.string().trim().min(1).max(200).optional(),
+  })
+  .refine((v) => Boolean(v.token || v.deviceId), {
+    message: 'Either token or deviceId is required',
+  });
+export type UnregisterPushDeviceInput = z.infer<typeof unregisterPushDeviceSchema>;
+
+export const updateNotificationPreferencesSchema = z.object({
+  pushEnabled: z.boolean().optional(),
+  tripUpdates: z.boolean().optional(),
+  jobsAndBids: z.boolean().optional(),
+  scheduleAndCompliance: z.boolean().optional(),
+  paymentsAndBilling: z.boolean().optional(),
+  quietHoursEnabled: z.boolean().optional(),
+  quietStartMinute: z.number().int().min(0).max(1439).optional(),
+  quietEndMinute: z.number().int().min(0).max(1439).optional(),
+  timezone: z.string().trim().min(1).max(64).optional(),
+});
+export type UpdateNotificationPreferencesInput = z.infer<
+  typeof updateNotificationPreferencesSchema
+>;
+
+export const testPushSchema = z.object({
+  title: z.string().trim().min(1).max(120).optional(),
+  body: z.string().trim().min(1).max(300).optional(),
+  type: notificationTypeSchema.optional(),
+});
+export type TestPushInput = z.infer<typeof testPushSchema>;
 
 export const notificationItemSchema = z.object({
   id: z.string().uuid(),

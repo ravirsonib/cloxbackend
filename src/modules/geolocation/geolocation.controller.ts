@@ -9,31 +9,7 @@ import {
 import { ApiOperation, ApiQuery, ApiTags } from '@nestjs/swagger';
 import { ValhallaClientService } from './valhalla-client.service';
 import type { ValhallaCostingType } from './valhalla.types';
-
-function encodePolyline6(coords: Array<[number, number]>): string {
-  let res = '';
-  let prevLat = 0;
-  let prevLng = 0;
-  for (const [lat, lng] of coords) {
-    const l1 = Math.round(lat * 1e6);
-    const l2 = Math.round(lng * 1e6);
-    res += encodeNumber(l1 - prevLat) + encodeNumber(l2 - prevLng);
-    prevLat = l1;
-    prevLng = l2;
-  }
-  return res;
-}
-
-function encodeNumber(num: number): string {
-  let sgn = num < 0 ? ~(num << 1) : num << 1;
-  let res = '';
-  while (sgn >= 0x20) {
-    res += String.fromCharCode((0x20 | (sgn & 0x1f)) + 63);
-    sgn >>= 5;
-  }
-  res += String.fromCharCode(sgn + 63);
-  return res;
-}
+import { encodePolyline6 } from './polyline6.util';
 
 @ApiTags('geolocation')
 @Controller('geolocation')

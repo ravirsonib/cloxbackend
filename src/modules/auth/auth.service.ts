@@ -3,6 +3,7 @@ import {
   ForbiddenException,
   Injectable,
   Logger,
+  Optional,
   ServiceUnavailableException,
   UnauthorizedException,
 } from '@nestjs/common';
@@ -36,6 +37,7 @@ import type {
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { NotificationsService } from '../notifications/notifications.service';
+import { PushDevicesService } from '../notifications/push-devices.service';
 
 type ResolvedAccount =
   | {
@@ -87,6 +89,7 @@ export class AuthService {
     private readonly config: ConfigService<AppEnv, true>,
     private readonly audit: AuditService,
     private readonly notifications: NotificationsService,
+    @Optional() private readonly pushDevices?: PushDevicesService,
   ) {}
 
   private ensureDatabase() {
@@ -379,6 +382,7 @@ export class AuthService {
       where: { id: session.id },
       data: { revokedAt: new Date() },
     });
+    await this.pushDevices?.deactivateForSession(session.id, 'SESSION_REVOKED');
 
     await this.audit.recordPlatform({
       action: AuditAction.AUTH_TOKEN_REFRESHED,
@@ -408,17 +412,33 @@ export class AuthService {
         },
         data: { revokedAt: new Date() },
       });
+      if (principal.kind === 'user') {
+        await this.pushDevices?.deactivateAllForUser(principal.id, 'LOGOUT_ALL');
+      } else if (principal.kind === 'admin') {
+        await this.pushDevices?.deactivateAllForAdmin(principal.id, 'LOGOUT_ALL');
+      }
     } else if (input.refreshToken) {
       const hash = hashValue(input.refreshToken);
+      const matchingSessions =
+        this.pushDevices && this.prisma.authSession?.findMany
+          ? await this.prisma.authSession.findMany({
+              where: { refreshTokenHash: hash, revokedAt: null },
+              select: { id: true },
+            })
+          : [];
       await this.prisma.authSession.updateMany({
         where: { refreshTokenHash: hash, revokedAt: null },
         data: { revokedAt: new Date() },
       });
+      for (const s of matchingSessions) {
+        await this.pushDevices?.deactivateForSession(s.id, 'LOGOUT');
+      }
     } else if (principal.sessionId) {
       await this.prisma.authSession.updateMany({
         where: { id: principal.sessionId, revokedAt: null },
         data: { revokedAt: new Date() },
       });
+      await this.pushDevices?.deactivateForSession(principal.sessionId, 'LOGOUT');
     }
 
     await this.audit.recordPlatform({
@@ -480,6 +500,7 @@ export class AuthService {
       where: { id: session.id },
       data: { revokedAt: new Date() },
     });
+    await this.pushDevices?.deactivateForSession(session.id, 'SESSION_REVOKED');
 
     await this.audit.recordPlatform({
       action: AuditAction.AUTH_SESSION_REVOKED,

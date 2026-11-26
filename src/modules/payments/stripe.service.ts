@@ -242,6 +242,155 @@ export class StripeService {
     }
   }
 
+  /**
+   * Read-only masked payout bank summary for a carrier's Connected Account.
+   * Never returns raw credentials — only bank name, masked last4, routing/BSB, and status.
+   */
+  async getConnectPayoutSummary(accountId: string): Promise<{
+    id: string;
+    payoutsEnabled: boolean;
+    chargesEnabled: boolean;
+    requirementsDue: boolean;
+    bankAccount: {
+      bankName: string | null;
+      last4: string | null;
+      routingNumber: string | null;
+      currency: string;
+    } | null;
+    mock: boolean;
+  }> {
+    if (this.isMockMode() || accountId.startsWith('acct_mock_')) {
+      return {
+        id: accountId,
+        payoutsEnabled: true,
+        chargesEnabled: true,
+        requirementsDue: false,
+        bankAccount: {
+          bankName: 'Practice Bank (AU)',
+          last4: '0000',
+          routingNumber: '000-000',
+          currency: 'aud',
+        },
+        mock: true,
+      };
+    }
+
+    const status = await this.retrieveConnectAccount(accountId);
+    let requirementsDue = !status.payoutsEnabled;
+    let bankAccount: {
+      bankName: string | null;
+      last4: string | null;
+      routingNumber: string | null;
+      currency: string;
+    } | null = null;
+
+    try {
+      const v1Account = await this.getClient().accounts.retrieve(accountId);
+      const currentlyDue = v1Account.requirements?.currently_due ?? [];
+      const pastDue = v1Account.requirements?.past_due ?? [];
+      requirementsDue = currentlyDue.length > 0 || pastDue.length > 0;
+
+      const externalAccounts = v1Account.external_accounts?.data ?? [];
+      const bankAccounts = externalAccounts.filter(
+        (ea): ea is Stripe.BankAccount => ea.object === 'bank_account',
+      );
+      const primaryBank =
+        bankAccounts.find((b) => b.default_for_currency) ?? bankAccounts[0] ?? null;
+      if (primaryBank) {
+        bankAccount = {
+          bankName: primaryBank.bank_name ?? null,
+          last4: primaryBank.last4 ?? null,
+          routingNumber: primaryBank.routing_number ?? null,
+          currency: (primaryBank.currency ?? 'aud').toLowerCase(),
+        };
+      }
+    } catch (error: unknown) {
+      this.logger.warn(
+        `Could not read external bank summary for ${accountId}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+
+    return {
+      id: status.id,
+      payoutsEnabled: status.payoutsEnabled,
+      chargesEnabled: status.chargesEnabled,
+      requirementsDue,
+      bankAccount,
+      mock: false,
+    };
+  }
+
+  /**
+   * Single-use Stripe URL allowing an existing carrier Connected Account to
+   * view/change their payout bank account or resolve outstanding requirements.
+   *
+   * - Active accounts: Stripe Express Dashboard login link (falls back to
+   *   Accounts v2 `account_update`, then `account_onboarding`).
+   * - Incomplete/paused accounts: Accounts v2 `account_onboarding` link.
+   */
+  async createConnectManageLink(params: {
+    accountId: string;
+    payoutsEnabled: boolean;
+    refreshUrl: string;
+    returnUrl: string;
+  }): Promise<{
+    url: string;
+    kind: 'dashboard' | 'account_update' | 'account_onboarding';
+    mock: boolean;
+  }> {
+    if (this.isMockMode() || params.accountId.startsWith('acct_mock_')) {
+      const sep = params.returnUrl.includes('?') ? '&' : '?';
+      const url = `${params.returnUrl}${sep}connect=manage_mock&account=${params.accountId}`;
+      this.logger.warn(`STRIPE_MOCK: ConnectManageLink ${url}`);
+      return { url, kind: 'dashboard', mock: true };
+    }
+
+    if (params.payoutsEnabled) {
+      try {
+        const loginLink = await this.getClient().accounts.createLoginLink(params.accountId);
+        return { url: loginLink.url, kind: 'dashboard', mock: false };
+      } catch (error: unknown) {
+        this.logger.warn(
+          `Express loginLink unavailable for ${params.accountId}; falling back to v2 account_update link: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
+
+      try {
+        const updateLink = await this.getClient().v2.core.accountLinks.create({
+          account: params.accountId,
+          use_case: {
+            type: 'account_update',
+            account_update: {
+              refresh_url: params.refreshUrl,
+              return_url: params.returnUrl,
+              collection_options: {
+                fields: 'eventually_due',
+              },
+            },
+          },
+        });
+        return { url: updateLink.url, kind: 'account_update', mock: false };
+      } catch (error: unknown) {
+        this.logger.warn(
+          `v2 account_update link failed for ${params.accountId}; falling back to account_onboarding: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
+    }
+
+    const onboardingLink = await this.createAccountLink({
+      accountId: params.accountId,
+      refreshUrl: params.refreshUrl,
+      returnUrl: params.returnUrl,
+    });
+    return { url: onboardingLink.url, kind: 'account_onboarding', mock: false };
+  }
+
   publishableKey() {
     return this.config.get('STRIPE_PUBLISHABLE_KEY', { infer: true }) ?? null;
   }

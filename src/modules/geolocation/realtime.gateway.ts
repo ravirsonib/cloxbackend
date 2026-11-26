@@ -8,12 +8,13 @@ import {
   MessageBody,
   WsException,
 } from '@nestjs/websockets';
-import { Logger, Injectable } from '@nestjs/common';
+import { Logger, Injectable, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import { Server, Socket } from 'socket.io';
 import type { AppEnv } from '../../config/env.validation';
-import type { AppRole } from '../../shared/types';
+import { PrismaService } from '../../prisma/prisma.service';
+import { isAdminRole, type AppRole } from '../../shared/types';
 
 export const WS_EVENTS = {
   VEHICLE_LOCATION:   'vehicle:location',
@@ -100,13 +101,14 @@ export class RealtimeGateway implements OnGatewayConnection, OnGatewayDisconnect
   constructor(
     private readonly jwt: JwtService,
     private readonly config: ConfigService<AppEnv, true>,
+    @Optional() private readonly prisma?: PrismaService,
   ) {}
 
   async handleConnection(client: Socket) {
     try {
       const principal = await this.authenticate(client);
-      (client as any).principal = principal;
-      if (['SUPER_ADMIN', 'STATE_MASTER', 'LOCAL_BDE'].includes(principal.role)) {
+      (client as Socket & { principal?: WsPrincipal }).principal = principal;
+      if (isAdminRole(principal.role)) {
         await client.join(rooms.admin());
       }
       this.logger.debug(
@@ -127,47 +129,57 @@ export class RealtimeGateway implements OnGatewayConnection, OnGatewayDisconnect
   @SubscribeMessage(WS_EVENTS.SUBSCRIBE_TRIP)
   async onSubscribeTrip(
     @ConnectedSocket() client: Socket,
-    @MessageBody() data: { tripId: string },
+    @MessageBody() data: { tripId?: string },
   ) {
-    this.requireAuth(client);
-    await client.join(rooms.trip(data.tripId));
-    return { subscribed: rooms.trip(data.tripId) };
+    const principal = this.requireAuth(client);
+    const tripId = typeof data?.tripId === 'string' ? data.tripId.trim() : '';
+    if (!tripId) {
+      throw new WsException('Invalid tripId');
+    }
+    await this.assertCanViewTrip(principal, tripId);
+    await client.join(rooms.trip(tripId));
+    return { subscribed: rooms.trip(tripId) };
   }
 
   @SubscribeMessage(WS_EVENTS.SUBSCRIBE_FLEET)
   async onSubscribeFleet(
     @ConnectedSocket() client: Socket,
-    @MessageBody() data: { companyId: string },
+    @MessageBody() data: { companyId?: string },
   ) {
     const principal = this.requireAuth(client);
-    const isAdmin = ['SUPER_ADMIN', 'STATE_MASTER', 'LOCAL_BDE'].includes(principal.role);
-    const isOwnCarrier =
-      ['TRANSPORT_COMPANY'].includes(principal.role) &&
-      (principal as any).companyId === data.companyId;
-    if (!isAdmin && !isOwnCarrier) {
-      throw new WsException('Forbidden');
+    const companyId = typeof data?.companyId === 'string' ? data.companyId.trim() : '';
+    if (!companyId) {
+      throw new WsException('Invalid companyId');
     }
-    await client.join(rooms.fleet(data.companyId));
-    return { subscribed: rooms.fleet(data.companyId) };
+    await this.assertCanViewFleet(principal, companyId);
+    await client.join(rooms.fleet(companyId));
+    return { subscribed: rooms.fleet(companyId) };
   }
 
   @SubscribeMessage(WS_EVENTS.SUBSCRIBE_JOB)
   async onSubscribeJob(
     @ConnectedSocket() client: Socket,
-    @MessageBody() data: { jobId: string },
+    @MessageBody() data: { jobId?: string },
   ) {
-    this.requireAuth(client);
-    await client.join(rooms.job(data.jobId));
-    return { subscribed: rooms.job(data.jobId) };
+    const principal = this.requireAuth(client);
+    const jobId = typeof data?.jobId === 'string' ? data.jobId.trim() : '';
+    if (!jobId) {
+      throw new WsException('Invalid jobId');
+    }
+    await this.assertCanViewJob(principal, jobId);
+    await client.join(rooms.job(jobId));
+    return { subscribed: rooms.job(jobId) };
   }
 
   @SubscribeMessage(WS_EVENTS.UNSUBSCRIBE_TRIP)
   async onUnsubscribeTrip(
     @ConnectedSocket() client: Socket,
-    @MessageBody() data: { tripId: string },
+    @MessageBody() data: { tripId?: string },
   ) {
-    await client.leave(rooms.trip(data.tripId));
-    return { unsubscribed: rooms.trip(data.tripId) };
+    const tripId = typeof data?.tripId === 'string' ? data.tripId.trim() : '';
+    if (!tripId) return { unsubscribed: null };
+    await client.leave(rooms.trip(tripId));
+    return { unsubscribed: rooms.trip(tripId) };
   }
 
   emitVehicleLocation(payload: VehicleLocationPayload, companyId?: string) {
@@ -206,16 +218,122 @@ export class RealtimeGateway implements OnGatewayConnection, OnGatewayDisconnect
     }
   }
 
-  emitEtaUpdate(payload: JobEtaPayload) {
-    this.server?.to(rooms.job(payload.jobId))?.emit(WS_EVENTS.JOB_ETA_UPDATE, payload);
+  emitEtaUpdate(payload: JobEtaPayload, tripId?: string) {
+    const emitter = this.server?.to(rooms.job(payload.jobId));
+    if (tripId) {
+      emitter?.to(rooms.trip(tripId))?.emit(WS_EVENTS.JOB_ETA_UPDATE, payload);
+      return;
+    }
+    emitter?.emit(WS_EVENTS.JOB_ETA_UPDATE, payload);
   }
 
   emitApproaching(payload: JobApproachingPayload, tripId: string) {
     this.server?.to(rooms.job(payload.jobId))?.to(rooms.trip(tripId))?.emit(WS_EVENTS.JOB_APPROACHING, payload);
   }
 
-  private async authenticate(client: Socket): Promise<{ id: string; role: AppRole; companyId?: string }> {
+  private async resolveUserAffiliation(principal: WsPrincipal): Promise<{
+    companyId: string | null;
+    driverId: string | null;
+  }> {
+    if (!this.prisma || !this.prisma.isConnected()) {
+      return { companyId: principal.companyId ?? null, driverId: null };
+    }
+    const user = await this.prisma.user.findUnique({
+      where: { id: principal.id },
+      select: { companyId: true, driver: { select: { id: true } } },
+    });
+    return {
+      companyId: user?.companyId ?? principal.companyId ?? null,
+      driverId: user?.driver?.id ?? null,
+    };
+  }
+
+  private async assertCanViewTrip(principal: WsPrincipal, tripId: string): Promise<void> {
+    if (isAdminRole(principal.role)) return;
+    if (!this.prisma || !this.prisma.isConnected()) {
+      throw new WsException('Forbidden');
+    }
+    const [trip, affiliation] = await Promise.all([
+      this.prisma.trip.findUnique({
+        where: { id: tripId },
+        select: {
+          id: true,
+          job: { select: { senderCompanyId: true } },
+          assignment: { select: { carrierCompanyId: true, driverId: true } },
+        },
+      }),
+      this.resolveUserAffiliation(principal),
+    ]);
+    if (!trip) throw new WsException('Forbidden');
+
+    const allowed =
+      (principal.role === 'SENDER' &&
+        Boolean(affiliation.companyId) &&
+        trip.job.senderCompanyId === affiliation.companyId) ||
+      (principal.role === 'TRANSPORT_COMPANY' &&
+        Boolean(affiliation.companyId) &&
+        trip.assignment?.carrierCompanyId === affiliation.companyId) ||
+      (principal.role === 'DRIVER' &&
+        Boolean(affiliation.driverId) &&
+        trip.assignment?.driverId === affiliation.driverId);
+
+    if (!allowed) {
+      throw new WsException('Forbidden');
+    }
+  }
+
+  private async assertCanViewJob(principal: WsPrincipal, jobId: string): Promise<void> {
+    if (isAdminRole(principal.role)) return;
+    if (!this.prisma || !this.prisma.isConnected()) {
+      throw new WsException('Forbidden');
+    }
+    const [job, affiliation] = await Promise.all([
+      this.prisma.job.findUnique({
+        where: { id: jobId },
+        select: {
+          id: true,
+          senderCompanyId: true,
+          assignment: { select: { carrierCompanyId: true, driverId: true } },
+        },
+      }),
+      this.resolveUserAffiliation(principal),
+    ]);
+    if (!job) throw new WsException('Forbidden');
+
+    const allowed =
+      (principal.role === 'SENDER' &&
+        Boolean(affiliation.companyId) &&
+        job.senderCompanyId === affiliation.companyId) ||
+      (principal.role === 'TRANSPORT_COMPANY' &&
+        Boolean(affiliation.companyId) &&
+        job.assignment?.carrierCompanyId === affiliation.companyId) ||
+      (principal.role === 'DRIVER' &&
+        Boolean(affiliation.driverId) &&
+        job.assignment?.driverId === affiliation.driverId);
+
+    if (!allowed) {
+      throw new WsException('Forbidden');
+    }
+  }
+
+  private async assertCanViewFleet(principal: WsPrincipal, companyId: string): Promise<void> {
+    if (isAdminRole(principal.role)) return;
+    if (principal.role !== 'TRANSPORT_COMPANY') {
+      throw new WsException('Forbidden');
+    }
+    const affiliation = await this.resolveUserAffiliation(principal);
+    if (!affiliation.companyId || affiliation.companyId !== companyId) {
+      throw new WsException('Forbidden');
+    }
+  }
+
+  private async authenticate(client: Socket): Promise<WsPrincipal> {
+    const authToken =
+      typeof client.handshake.auth?.token === 'string'
+        ? client.handshake.auth.token
+        : undefined;
     const token =
+      authToken ||
       (client.handshake.query?.token as string) ||
       (client.handshake.headers?.authorization as string)?.replace(/^Bearer\s+/i, '');
 
@@ -233,10 +351,12 @@ export class RealtimeGateway implements OnGatewayConnection, OnGatewayDisconnect
     return { id: payload.sub, role: payload.role, companyId: payload.companyId };
   }
 
-  private requireAuth(client: Socket): { id: string; role: AppRole; companyId?: string } {
-    const principal = (client as any).principal;
+  private requireAuth(client: Socket): WsPrincipal {
+    const principal = (client as Socket & { principal?: WsPrincipal }).principal;
     if (!principal) throw new WsException('Unauthorized');
     return principal;
   }
 }
+
+type WsPrincipal = { id: string; role: AppRole; companyId?: string };
 
