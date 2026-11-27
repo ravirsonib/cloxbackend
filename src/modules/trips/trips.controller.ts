@@ -59,6 +59,15 @@ export class TripsController {
     return this.trips.listDriverTrips(principal);
   }
 
+  @Get('fleet/live')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(AppRole.TRANSPORT_COMPANY)
+  @ApiOperation({ summary: 'Carrier live fleet trips with latest GPS and next stop' })
+  fleetLive(@CurrentPrincipal() principal: AuthenticatedPrincipal) {
+    return this.trips.getCarrierFleetLive(principal);
+  }
+
   @Get('jobs/:jobId/track')
   @ApiBearerAuth()
   @UseGuards(JwtAuthGuard, RolesGuard)

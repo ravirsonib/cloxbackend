@@ -170,11 +170,15 @@ describe('Controller delegation leftovers (sender/driver/docs/ops/matching/leads
     expect(idCtrl.status()).toMatchObject({ module: 'identity', milestone: 'M1' });
     await expect(idCtrl.me(principal)).resolves.toEqual({ id: 'p1' });
 
-    const geo = new GeolocationController();
-    expect(geo.status()).toMatchObject({
+    const valhalla = {
+      isEnabled: false,
+      ping: jest.fn().mockResolvedValue({ ok: false }),
+    };
+    const geo = new GeolocationController(valhalla as never);
+    await expect(geo.status()).resolves.toMatchObject({
       module: 'geolocation',
-      status: 'scaffold',
-      implemented: false,
+      status: 'degraded',
+      valhalla: { enabled: false, reachable: false },
     });
   });
 });

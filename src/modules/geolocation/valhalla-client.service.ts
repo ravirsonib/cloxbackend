@@ -80,7 +80,14 @@ export class ValhallaClientService {
       const ms = Date.now() - t0;
       if (!results?.length) return null;
       const node = results[0].nodes?.[0];
-      if (!node) return null;
+      if (
+        !node ||
+        !Number.isFinite(node.lat) ||
+        !Number.isFinite(node.lon) ||
+        (node.lat === 0 && node.lon === 0)
+      ) {
+        return null;
+      }
       this.logger.debug({ valhallaMs: ms, op: 'snapToRoad' }, 'Valhalla snap OK');
       return { lat: node.lat, lng: node.lon };
     } catch (err) {
@@ -111,15 +118,31 @@ export class ValhallaClientService {
       const ms = Date.now() - t0;
       if (!data?.trip?.legs?.length) return null;
 
-      const encodedPolyline = mergePolylines6(data.trip.legs.map((leg) => leg.shape));
+      const length = data.trip.summary?.length;
+      const time = data.trip.summary?.time;
+      const encodedPolyline = mergePolylines6(
+        data.trip.legs.map((leg) => (typeof leg?.shape === 'string' ? leg.shape : '')),
+      );
+      if (
+        !encodedPolyline ||
+        typeof length !== 'number' ||
+        !Number.isFinite(length) ||
+        length < 0 ||
+        typeof time !== 'number' ||
+        !Number.isFinite(time) ||
+        time < 0
+      ) {
+        this.logger.warn({ op: 'getRoute' }, 'Valhalla returned malformed trip summary');
+        return null;
+      }
       this.logger.debug(
         { valhallaMs: ms, op: 'getRoute', legs: data.trip.legs.length },
         'Valhalla route OK',
       );
       return {
         encodedPolyline,
-        distanceKm: data.trip.summary.length,
-        durationMin: Math.ceil(data.trip.summary.time / 60),
+        distanceKm: length,
+        durationMin: Math.ceil(time / 60),
       };
     } catch (err) {
       this.logger.warn({ err, op: 'getRoute' }, 'Valhalla getRoute failed');

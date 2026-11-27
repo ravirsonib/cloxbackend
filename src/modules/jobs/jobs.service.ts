@@ -121,7 +121,12 @@ export class JobsService {
   }): Promise<RouteEstimate> {
     if (this.valhalla?.isEnabled && params.stops.length >= 2) {
       const valRoute = await this.valhalla.getRoute(params.stops);
-      if (valRoute && valRoute.distanceKm > 0) {
+      if (
+        valRoute &&
+        Number.isFinite(valRoute.distanceKm) &&
+        valRoute.distanceKm > 0 &&
+        Number.isFinite(valRoute.durationMin)
+      ) {
         return routeFromValhalla({
           distanceKm: valRoute.distanceKm,
           drivingMinutes: valRoute.durationMin,

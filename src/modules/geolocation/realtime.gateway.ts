@@ -24,6 +24,7 @@ export const WS_EVENTS = {
   VEHICLE_ARRIVED:    'vehicle:arrived',
   JOB_ETA_UPDATE:     'job:eta-update',
   JOB_APPROACHING:    'job:approaching',
+  TRIP_BREAK:         'trip:break',
   SUBSCRIBE_TRIP:     'subscribe:trip',
   SUBSCRIBE_FLEET:    'subscribe:fleet',
   SUBSCRIBE_JOB:      'subscribe:job',
@@ -76,6 +77,13 @@ export interface JobEtaPayload {
 export interface JobApproachingPayload {
   jobId: string;
   minutesAway: number;
+  timestamp: string;
+}
+
+export interface TripBreakPayload {
+  tripId: string;
+  jobId: string;
+  onBreak: boolean;
   timestamp: string;
 }
 
@@ -229,6 +237,17 @@ export class RealtimeGateway implements OnGatewayConnection, OnGatewayDisconnect
 
   emitApproaching(payload: JobApproachingPayload, tripId: string) {
     this.server?.to(rooms.job(payload.jobId))?.to(rooms.trip(tripId))?.emit(WS_EVENTS.JOB_APPROACHING, payload);
+  }
+
+  emitTripBreak(payload: TripBreakPayload, companyId?: string) {
+    this.server
+      ?.to(rooms.trip(payload.tripId))
+      ?.to(rooms.job(payload.jobId))
+      ?.to(rooms.admin())
+      ?.emit(WS_EVENTS.TRIP_BREAK, payload);
+    if (companyId) {
+      this.server?.to(rooms.fleet(companyId))?.emit(WS_EVENTS.TRIP_BREAK, payload);
+    }
   }
 
   private async resolveUserAffiliation(principal: WsPrincipal): Promise<{

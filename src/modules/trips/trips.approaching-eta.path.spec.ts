@@ -269,4 +269,141 @@ describe('TripsService Phase E auto ETA approaching', () => {
 
     expect(notifications.notifyTripApproaching).not.toHaveBeenCalled();
   });
+
+  it('uses Valhalla road ETA when enabled and emits WS approaching event', async () => {
+    const stopId = 'stop-drop';
+    const trip = {
+      id: 'trip-1',
+      jobId: 'job-1',
+      status: TripStatus.IN_TRANSIT,
+      safetyPassedAt: new Date(),
+      safetyFailedAt: null,
+      safetyNotes: null,
+      declaredMassKg: 1000,
+      actualMassKg: 1000,
+      massCheckOk: true,
+      massCheckedAt: new Date(),
+      massOverDeclared: false,
+      onBreak: false,
+      breakStartedAt: null,
+      startedAt: new Date(),
+      completedAt: null,
+      job: {
+        title: 'Hourly',
+        status: JobStatus.IN_TRANSIT,
+        siteManeuverability: null,
+        siteFacility: null,
+        deadWeightKg: 1000,
+        chargeableWeightKg: 1000,
+        stops: [
+          {
+            id: stopId,
+            sequence: 0,
+            stopType: 'DROPOFF',
+            suburb: 'Melbourne',
+            state: 'VIC',
+            lat: -37.8136,
+            lng: 144.9631,
+          },
+        ],
+      },
+      assignment: {
+        status: AssignmentStatus.LOCKED,
+        vehicleId: 'veh-1',
+        driverId: 'drv-1',
+        vehicle: { label: 'T', registration: 'ABC', vehicleClass: 'MR' },
+      },
+      locations: [],
+      stopProgress: [],
+      surcharges: [],
+    };
+    const progressRow = {
+      id: 'prog-1',
+      tripId: 'trip-1',
+      jobStopId: stopId,
+      approachingNotifiedAt: null,
+      enteredAt: null,
+      exitedAt: null,
+      podStatus: 'PENDING',
+    };
+    const prisma = {
+      isConnected: () => true,
+      user: {
+        findUnique: jest.fn().mockResolvedValue({
+          id: 'user-driver',
+          driver: { id: 'drv-1' },
+        }),
+      },
+      trip: {
+        findFirst: jest.fn().mockResolvedValue(trip),
+        findUnique: jest.fn().mockResolvedValue({
+          ...trip,
+          job: {
+            ...trip.job,
+            senderCompany: { email: 's@yopmail.com', users: [{ email: 's@yopmail.com' }] },
+          },
+          assignment: { carrierCompany: { email: null, users: [] } },
+          stopProgress: [],
+        }),
+      },
+      tripLocationSample: {
+        create: jest.fn().mockResolvedValue({ id: 'loc-1', recordedAt: new Date() }),
+      },
+      tripStopProgress: {
+        findUnique: jest.fn().mockResolvedValue(null),
+        create: jest.fn().mockResolvedValue(progressRow),
+        update: jest.fn().mockResolvedValue({ ...progressRow, approachingSource: 'ETA_AUTO' }),
+      },
+      policyVersion: { findFirst: jest.fn().mockResolvedValue(null) },
+    };
+    const realtimeGateway = {
+      emitVehicleLocation: jest.fn(),
+      emitEtaUpdate: jest.fn(),
+      emitApproaching: jest.fn(),
+    };
+    const valhalla = {
+      isEnabled: true,
+      snapToRoad: jest.fn().mockResolvedValue(null),
+      etaMinutes: jest.fn().mockResolvedValue(22),
+    };
+
+    const service = new TripsService(
+      prisma as never,
+      audit as never,
+      {
+        get: (key: string) => {
+          if (key === 'APPROACHING_ETA_MIN_MINUTES') return 15;
+          if (key === 'APPROACHING_ETA_MAX_MINUTES') return 30;
+          if (key === 'APPROACHING_ETA_SPEED_KMH') return 40;
+          if (key === 'GEOFENCE_RADIUS_METERS') return 200;
+          return undefined;
+        },
+      } as never,
+      payments as never,
+      notifications as never,
+      undefined,
+      undefined,
+      realtimeGateway as never,
+      valhalla as never,
+    );
+
+    await service.postLocation(driverPrincipal, 'trip-1', {
+      lat: -37.5,
+      lng: 144.9631,
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    await Promise.resolve();
+
+    expect(valhalla.etaMinutes).toHaveBeenCalled();
+    expect(notifications.notifyTripApproaching).toHaveBeenCalledWith(
+      expect.objectContaining({
+        source: 'ETA_AUTO',
+        etaLabel: '~22 min',
+      }),
+    );
+    expect(realtimeGateway.emitApproaching).toHaveBeenCalledWith(
+      expect.objectContaining({ jobId: 'job-1', minutesAway: 22 }),
+      'trip-1',
+    );
+  });
 });

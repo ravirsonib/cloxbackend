@@ -97,6 +97,10 @@ import { extname, join } from 'path';
 @Injectable()
 export class TripsService {
   private readonly logger = new Logger(TripsService.name);
+  private readonly valhallaRouteCache = new Map<
+    string,
+    { expiresAt: number; value: { encodedPolyline: string; distanceKm: number; durationMin: number } }
+  >();
 
   constructor(
     private readonly prisma: PrismaService,
@@ -934,7 +938,12 @@ export class TripsService {
         resolvedAt: true,
       },
     });
-    return { ...mapped, openException };
+    const routeSnapshot = await this.buildTripRouteSnapshot({
+      stops: trip.job?.stops ?? [],
+      stopProgress: trip.stopProgress ?? [],
+      latest: mapped.latestLocation,
+    });
+    return { ...mapped, openException, ...routeSnapshot };
   }
 
   async safetyCheck(
@@ -1375,6 +1384,15 @@ export class TripsService {
       entityId: trip.id,
       metadata: { onBreak: input.onBreak, ewdSynced: Boolean(this.nhvr) },
     });
+    this.realtimeGateway?.emitTripBreak(
+      {
+        tripId: trip.id,
+        jobId: trip.jobId,
+        onBreak: input.onBreak,
+        timestamp: new Date().toISOString(),
+      },
+      trip.assignment?.carrierCompanyId ?? undefined,
+    );
     if (input.onBreak) {
       void this.emitTripInbox({
         tripId: trip.id,
@@ -2459,34 +2477,11 @@ export class TripsService {
       user.id,
     ).catch(() => undefined);
 
-    // Broadcast real-time location via Socket.io (suppressed while driver is on break)
+    // Broadcast real-time location via Socket.io non-blocking (suppressed while driver is on break)
     if (this.realtimeGateway && !trip.onBreak) {
-      try {
-        const vehicleId = trip.assignment?.vehicleId ?? undefined;
-        const carrierCompanyId = trip.assignment?.carrierCompanyId ?? undefined;
-        const snapped = this.valhalla?.isEnabled
-          ? await this.valhalla.snapToRoad(input.lat, input.lng)
-          : null;
-        this.realtimeGateway.emitVehicleLocation(
-          {
-            tripId: trip.id,
-            driverId: user.driver!.id,
-            vehicleId,
-            lat: input.lat,
-            lng: input.lng,
-            ...(snapped ? { snappedLat: snapped.lat, snappedLng: snapped.lng } : {}),
-            timestamp: sample.recordedAt.toISOString(),
-          },
-          carrierCompanyId,
-        );
-        void this.emitLiveEtaUpdate(
-          trip,
-          { lat: snapped?.lat ?? input.lat, lng: snapped?.lng ?? input.lng },
-          sample.recordedAt,
-        ).catch(() => undefined);
-      } catch (err) {
-        this.logger.warn({ err }, 'Failed to emit realtime vehicle location');
-      }
+      void this.broadcastLocationUpdate(trip, user.driver!.id, input, sample.recordedAt).catch(
+        (err) => this.logger.warn({ err }, 'Failed to emit realtime vehicle location'),
+      );
     }
 
     return {
@@ -2543,61 +2538,18 @@ export class TripsService {
         }
       : null;
 
-    let route: {
-      encodedPolyline: string;
-      distanceKm: number;
-      durationMinutes: number;
-      source: 'valhalla';
-    } | null = null;
-    let etaMinutes: number | null = null;
-    let distanceKmRemaining: number | null = null;
-    let nextStopId: string | null = null;
-
-    if (!trip.onBreak) {
-      const remainingStops = this.getRemainingTripStops(trip.job.stops, trip.stopProgress);
-      nextStopId = remainingStops[0]?.id ?? null;
-
-      const plannedStops = trip.job.stops
-        .filter((s) => s.lat != null && s.lng != null)
-        .map((s) => ({ lat: Number(s.lat), lng: Number(s.lng) }));
-
-      const waypoints = latest
-        ? [{ lat: latest.lat, lng: latest.lng }, ...remainingStops.map((s) => ({ lat: s.lat, lng: s.lng }))]
-        : plannedStops;
-
-      if (waypoints.length >= 2) {
-        const valRoute = this.valhalla?.isEnabled
-          ? await this.valhalla.getRoute(waypoints)
-          : null;
-        if (valRoute && valRoute.encodedPolyline) {
-          const roundedKm = Math.round(valRoute.distanceKm * 10) / 10;
-          route = {
-            encodedPolyline: valRoute.encodedPolyline,
-            distanceKm: roundedKm,
-            durationMinutes: valRoute.durationMin,
-            source: 'valhalla',
-          };
-          etaMinutes = valRoute.durationMin;
-          distanceKmRemaining = roundedKm;
-        } else {
-          let totalMeters = 0;
-          for (let i = 0; i < waypoints.length - 1; i += 1) {
-            totalMeters += haversineMeters(
-              waypoints[i].lat,
-              waypoints[i].lng,
-              waypoints[i + 1].lat,
-              waypoints[i + 1].lng,
-            );
-          }
-          const distKm = Math.round((totalMeters / 1000) * 10) / 10;
-          distanceKmRemaining = distKm;
-          etaMinutes = distKm > 0 ? Math.max(1, Math.ceil((distKm / 40) * 60)) : 0;
+    const routeSnapshot = trip.onBreak
+      ? {
+          route: null,
+          etaMinutes: null,
+          distanceKmRemaining: null,
+          nextStopId: null,
         }
-      } else if (remainingStops.length === 0) {
-        etaMinutes = 0;
-        distanceKmRemaining = 0;
-      }
-    }
+      : await this.buildTripRouteSnapshot({
+          stops: trip.job.stops,
+          stopProgress: trip.stopProgress,
+          latest,
+        });
 
     return {
       visible: true,
@@ -2624,16 +2576,285 @@ export class TripsService {
         recordedAt: l.recordedAt,
       })),
       latest,
-      route,
-      etaMinutes,
-      distanceKmRemaining,
-      nextStopId,
+      route: routeSnapshot.route,
+      etaMinutes: routeSnapshot.etaMinutes,
+      distanceKmRemaining: routeSnapshot.distanceKmRemaining,
+      nextStopId: routeSnapshot.nextStopId,
       stopsProgress: this.mapStopProgress(trip.stopProgress),
       surcharges: this.mapSurcharges(trip.surcharges),
       taxInvoiceStorageKey: trip.taxInvoiceStorageKey,
       runSheetStorageKey: trip.runSheetStorageKey,
       podStorageKey: trip.podStorageKey,
     };
+  }
+
+  private async buildTripRouteSnapshot(params: {
+    stops: Array<{
+      id: string;
+      sequence: number;
+      stopType: string;
+      lat: unknown;
+      lng: unknown;
+    }>;
+    stopProgress: Array<{
+      jobStopId: string;
+      exitedAt: Date | null;
+      podStatus?: string | null;
+    }>;
+    latest: { lat: number; lng: number } | null;
+  }): Promise<{
+    route: {
+      encodedPolyline: string;
+      distanceKm: number;
+      durationMinutes: number;
+      source: 'valhalla';
+    } | null;
+    etaMinutes: number | null;
+    distanceKmRemaining: number | null;
+    nextStopId: string | null;
+  }> {
+    const remainingStops = this.getRemainingTripStops(params.stops, params.stopProgress);
+    const nextStopId = remainingStops[0]?.id ?? null;
+
+    const plannedStops = params.stops
+      .filter((s) => s.lat != null && s.lng != null)
+      .map((s) => ({ lat: Number(s.lat), lng: Number(s.lng) }));
+
+    const waypoints = params.latest
+      ? [
+          { lat: params.latest.lat, lng: params.latest.lng },
+          ...remainingStops.map((s) => ({ lat: s.lat, lng: s.lng })),
+        ]
+      : plannedStops;
+
+    if (waypoints.length >= 2) {
+      const valRoute = await this.getCachedValhallaRoute(waypoints);
+      if (valRoute && valRoute.encodedPolyline) {
+        const roundedKm = Math.round(valRoute.distanceKm * 10) / 10;
+        return {
+          route: {
+            encodedPolyline: valRoute.encodedPolyline,
+            distanceKm: roundedKm,
+            durationMinutes: valRoute.durationMin,
+            source: 'valhalla',
+          },
+          etaMinutes: valRoute.durationMin,
+          distanceKmRemaining: roundedKm,
+          nextStopId,
+        };
+      }
+      let totalMeters = 0;
+      for (let i = 0; i < waypoints.length - 1; i += 1) {
+        totalMeters += haversineMeters(
+          waypoints[i].lat,
+          waypoints[i].lng,
+          waypoints[i + 1].lat,
+          waypoints[i + 1].lng,
+        );
+      }
+      const distKm = Math.round((totalMeters / 1000) * 10) / 10;
+      return {
+        route: null,
+        etaMinutes: distKm > 0 ? Math.max(1, Math.ceil((distKm / 40) * 60)) : 0,
+        distanceKmRemaining: distKm,
+        nextStopId,
+      };
+    }
+
+    if (remainingStops.length === 0) {
+      return {
+        route: null,
+        etaMinutes: 0,
+        distanceKmRemaining: 0,
+        nextStopId: null,
+      };
+    }
+
+    return {
+      route: null,
+      etaMinutes: null,
+      distanceKmRemaining: null,
+      nextStopId,
+    };
+  }
+
+  /**
+   * Phase C — Carrier fleet live overview: active trips for this carrier company
+   * with latest GPS sample, vehicle/driver info, and remaining stops.
+   */
+  async getCarrierFleetLive(principal: AuthenticatedPrincipal) {
+    this.ensureDatabase();
+    if (principal.role !== 'TRANSPORT_COMPANY') {
+      throw new ForbiddenException('Carrier company required');
+    }
+    const user = await this.prisma.user.findUnique({ where: { id: principal.id } });
+    if (!user?.companyId) {
+      throw new NotFoundException('Carrier company not found');
+    }
+
+    const activeStatuses: TripStatus[] = [
+      TripStatus.EN_ROUTE_PICKUP,
+      TripStatus.AT_PICKUP,
+      TripStatus.IN_TRANSIT,
+      TripStatus.AT_DROPOFF,
+      TripStatus.BREAKDOWN,
+    ];
+
+    const trips = await this.prisma.trip.findMany({
+      where: {
+        status: { in: activeStatuses },
+        assignment: { carrierCompanyId: user.companyId },
+      },
+      orderBy: { updatedAt: 'desc' },
+      take: 50,
+      include: {
+        job: { include: { stops: { orderBy: { sequence: 'asc' } } } },
+        assignment: {
+          include: {
+            vehicle: true,
+            driver: { include: { user: { select: { name: true, email: true } } } },
+          },
+        },
+        locations: { orderBy: { recordedAt: 'desc' }, take: 1 },
+        stopProgress: true,
+      },
+    });
+
+    return {
+      companyId: user.companyId,
+      trips: trips.map((trip) => {
+        const latestRow = trip.locations[0] ?? null;
+        const remainingStops = this.getRemainingTripStops(trip.job.stops, trip.stopProgress);
+        const nextStop = remainingStops[0] ?? null;
+        const nextStopRecord = nextStop
+          ? trip.job.stops.find((s) => s.id === nextStop.id) ?? null
+          : null;
+
+        return {
+          tripId: trip.id,
+          jobId: trip.jobId,
+          jobTitle: trip.job.title,
+          tripStatus: trip.status,
+          onBreak: trip.onBreak,
+          startedAt: trip.startedAt,
+          vehicle: trip.assignment?.vehicle
+            ? {
+                id: trip.assignment.vehicle.id,
+                label: trip.assignment.vehicle.label,
+                registration: trip.assignment.vehicle.registration,
+                vehicleClass: trip.assignment.vehicle.vehicleClass,
+              }
+            : null,
+          driver: trip.assignment?.driver
+            ? {
+                id: trip.assignment.driver.id,
+                name: trip.assignment.driver.user?.name ?? null,
+                email: trip.assignment.driver.user?.email ?? null,
+              }
+            : null,
+          latest: latestRow
+            ? {
+                lat: Number(latestRow.lat),
+                lng: Number(latestRow.lng),
+                recordedAt: latestRow.recordedAt,
+              }
+            : null,
+          nextStop: nextStop
+            ? {
+                id: nextStop.id,
+                sequence: nextStop.sequence,
+                stopType: nextStop.stopType,
+                suburb: nextStopRecord?.suburb ?? null,
+                lat: nextStop.lat,
+                lng: nextStop.lng,
+              }
+            : null,
+          stops: trip.job.stops.map((s) => ({
+            id: s.id,
+            sequence: s.sequence,
+            stopType: s.stopType,
+            suburb: s.suburb,
+            lat: s.lat == null ? null : Number(s.lat),
+            lng: s.lng == null ? null : Number(s.lng),
+          })),
+        };
+      }),
+    };
+  }
+
+  private async getCachedValhallaRoute(
+    waypoints: Array<{ lat: number; lng: number }>,
+  ): Promise<{ encodedPolyline: string; distanceKm: number; durationMin: number } | null> {
+    if (!this.valhalla?.isEnabled || waypoints.length < 2) return null;
+    const key = waypoints
+      .map((w) => `${Math.round(w.lat * 1000)},${Math.round(w.lng * 1000)}`)
+      .join(';');
+    const now = Date.now();
+    const cached = this.valhallaRouteCache.get(key);
+    if (cached && cached.expiresAt > now) {
+      return cached.value;
+    }
+    const fresh = await this.valhalla.getRoute(waypoints);
+    if (fresh && fresh.encodedPolyline) {
+      if (this.valhallaRouteCache.size >= 200) {
+        const oldestKey = this.valhallaRouteCache.keys().next().value;
+        if (oldestKey) this.valhallaRouteCache.delete(oldestKey);
+      }
+      this.valhallaRouteCache.set(key, {
+        expiresAt: now + 20_000,
+        value: fresh,
+      });
+    }
+    return fresh;
+  }
+
+  private async broadcastLocationUpdate(
+    trip: {
+      id: string;
+      jobId: string;
+      assignment?: { vehicleId?: string | null; carrierCompanyId?: string | null } | null;
+      job?: {
+        stops?: Array<{
+          id: string;
+          sequence: number;
+          stopType: string;
+          lat: unknown;
+          lng: unknown;
+        }>;
+      } | null;
+      stopProgress?: Array<{
+        jobStopId: string;
+        exitedAt: Date | null;
+        podStatus?: string | null;
+      }>;
+    },
+    driverId: string,
+    input: { lat: number; lng: number },
+    recordedAt: Date,
+  ): Promise<void> {
+    if (!this.realtimeGateway) return;
+    const vehicleId = trip.assignment?.vehicleId ?? undefined;
+    const carrierCompanyId = trip.assignment?.carrierCompanyId ?? undefined;
+    const snapped = this.valhalla?.isEnabled
+      ? await this.valhalla.snapToRoad(input.lat, input.lng)
+      : null;
+    this.realtimeGateway.emitVehicleLocation(
+      {
+        tripId: trip.id,
+        driverId,
+        vehicleId,
+        lat: input.lat,
+        lng: input.lng,
+        ...(snapped ? { snappedLat: snapped.lat, snappedLng: snapped.lng } : {}),
+        timestamp: recordedAt.toISOString(),
+      },
+      carrierCompanyId,
+    );
+    await this.emitLiveEtaUpdate(
+      trip,
+      { lat: snapped?.lat ?? input.lat, lng: snapped?.lng ?? input.lng },
+      recordedAt,
+    );
   }
 
   private getRemainingTripStops(
@@ -2885,8 +3106,9 @@ export class TripsService {
   }
 
   /**
-   * M10 Phase E — if haversine ETA to next unfinished dropoff is in the
-   * configured window and driver has not already notified, send ETA_AUTO email.
+   * M10 Phase E / Phase C — if Valhalla road ETA (with haversine fallback) to next
+   * unfinished dropoff is in the configured window and driver has not already notified,
+   * send ETA_AUTO email and emit WS approaching event.
    */
   private async maybeAutoNotifyApproaching(
     tripId: string,
@@ -2930,17 +3152,36 @@ export class TripsService {
       typeof targetStop.lng === 'number' ? targetStop.lng : Number(targetStop.lng);
     if (!Number.isFinite(stopLat) || !Number.isFinite(stopLng)) return;
 
-    const meters = haversineMeters(point.lat, point.lng, stopLat, stopLng);
-    const etaMinutes = ((meters / 1000) / speedKmh) * 60;
+    let etaMinutes: number;
+    if (this.valhalla?.isEnabled) {
+      etaMinutes = await this.valhalla.etaMinutes(
+        point,
+        { lat: stopLat, lng: stopLng },
+        speedKmh,
+      );
+    } else {
+      const meters = haversineMeters(point.lat, point.lng, stopLat, stopLng);
+      etaMinutes = ((meters / 1000) / speedKmh) * 60;
+    }
     if (etaMinutes < minEta || etaMinutes > maxEta) return;
 
+    const roundedMin = Math.round(etaMinutes);
     await this.recordApproachingNotify({
       tripId: trip.id,
       jobStopId: targetStop.id,
       source: 'ETA_AUTO',
       actorUserId,
-      etaLabel: `~${Math.round(etaMinutes)} min`,
+      etaLabel: `~${roundedMin} min`,
     });
+
+    this.realtimeGateway?.emitApproaching(
+      {
+        jobId: trip.jobId,
+        minutesAway: roundedMin,
+        timestamp: new Date().toISOString(),
+      },
+      trip.id,
+    );
   }
 
   private async recordApproachingNotify(params: {

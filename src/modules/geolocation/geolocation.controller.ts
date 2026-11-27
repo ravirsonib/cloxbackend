@@ -5,11 +5,27 @@ import {
   ParseFloatPipe,
   BadRequestException,
   Logger,
+  UseGuards,
 } from '@nestjs/common';
-import { ApiOperation, ApiQuery, ApiTags } from '@nestjs/swagger';
+import { ApiBearerAuth, ApiOperation, ApiQuery, ApiTags } from '@nestjs/swagger';
+import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { ValhallaClientService } from './valhalla-client.service';
 import type { ValhallaCostingType } from './valhalla.types';
 import { encodePolyline6 } from './polyline6.util';
+
+function assertValidLatLng(lat: number, lng: number, label: string): void {
+  if (
+    !Number.isFinite(lat) ||
+    !Number.isFinite(lng) ||
+    lat < -90 ||
+    lat > 90 ||
+    lng < -180 ||
+    lng > 180 ||
+    (lat === 0 && lng === 0)
+  ) {
+    throw new BadRequestException(`Invalid ${label} coordinates provided`);
+  }
+}
 
 @ApiTags('geolocation')
 @Controller('geolocation')
@@ -43,6 +59,8 @@ export class GeolocationController {
   }
 
   @Get('route')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard)
   @ApiOperation({ summary: 'Calculate road-following route and polyline between two GPS points' })
   @ApiQuery({ name: 'fromLat', type: Number })
   @ApiQuery({ name: 'fromLng', type: Number })
@@ -56,9 +74,8 @@ export class GeolocationController {
     @Query('toLng', ParseFloatPipe) toLng: number,
     @Query('costing') costing?: ValhallaCostingType,
   ) {
-    if (isNaN(fromLat) || isNaN(fromLng) || isNaN(toLat) || isNaN(toLng)) {
-      throw new BadRequestException('Invalid coordinates provided');
-    }
+    assertValidLatLng(fromLat, fromLng, 'origin');
+    assertValidLatLng(toLat, toLng, 'destination');
 
     // 1. First attempt local Valhalla engine (HGV truck profile)
     try {
@@ -123,11 +140,14 @@ export class GeolocationController {
   }
 
   @Get('snap')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard)
   @ApiOperation({ summary: 'Snap GPS coordinate to nearest road segment' })
   async snap(
     @Query('lat', ParseFloatPipe) lat: number,
     @Query('lng', ParseFloatPipe) lng: number,
   ) {
+    assertValidLatLng(lat, lng, 'GPS');
     const snapped = await this.valhalla.snapToRoad(lat, lng);
     return {
       lat,
