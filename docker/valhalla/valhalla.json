@@ -1,11 +1,16 @@
 {
+  "logging": {
+    "type": "std_out",
+    "color": false
+  },
   "httpd": {
     "service": {
       "listen": "tcp://0.0.0.0:8002",
       "loopback": "ipc:///tmp/loopback",
       "interrupt": "ipc:///tmp/interrupt",
       "drain_seconds": 28,
-      "shutdown_seconds": 1
+      "shutdown_seconds": 1,
+      "timeout_seconds": -1
     }
   },
   "mjolnir": {
