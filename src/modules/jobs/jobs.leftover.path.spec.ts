@@ -221,7 +221,7 @@ describe('JobsService leftover list/get/publish/bidding paths', () => {
     expect(prop2).not.toHaveProperty('netToCarrierCents');
   });
 
-  it('getJobForSender reveals carrier identity after COMPLETED', async () => {
+  it('getJobForSender keeps carrier and driver identity masked even after COMPLETED', async () => {
     const prisma = {
       isConnected: () => true,
       user: {
@@ -280,21 +280,12 @@ describe('JobsService leftover list/get/publish/bidding paths', () => {
     const prop2 = result.proposals?.find((p: { id: string }) => p.id === 'prop-2');
     expect(prop2).toMatchObject({
       id: 'prop-2',
-      carrierLabel: 'Acme Haulage',
-      carrierCompanyIdMasked: false,
-      carrierCompany: {
-        id: 'co-c2',
-        legalName: 'Acme Haulage Pty Ltd',
-        tradingName: 'Acme Haulage',
-        email: 'ops@acmehaulage.com.au',
-      },
-      driver: {
-        id: 'd2',
-        name: 'J. Smith',
-        email: 'jsmith@acmehaulage.com.au',
-        licenceClass: 'MR',
-      },
-      vehicleRegistration: 'XYZ789',
+      carrierLabel: expect.stringMatching(/^Offer /),
+      carrierCompanyIdMasked: true,
+      carrierCompany: null,
+      driver: null,
+      vehicleRegistration: null,
+      vehicleLabel: null,
     });
   });
 

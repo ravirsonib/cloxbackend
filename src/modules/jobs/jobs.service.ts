@@ -956,7 +956,8 @@ export class JobsService {
         },
       },
     });
-    const revealCarrierIdentity = job.status === JobStatus.COMPLETED;
+    // Carrier & driver identity stay permanently masked on sender job views (including COMPLETED).
+    const revealCarrierIdentity = false;
     const mapped = this.mapJob(job, { revealCarrierIdentity });
     // Never expose carrier-net / split math on sender job detail.
     if (mapped.proposals?.length) {
