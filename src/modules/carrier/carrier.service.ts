@@ -2399,6 +2399,8 @@ export class CarrierService {
       driverId: driver.id,
       excludeJobId: assignment.job.id,
       excludeAssignmentId: assignment.id,
+      windowStart: executionWindow.windowStart,
+      windowEnd: executionWindow.windowEnd,
     });
 
     const previousVehicleId = assignment.vehicleId;

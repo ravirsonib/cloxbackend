@@ -2377,6 +2377,8 @@ export class PaymentsService {
       driverId: params.driverId,
       excludeJobId: params.jobId,
       excludeAssignmentId: params.excludeAssignmentId ?? undefined,
+      windowStart: executionWindow.windowStart,
+      windowEnd: executionWindow.windowEnd,
     });
   }
 

@@ -4,6 +4,8 @@ import {
   calculateJobExecutionWindow,
   checkDriverAvailabilityForWindow,
   assertDriverAvailabilityForWindow,
+  assertCrewNotBusyElsewhere,
+  LONG_HAUL_REST_BUFFER_MINUTES,
   intervalsOverlap,
   DEFAULT_JOB_DURATION_MINUTES,
   DEFAULT_TURNAROUND_BUFFER_MINUTES,
@@ -278,6 +280,108 @@ describe('Driver Schedule & Availability Collision Engine', () => {
           windowEnd,
         }),
       ).rejects.toThrow(ConflictException);
+    });
+  });
+
+  describe('window-based future scheduling & corner cases', () => {
+    it('applies 7-hour NHVR rest buffer for long-haul jobs (> 7h driving)', () => {
+      const win = calculateJobExecutionWindow({
+        pickupAt: new Date('2026-11-01T06:00:00.000Z'),
+        routeDurationMinutes: 480, // 8 hours driving
+      });
+      expect(win.bufferMinutes).toBe(LONG_HAUL_REST_BUFFER_MINUTES);
+      expect(win.fatigueBreakMinutes).toBe(15);
+    });
+
+    it('allows driver/vehicle busy today to bid on a non-overlapping job 15 days later', async () => {
+      const todayJob = {
+        id: 'asg-today',
+        jobId: 'job-today',
+        status: 'LOCKED',
+        job: {
+          pickupAt: new Date('2026-11-01T08:00:00.000Z'),
+          routeDurationMinutes: 120,
+          routeFatigueBreakMinutes: 0,
+        },
+      };
+      const mockPrisma = {
+        assignment: { findMany: jest.fn().mockResolvedValue([todayJob]) },
+        proposal: { findMany: jest.fn().mockResolvedValue([]) },
+      } as any;
+
+      const day15Start = new Date('2026-11-16T08:00:00.000Z');
+      const day15End = new Date('2026-11-16T11:00:00.000Z');
+
+      await expect(
+        assertCrewNotBusyElsewhere(mockPrisma, {
+          vehicleId: 'veh-1',
+          driverId: 'drv-1',
+          excludeJobId: 'job-day15',
+          windowStart: day15Start,
+          windowEnd: day15End,
+        }),
+      ).resolves.toBeUndefined();
+    });
+
+    it('detects collision on the 2nd assignment when driver has multiple future jobs', async () => {
+      const mockPrisma = {
+        driverScheduleEntry: { findFirst: jest.fn().mockResolvedValue(null) },
+        assignment: {
+          findMany: jest.fn().mockResolvedValue([
+            {
+              id: 'asg-day2',
+              jobId: 'job-day2',
+              job: {
+                id: 'job-day2',
+                pickupAt: new Date('2026-11-02T08:00:00.000Z'),
+                routeDurationMinutes: 120,
+              },
+            },
+            {
+              id: 'asg-day15',
+              jobId: 'job-day15',
+              job: {
+                id: 'job-day15',
+                pickupAt: new Date('2026-11-16T09:00:00.000Z'),
+                routeDurationMinutes: 120,
+              },
+            },
+          ]),
+        },
+      } as any;
+
+      const res = await checkDriverAvailabilityForWindow(mockPrisma, {
+        driverId: 'drv-1',
+        windowStart: new Date('2026-11-16T08:00:00.000Z'),
+        windowEnd: new Date('2026-11-16T11:00:00.000Z'),
+      });
+      expect(res.isAvailable).toBe(false);
+      expect(res.code).toBe('DRIVER_BUSY_ASSIGNMENT_COLLISION');
+      expect(res.conflictingJobId).toBe('job-day15');
+    });
+
+    it('surfaces non-blocking pendingLeaveWarning when driver has a PENDING leave request', async () => {
+      const findFirst = jest
+        .fn()
+        .mockResolvedValueOnce(null) // APPROVED check
+        .mockResolvedValueOnce({
+          id: 'leave-pending-1',
+          type: 'ANNUAL_LEAVE',
+          startAt: new Date('2026-11-16T00:00:00.000Z'),
+          endAt: new Date('2026-11-17T00:00:00.000Z'),
+        });
+      const mockPrisma = {
+        driverScheduleEntry: { findFirst },
+        assignment: { findMany: jest.fn().mockResolvedValue([]) },
+      } as any;
+
+      const res = await checkDriverAvailabilityForWindow(mockPrisma, {
+        driverId: 'drv-1',
+        windowStart: new Date('2026-11-16T08:00:00.000Z'),
+        windowEnd: new Date('2026-11-16T11:00:00.000Z'),
+      });
+      expect(res.isAvailable).toBe(true);
+      expect(res.pendingLeaveWarning?.scheduleEntryId).toBe('leave-pending-1');
     });
   });
 });

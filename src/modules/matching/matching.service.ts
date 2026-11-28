@@ -660,6 +660,12 @@ export class MatchingService {
       });
     }
 
+    const executionWindow = calculateJobExecutionWindow(job);
+    const complianceCheckAt =
+      executionWindow.windowEnd.getTime() > Date.now()
+        ? executionWindow.windowEnd
+        : new Date();
+
     const driver = await this.prisma.driver.findFirst({
       where: { id: input.driverId, companyId: company.id, status: DriverStatus.ACTIVE },
     });
@@ -672,9 +678,9 @@ export class MatchingService {
         vehicleClass: vehicle.vehicleClass,
       },
       'badRequest',
+      complianceCheckAt,
     );
 
-    const executionWindow = calculateJobExecutionWindow(job);
     await assertDriverAvailabilityForWindow(this.prisma, {
       driverId: driver.id,
       windowStart: executionWindow.windowStart,
@@ -685,6 +691,8 @@ export class MatchingService {
       vehicleId: vehicle.id,
       driverId: driver.id,
       excludeJobId: job.id,
+      windowStart: executionWindow.windowStart,
+      windowEnd: executionWindow.windowEnd,
     });
 
     // Carrier types take-home (net). Convert → proposal base so fee-then-split ledger matches.
@@ -1113,6 +1121,11 @@ export class MatchingService {
       orderBy: { createdAt: 'asc' },
     });
 
+    const complianceCheckAt =
+      executionWindow.windowEnd.getTime() > Date.now()
+        ? executionWindow.windowEnd
+        : new Date();
+
     const driverChecks = await Promise.all(
       drivers.map(async (drv) => {
         const check = await checkDriverAvailabilityForWindow(this.prisma, {
@@ -1120,13 +1133,14 @@ export class MatchingService {
           windowStart: executionWindow.windowStart,
           windowEnd: executionWindow.windowEnd,
           excludeJobId: job.id,
+          checkOpenBids: true,
         });
 
         let isEligible = check.isAvailable;
         let code: string | null = check.code ?? null;
         let reason: string | null = check.message ?? null;
 
-        // Same licence/NHVR gates as submitProposal — surface before bid API error.
+        // Same licence/NHVR gates as submitProposal — validated through job execution date.
         if (isEligible) {
           const licenceGate = evaluateDriverLicenceFields(
             {
@@ -1137,7 +1151,7 @@ export class MatchingService {
               nhvrAcknowledgedAt: drv.nhvrAcknowledgedAt,
             },
             vehicleClass,
-            new Date(),
+            complianceCheckAt,
             minLicenceMap,
           );
           if (!licenceGate.ok) {
@@ -1157,6 +1171,15 @@ export class MatchingService {
           code,
           reason,
           conflictingWindow: check.conflictingWindow ?? null,
+          pendingLeaveWarning: check.pendingLeaveWarning
+            ? {
+                scheduleEntryId: check.pendingLeaveWarning.scheduleEntryId,
+                type: check.pendingLeaveWarning.type,
+                startAt: check.pendingLeaveWarning.startAt.toISOString(),
+                endAt: check.pendingLeaveWarning.endAt.toISOString(),
+                message: check.pendingLeaveWarning.message,
+              }
+            : null,
         };
       }),
     );
