@@ -55,6 +55,7 @@ export interface ValhallaRouteResponse {
       length: number;   // km
       time: number;     // seconds
       has_time_restrictions: boolean;
+      has_toll?: boolean;
     };
     language: string;
   };
@@ -175,6 +176,7 @@ export interface RouteResult {
   encodedPolyline: string;
   distanceKm: number;
   durationMin: number;
+  hasToll?: boolean;
 }
 
 export interface IsochroneResult {

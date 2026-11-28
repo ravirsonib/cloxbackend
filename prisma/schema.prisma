@@ -603,12 +603,43 @@ model Company {
   vehicleMaintenanceWorkOrders VehicleMaintenanceWorkOrder[]
   revenueUplifts      CompanyRevenueUplift[]
   senderFeeOverrides  CompanySenderFeeOverride[]
+  savedAddresses      SenderSavedAddress[]
 
   @@index([type, status])
   @@index([abn])
   @@index([homeRegionId])
   @@index([suspendedAt])
   @@index([referredByAdminUserId])
+}
+
+enum SenderAddressRole {
+  PICKUP
+  DROPOFF
+  BOTH
+}
+
+/// Sender company saved address book for fast repeat bookings (Phase 3)
+model SenderSavedAddress {
+  id                  String            @id @default(uuid())
+  companyId           String
+  company             Company           @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  label               String
+  role                SenderAddressRole @default(BOTH)
+  addressLine         String
+  suburb              String
+  state               String
+  postcode            String
+  lat                 Float?
+  lng                 Float?
+  defaultContactName  String?
+  defaultContactPhone String?
+  defaultContactEmail String?
+  isDefaultPickup     Boolean           @default(false)
+  createdAt           DateTime          @default(now())
+  updatedAt           DateTime          @updatedAt
+
+  @@index([companyId, role])
+  @@index([companyId, isDefaultPickup])
 }
 
 /// Fleet+ SaaS entitlement (G0-16 amended)
@@ -1333,6 +1364,9 @@ model Job {
   receiverAltPhone     String?
   /// Scheduled pickup window start
   pickupAt             DateTime?
+  /// Optional dropoff / warehouse receiving window (local HH:mm, e.g. 07:00 - 14:30)
+  dropoffWindowStart   String?
+  dropoffWindowEnd     String?
   deadWeightKg         Float?
   lengthCm             Float?
   widthCm              Float?

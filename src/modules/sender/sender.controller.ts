@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Patch, Post, Put, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Patch, Post, Put, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { Throttle, ThrottlerGuard } from '@nestjs/throttler';
 import {
@@ -8,12 +8,14 @@ import {
   senderPaymentConfirmSchema,
   senderProfileSchema,
   senderRegisterSchema,
+  senderSavedAddressCreateSchema,
   senderSubmitVerificationSchema,
   type CompanyProfileChangeRequestInput,
   type CompanyProfileSelfInput,
   type SenderPaymentConfirmInput,
   type SenderProfileInput,
   type SenderRegisterInput,
+  type SenderSavedAddressCreateInput,
   type SenderSubmitVerificationInput,
 } from '../../shared/types';
 import { CurrentPrincipal } from '../../common/decorators/current-admin.decorator';
@@ -145,5 +147,39 @@ export class SenderController {
   @ApiOperation({ summary: 'Go/no-go: can create jobs?' })
   bookingEligibility(@CurrentPrincipal() principal: AuthenticatedPrincipal) {
     return this.senderService.getBookingEligibility(principal);
+  }
+
+  @Get('addresses')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(AppRole.SENDER)
+  @ApiOperation({ summary: 'List sender company saved addresses' })
+  listSavedAddresses(@CurrentPrincipal() principal: AuthenticatedPrincipal) {
+    return this.senderService.listSavedAddresses(principal);
+  }
+
+  @Post('addresses')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(AppRole.SENDER)
+  @ApiOperation({ summary: 'Save an address to sender company address book' })
+  createSavedAddress(
+    @CurrentPrincipal() principal: AuthenticatedPrincipal,
+    @Body(new ZodValidationPipe(senderSavedAddressCreateSchema))
+    body: SenderSavedAddressCreateInput,
+  ) {
+    return this.senderService.createSavedAddress(principal, body);
+  }
+
+  @Delete('addresses/:id')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(AppRole.SENDER)
+  @ApiOperation({ summary: 'Delete a saved address from sender company address book' })
+  deleteSavedAddress(
+    @CurrentPrincipal() principal: AuthenticatedPrincipal,
+    @Param('id') id: string,
+  ) {
+    return this.senderService.deleteSavedAddress(principal, id);
   }
 }

@@ -57,6 +57,7 @@ import {
 import {
   estimateRoute,
   orderStopsTspObjects,
+  recommendPricingModel,
   routeFromDistanceKm,
   routeFromValhalla,
   type RouteEstimate,
@@ -133,6 +134,7 @@ export class JobsService {
           encodedPolyline: valRoute.encodedPolyline,
           pricingModel: params.pricingModel,
           hourlyFloorHours: params.hourlyFloorHours,
+          hasToll: valRoute.hasToll ?? null,
         });
       }
     }
@@ -145,6 +147,7 @@ export class JobsService {
       ...mockRoute,
       encodedPolyline: null,
       routeSource: 'mock',
+      hasToll: null,
     };
   }
 
@@ -527,6 +530,8 @@ export class JobsService {
     receiverAltEmail?: string | null;
     receiverAltPhone?: string | null;
     pickupAt: Date | null;
+    dropoffWindowStart?: string | null;
+    dropoffWindowEnd?: string | null;
     deadWeightKg: number | null;
     lengthCm: number | null;
     widthCm: number | null;
@@ -627,6 +632,8 @@ export class JobsService {
       receiverAltEmail: job.receiverAltEmail ?? null,
       receiverAltPhone: job.receiverAltPhone ?? null,
       pickupAt: job.pickupAt,
+      dropoffWindowStart: job.dropoffWindowStart ?? null,
+      dropoffWindowEnd: job.dropoffWindowEnd ?? null,
       deadWeightKg: job.deadWeightKg,
       lengthCm: job.lengthCm,
       widthCm: job.widthCm,
@@ -1105,6 +1112,24 @@ export class JobsService {
         : Math.max(globalFloor, rates.perKmMinBaseCents);
     const hardFloorInc = floored.rateFloorIncGstCents ?? 0;
     const minChargeIncGstCents = Math.max(legacyMinCharge, hardFloorInc);
+    const estimateExGstCents = gstSplitFromIncCents(
+      estimateIncGstCents,
+      config.gstPercent,
+    ).amountExGstCents;
+    const rangeMinIncGstCents = Math.max(range.minIncGstCents, hardFloorInc);
+    const rangeMaxIncGstCents = Math.max(range.maxIncGstCents, hardFloorInc);
+    const rangeMinExGstCents = gstSplitFromIncCents(
+      rangeMinIncGstCents,
+      config.gstPercent,
+    ).amountExGstCents;
+    const rangeMaxExGstCents = gstSplitFromIncCents(
+      rangeMaxIncGstCents,
+      config.gstPercent,
+    ).amountExGstCents;
+    const pricingRec = recommendPricingModel({
+      distanceKm: route.distanceKm,
+      stopCount: orderedStops.length,
+    });
 
     return {
       distanceKm: route.distanceKm,
@@ -1121,16 +1146,22 @@ export class JobsService {
         hardFloorInc,
       ),
       minChargeIncGstCents,
+      estimateExGstCents,
       estimateIncGstCents,
       pricingVehicleClass: pricingClass,
       estimateRange: {
-        minIncGstCents: Math.max(range.minIncGstCents, hardFloorInc),
-        maxIncGstCents: Math.max(range.maxIncGstCents, hardFloorInc),
+        minExGstCents: rangeMinExGstCents,
+        maxExGstCents: rangeMaxExGstCents,
+        minIncGstCents: rangeMinIncGstCents,
+        maxIncGstCents: rangeMaxIncGstCents,
         maxClassCode: range.maxClassCode,
       },
       rateFloorExGstCents: floored.rateFloorExGstCents,
       rateFloorIncGstCents: floored.rateFloorIncGstCents,
       rateFloorVersionId: floored.rateFloorVersionId,
+      recommendedPricingModel: pricingRec.recommendedPricingModel,
+      recommendationReason: pricingRec.recommendationReason,
+      hasToll: route.hasToll ?? null,
       mock: route.mock,
       routeSource: route.routeSource ?? (route.mock ? 'mock' : 'valhalla'),
       encodedPolyline: route.encodedPolyline ?? null,
@@ -1310,6 +1341,8 @@ export class JobsService {
         receiverAltEmail: input.receiverAltEmail ?? null,
         receiverAltPhone: input.receiverAltPhone ?? null,
         pickupAt: new Date(input.pickupAt),
+        dropoffWindowStart: input.dropoffWindowStart?.trim() || null,
+        dropoffWindowEnd: input.dropoffWindowEnd?.trim() || null,
         deadWeightKg,
         lengthCm: input.lengthCm,
         widthCm: input.widthCm,
@@ -1592,6 +1625,8 @@ export class JobsService {
         receiverAltEmail: input.receiverAltEmail ?? null,
         receiverAltPhone: input.receiverAltPhone ?? null,
         pickupAt: new Date(input.pickupAt),
+        dropoffWindowStart: input.dropoffWindowStart?.trim() || null,
+        dropoffWindowEnd: input.dropoffWindowEnd?.trim() || null,
         deadWeightKg,
         lengthCm: input.lengthCm,
         widthCm: input.widthCm,

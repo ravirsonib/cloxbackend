@@ -572,6 +572,46 @@ export class CarrierController {
     return this.fleetPlusService.addCostEntry(principal, id, body);
   }
 
+  @Get('vehicles/:id/costs')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(AppRole.TRANSPORT_COMPANY)
+  @ApiOperation({ summary: 'List fuel logs and cost entries for a vehicle' })
+  listVehicleCosts(
+    @CurrentPrincipal() principal: AuthenticatedPrincipal,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+  ) {
+    return this.fleetPlusService.listVehicleCosts(principal, id, { from, to });
+  }
+
+  @Delete('vehicles/:id/fuel-logs/:logId')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(AppRole.TRANSPORT_COMPANY)
+  @ApiOperation({ summary: 'Delete a fuel log entry for a vehicle' })
+  deleteVehicleFuelLog(
+    @CurrentPrincipal() principal: AuthenticatedPrincipal,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('logId', ParseUUIDPipe) logId: string,
+  ) {
+    return this.fleetPlusService.deleteFuelLog(principal, id, logId);
+  }
+
+  @Delete('vehicles/:id/cost-entries/:entryId')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(AppRole.TRANSPORT_COMPANY)
+  @ApiOperation({ summary: 'Delete an operating cost entry for a vehicle' })
+  deleteVehicleCostEntry(
+    @CurrentPrincipal() principal: AuthenticatedPrincipal,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('entryId', ParseUUIDPipe) entryId: string,
+  ) {
+    return this.fleetPlusService.deleteCostEntry(principal, id, entryId);
+  }
+
   @Post('vehicles/:id/service-log')
   @ApiBearerAuth()
   @UseGuards(JwtAuthGuard, RolesGuard)

@@ -62,13 +62,14 @@ describe('JobsService previewRoute', () => {
     expect(route.billableHours).toBe(4);
   });
 
-  it('uses Valhalla route when available and returns encodedPolyline', async () => {
+  it('uses Valhalla route when available and returns encodedPolyline, hasToll, and recommendation', async () => {
     const valhalla = {
       isEnabled: true,
       getRoute: jest.fn().mockResolvedValue({
         encodedPolyline: 'abc_polyline6',
         distanceKm: 23.45,
         durationMin: 28,
+        hasToll: true,
       }),
     };
     const service = new JobsService(
@@ -89,6 +90,57 @@ describe('JobsService previewRoute', () => {
     expect(route.encodedPolyline).toBe('abc_polyline6');
     expect(route.distanceKm).toBe(23.5);
     expect(route.drivingMinutes).toBe(28);
+    expect(route.hasToll).toBe(true);
+    expect(route.recommendedPricingModel).toBe('HOURLY');
+    expect(route.recommendationReason).toBe('METRO_UNDER_100KM');
+    expect(route.estimateExGstCents).toBeGreaterThan(0);
+    expect(route.estimateExGstCents).toBeLessThanOrEqual(route.estimateIncGstCents);
+  });
+
+  it('recommends PER_KM for single A->B over 100 km, and HOURLY for multi-stop over 100 km', async () => {
+    const valhalla = {
+      isEnabled: true,
+      getRoute: jest.fn().mockResolvedValue({
+        encodedPolyline: 'regional_poly6',
+        distanceKm: 150,
+        durationMin: 115,
+        hasToll: false,
+      }),
+    };
+    const service = new JobsService(
+      { isConnected: () => true } as never,
+      { recordPlatform: jest.fn() } as never,
+      { getBookingEligibility: jest.fn() } as never,
+      { acceptProposal: jest.fn() } as never,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      valhalla as never,
+    );
+    const regional = await service.previewRoute({ pricingModel: 'PER_KM', stops });
+    expect(regional.recommendedPricingModel).toBe('PER_KM');
+    expect(regional.recommendationReason).toBe('REGIONAL_OVER_100KM');
+    expect(regional.hasToll).toBe(false);
+
+    const multiStop = await service.previewRoute({
+      pricingModel: 'PER_KM',
+      stops: [
+        stops[0],
+        stops[1],
+        {
+          ...stops[1],
+          sequence: 2,
+          addressLine: '200 High St',
+          suburb: 'Bendigo',
+          postcode: '3550',
+          lat: -36.757,
+          lng: 144.2794,
+        },
+      ],
+    });
+    expect(multiStop.recommendedPricingModel).toBe('HOURLY');
+    expect(multiStop.recommendationReason).toBe('MULTI_STOP');
   });
 
   it('falls back to mock route when Valhalla returns null', async () => {

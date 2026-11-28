@@ -347,6 +347,94 @@ export class FleetPlusService {
     return row;
   }
 
+  async listVehicleCosts(
+    principal: AuthenticatedPrincipal,
+    vehicleId: string,
+    opts?: { from?: string; to?: string },
+  ) {
+    const { companyId } = await this.requireCarrierCompany(principal);
+    await this.assertFleetPlus(companyId);
+    await this.requireOwnedVehicle(companyId, vehicleId);
+    const loggedAtFilter =
+      opts?.from || opts?.to
+        ? {
+            ...(opts?.from ? { gte: new Date(opts.from) } : {}),
+            ...(opts?.to ? { lte: new Date(opts.to) } : {}),
+          }
+        : undefined;
+
+    const [fuelLogs, costEntries] = await Promise.all([
+      this.prisma.vehicleFuelLog.findMany({
+        where: {
+          vehicleId,
+          companyId,
+          ...(loggedAtFilter ? { loggedAt: loggedAtFilter } : {}),
+        },
+        orderBy: { loggedAt: 'desc' },
+        take: 100,
+      }),
+      this.prisma.vehicleCostEntry.findMany({
+        where: {
+          vehicleId,
+          companyId,
+          ...(loggedAtFilter ? { loggedAt: loggedAtFilter } : {}),
+        },
+        orderBy: { loggedAt: 'desc' },
+        take: 100,
+      }),
+    ]);
+
+    return {
+      fuelLogs: fuelLogs.map((l) => ({
+        id: l.id,
+        liters: Number(l.liters),
+        amountAud: Number(l.amountAud),
+        odometerKm: l.odometerKm,
+        notes: l.notes,
+        loggedAt: l.loggedAt.toISOString(),
+      })),
+      costEntries: costEntries.map((c) => ({
+        id: c.id,
+        kind: c.kind,
+        amountAud: Number(c.amountAud),
+        notes: c.notes,
+        loggedAt: c.loggedAt.toISOString(),
+      })),
+    };
+  }
+
+  async deleteFuelLog(
+    principal: AuthenticatedPrincipal,
+    vehicleId: string,
+    logId: string,
+  ) {
+    const { companyId } = await this.requireCarrierCompany(principal);
+    await this.assertFleetPlus(companyId);
+    await this.requireOwnedVehicle(companyId, vehicleId);
+    const existing = await this.prisma.vehicleFuelLog.findFirst({
+      where: { id: logId, vehicleId, companyId },
+    });
+    if (!existing) throw new NotFoundException('Fuel log not found');
+    await this.prisma.vehicleFuelLog.delete({ where: { id: existing.id } });
+    return { deleted: true, id: existing.id };
+  }
+
+  async deleteCostEntry(
+    principal: AuthenticatedPrincipal,
+    vehicleId: string,
+    entryId: string,
+  ) {
+    const { companyId } = await this.requireCarrierCompany(principal);
+    await this.assertFleetPlus(companyId);
+    await this.requireOwnedVehicle(companyId, vehicleId);
+    const existing = await this.prisma.vehicleCostEntry.findFirst({
+      where: { id: entryId, vehicleId, companyId },
+    });
+    if (!existing) throw new NotFoundException('Cost entry not found');
+    await this.prisma.vehicleCostEntry.delete({ where: { id: existing.id } });
+    return { deleted: true, id: existing.id };
+  }
+
   async logService(
     principal: AuthenticatedPrincipal,
     vehicleId: string,

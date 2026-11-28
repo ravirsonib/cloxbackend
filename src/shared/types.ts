@@ -1307,6 +1307,22 @@ export const fleetPlusUpgradeSchema = z.object({
 });
 export type FleetPlusUpgradeInput = z.infer<typeof fleetPlusUpgradeSchema>;
 
+export const senderSavedAddressCreateSchema = z.object({
+  label: z.string().trim().min(1).max(80),
+  role: z.enum(['PICKUP', 'DROPOFF', 'BOTH']).default('BOTH'),
+  addressLine: z.string().trim().min(2).max(200),
+  suburb: z.string().trim().min(2).max(100),
+  state: z.string().trim().min(2).max(10),
+  postcode: z.string().trim().regex(/^\d{4}$/, 'Australian postcode must be 4 digits'),
+  lat: z.number().min(-90).max(90).optional().nullable(),
+  lng: z.number().min(-180).max(180).optional().nullable(),
+  defaultContactName: z.string().trim().max(120).optional().nullable(),
+  defaultContactPhone: z.string().trim().max(40).optional().nullable(),
+  defaultContactEmail: z.string().trim().email().max(160).optional().nullable(),
+  isDefaultPickup: z.boolean().optional(),
+});
+export type SenderSavedAddressCreateInput = z.infer<typeof senderSavedAddressCreateSchema>;
+
 /** Carrier reassigns vehicle/driver on an active assignment (breakdown / continue). */
 export const assignmentReassignSchema = z.object({
   vehicleId: z.string().uuid(),
@@ -1751,6 +1767,18 @@ export const jobCreateSchema = z
     pricingModel: z.enum(['PER_KM', 'HOURLY']),
     hourlyPattern: z.enum(['A', 'B']).optional(),
     pickupAt: z.string().datetime({ offset: true }).or(z.string().regex(/^\d{4}-\d{2}-\d{2}T/)),
+    dropoffWindowStart: z
+      .string()
+      .trim()
+      .regex(/^\d{2}:\d{2}$/, 'Use HH:mm format')
+      .optional()
+      .nullable(),
+    dropoffWindowEnd: z
+      .string()
+      .trim()
+      .regex(/^\d{2}:\d{2}$/, 'Use HH:mm format')
+      .optional()
+      .nullable(),
     receiverName: z.string().trim().min(2).max(120),
     receiverEmail: z.string().trim().email(),
     receiverPhone: optionalPhoneInput,

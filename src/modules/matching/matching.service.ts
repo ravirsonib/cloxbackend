@@ -114,6 +114,8 @@ export class MatchingService {
       routeDistanceKm: number | null;
       billableHours: number | null;
       pickupAt: Date | null;
+      dropoffWindowStart?: string | null;
+      dropoffWindowEnd?: string | null;
       requiresReefer: boolean;
       requiresDg: boolean;
       isBackhaul?: boolean | null;
@@ -487,6 +489,8 @@ export class MatchingService {
           siteManeuverability: j.siteManeuverability,
           siteFacility: j.siteFacility,
           pickupAt: j.pickupAt,
+          dropoffWindowStart: j.dropoffWindowStart ?? null,
+          dropoffWindowEnd: j.dropoffWindowEnd ?? null,
           publishedAt: j.publishedAt,
           alreadyBid: j.proposals.length > 0,
           loadProfile: (() => {

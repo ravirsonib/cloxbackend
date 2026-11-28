@@ -143,6 +143,7 @@ export class ValhallaClientService {
         encodedPolyline,
         distanceKm: length,
         durationMin: Math.ceil(time / 60),
+        hasToll: Boolean(data.trip.summary?.has_toll),
       };
     } catch (err) {
       this.logger.warn({ err, op: 'getRoute' }, 'Valhalla getRoute failed');

@@ -19,6 +19,7 @@ import {
   NotificationType,
   PlatformRole,
   SenderAccountType,
+  SenderAddressRole,
   UserStatus,
 } from '@prisma/client';
 import type { AppEnv } from '../../config/env.validation';
@@ -29,6 +30,7 @@ import {
   type SenderPaymentConfirmInput,
   type SenderProfileInput,
   type SenderRegisterInput,
+  type SenderSavedAddressCreateInput,
   type SenderSubmitVerificationInput,
 } from '../../shared/types';
 import { PrismaService } from '../../prisma/prisma.service';
@@ -758,5 +760,63 @@ export class SenderService {
       blockers,
       companyStatus: user.company!.status,
     };
+  }
+
+  async listSavedAddresses(principal: AuthenticatedPrincipal) {
+    this.ensureDatabase();
+    const user = await this.requireSender(principal);
+    const items = await this.prisma.senderSavedAddress.findMany({
+      where: { companyId: user.company!.id },
+      orderBy: [{ isDefaultPickup: 'desc' }, { createdAt: 'desc' }],
+      take: 50,
+    });
+    return { items };
+  }
+
+  async createSavedAddress(
+    principal: AuthenticatedPrincipal,
+    input: SenderSavedAddressCreateInput,
+  ) {
+    this.ensureDatabase();
+    const user = await this.requireSender(principal);
+    const companyId = user.company!.id;
+    const state = input.state.trim().toUpperCase();
+    const created = await this.prisma.$transaction(async (tx) => {
+      if (input.isDefaultPickup) {
+        await tx.senderSavedAddress.updateMany({
+          where: { companyId, isDefaultPickup: true },
+          data: { isDefaultPickup: false },
+        });
+      }
+      return tx.senderSavedAddress.create({
+        data: {
+          companyId,
+          label: input.label.trim(),
+          role: input.role as SenderAddressRole,
+          addressLine: input.addressLine.trim(),
+          suburb: input.suburb.trim(),
+          state,
+          postcode: input.postcode.trim(),
+          lat: input.lat ?? null,
+          lng: input.lng ?? null,
+          defaultContactName: input.defaultContactName?.trim() || null,
+          defaultContactPhone: input.defaultContactPhone?.trim() || null,
+          defaultContactEmail: input.defaultContactEmail?.trim() || null,
+          isDefaultPickup: Boolean(input.isDefaultPickup),
+        },
+      });
+    });
+    return created;
+  }
+
+  async deleteSavedAddress(principal: AuthenticatedPrincipal, id: string) {
+    this.ensureDatabase();
+    const user = await this.requireSender(principal);
+    const existing = await this.prisma.senderSavedAddress.findFirst({
+      where: { id, companyId: user.company!.id },
+    });
+    if (!existing) throw new NotFoundException('Saved address not found');
+    await this.prisma.senderSavedAddress.delete({ where: { id: existing.id } });
+    return { deleted: true, id: existing.id };
   }
 }

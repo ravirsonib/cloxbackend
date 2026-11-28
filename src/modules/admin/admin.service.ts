@@ -3,6 +3,7 @@ import {
   ConflictException,
   Injectable,
   NotFoundException,
+  Optional,
   ServiceUnavailableException,
 } from '@nestjs/common';
 import {
@@ -51,6 +52,7 @@ import {
   REVENUE_SPLIT_POLICY_KEY,
   type RevenueSplitPolicyPayload,
 } from '../settlements/revenue-split.types';
+import { RevenueSplitService } from '../settlements/revenue-split.service';
 
 const leadListSelect = {
   id: true,
@@ -79,6 +81,7 @@ export class AdminService {
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
     private readonly notifications: NotificationsService,
+    @Optional() private readonly revenueSplit?: RevenueSplitService,
   ) {}
 
   private ensureDatabase() {
@@ -1779,6 +1782,13 @@ export class AdminService {
             phone: true,
             type: true,
             status: true,
+            referredByAdminUserId: true,
+          },
+        },
+        rateFloorVersion: {
+          select: {
+            id: true,
+            label: true,
           },
         },
         dgDocument: {
@@ -1796,6 +1806,8 @@ export class AdminService {
           select: {
             id: true,
             status: true,
+            amountExGstCents: true,
+            amountGstCents: true,
             amountIncGstCents: true,
             etaMinutes: true,
             createdAt: true,
@@ -1944,9 +1956,112 @@ export class AdminService {
           };
         })()
       : null;
+    const at = job.publishedAt ?? job.createdAt ?? new Date();
+    const nationalCarrierPercent = this.revenueSplit
+      ? await this.revenueSplit.nationalCarrierPercent(at)
+      : CARRIER_PERCENT_FIXED;
+    const senderFeeMeta = this.revenueSplit
+      ? await this.revenueSplit.resolveSenderFee({
+          baseIncGstCents: job.estimateIncGstCents ?? 0,
+          senderCompanyId: job.senderCompanyId,
+          at,
+        })
+      : null;
+
+    const proposalBreakdowns = await Promise.all(
+      job.proposals.map(async (p) => {
+        const split = this.revenueSplit
+          ? await this.revenueSplit.resolvePercents({
+              referredByAdminUserId: job.senderCompany?.referredByAdminUserId ?? null,
+              carrierCompanyId: p.carrierCompany.id,
+              at: p.createdAt,
+            })
+          : null;
+        const carrierPercent = split?.percents.carrierPercent ?? nationalCarrierPercent;
+        const carrierBonusPercent = split?.carrierBonusPercent ?? 0;
+        const platformPercent = Math.max(0, Math.round((100 - carrierPercent) * 100) / 100);
+        const senderFee = this.revenueSplit
+          ? await this.revenueSplit.resolveSenderFee({
+              baseIncGstCents: p.amountIncGstCents,
+              senderCompanyId: job.senderCompanyId,
+              at: p.createdAt,
+            })
+          : null;
+        const carrierNetIncGstCents = Math.round((p.amountIncGstCents * carrierPercent) / 100);
+        const carrierNetExGstCents = Math.round(carrierNetIncGstCents / 1.1);
+        const platformCommissionIncGstCents = Math.max(
+          0,
+          p.amountIncGstCents - carrierNetIncGstCents,
+        );
+        const senderFeeIncGstCents = senderFee?.feeIncGstCents ?? 0;
+        const totalSenderPayableIncGstCents =
+          senderFee?.chargeIncGstCents ?? p.amountIncGstCents;
+        const cloxTotalRevenueIncGstCents =
+          platformCommissionIncGstCents + senderFeeIncGstCents;
+        const meetsRateFloor =
+          job.rateFloorIncGstCents == null
+            ? true
+            : p.amountIncGstCents >= job.rateFloorIncGstCents;
+
+        return {
+          proposalId: p.id,
+          status: p.status,
+          carrierCompanyId: p.carrierCompany.id,
+          carrierName: p.carrierCompany.tradingName || p.carrierCompany.legalName,
+          vehicleClass: p.vehicle?.vehicleClass ?? null,
+          vehicleRegistration: p.vehicle?.registration ?? null,
+          amountExGstCents: p.amountExGstCents,
+          amountGstCents: p.amountGstCents,
+          amountIncGstCents: p.amountIncGstCents,
+          carrierPercent,
+          carrierBonusPercent,
+          platformPercent,
+          carrierNetExGstCents,
+          carrierNetIncGstCents,
+          platformCommissionIncGstCents,
+          senderFeeMode: senderFee?.mode ?? 'COMMISSION',
+          senderFeePercent: senderFee?.feePercent ?? 0,
+          senderFeeIncGstCents,
+          totalSenderPayableIncGstCents,
+          cloxTotalRevenueIncGstCents,
+          meetsRateFloor,
+        };
+      }),
+    );
+
+    const pricingBreakdown = {
+      pricingModel: job.pricingModel,
+      distanceKm: job.routeDistanceKm,
+      billableHours: job.billableHours,
+      minVehicleClass: job.minVehicleClass,
+      nationalCarrierPercent,
+      estimate: {
+        exGstCents: job.estimateExGstCents,
+        gstCents: job.estimateGstCents,
+        incGstCents: job.estimateIncGstCents,
+      },
+      rateFloor: {
+        versionId: job.rateFloorVersionId,
+        versionLabel: job.rateFloorVersion?.label ?? null,
+        exGstCents: job.rateFloorExGstCents,
+        incGstCents: job.rateFloorIncGstCents,
+        breakdown:
+          job.rateFloorBreakdown && typeof job.rateFloorBreakdown === 'object'
+            ? (job.rateFloorBreakdown as Record<string, unknown>)
+            : null,
+      },
+      senderFee: {
+        mode: senderFeeMeta?.mode ?? 'COMMISSION',
+        feePercent: senderFeeMeta?.feePercent ?? 0,
+        isOverride: Boolean(senderFeeMeta?.senderFeeOverrideId),
+      },
+      proposals: proposalBreakdowns,
+    };
+
     return {
       ...job,
       trip,
+      pricingBreakdown,
       canHardDelete: this.canHardDeleteJob(job.status),
       canSoftDelete: this.canSoftDeleteJob(job.status),
     };

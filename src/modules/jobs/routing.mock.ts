@@ -29,6 +29,38 @@ const FATIGUE_BREAK_MINUTES = 15;
 const HOURLY_FLOOR_HOURS = 4;
 
 export type RouteSource = 'valhalla' | 'mock';
+export type PricingRecommendationReason =
+  | 'MULTI_STOP'
+  | 'METRO_UNDER_100KM'
+  | 'REGIONAL_OVER_100KM';
+
+/** Australian metro/regional recommendation threshold (km). */
+export const RECOMMEND_HOURLY_MAX_KM = 100;
+
+export function recommendPricingModel(params: {
+  distanceKm: number;
+  stopCount: number;
+}): {
+  recommendedPricingModel: 'HOURLY' | 'PER_KM';
+  recommendationReason: PricingRecommendationReason;
+} {
+  if (params.stopCount > 2) {
+    return {
+      recommendedPricingModel: 'HOURLY',
+      recommendationReason: 'MULTI_STOP',
+    };
+  }
+  if (params.distanceKm <= RECOMMEND_HOURLY_MAX_KM) {
+    return {
+      recommendedPricingModel: 'HOURLY',
+      recommendationReason: 'METRO_UNDER_100KM',
+    };
+  }
+  return {
+    recommendedPricingModel: 'PER_KM',
+    recommendationReason: 'REGIONAL_OVER_100KM',
+  };
+}
 
 export type RouteEstimate = {
   distanceKm: number;
@@ -39,6 +71,7 @@ export type RouteEstimate = {
   mock: boolean;
   encodedPolyline?: string | null;
   routeSource?: RouteSource;
+  hasToll?: boolean | null;
 };
 
 /**
@@ -51,6 +84,7 @@ export function routeFromValhalla(params: {
   encodedPolyline: string;
   pricingModel: 'PER_KM' | 'HOURLY';
   hourlyFloorHours?: number;
+  hasToll?: boolean | null;
 }): RouteEstimate {
   const { pricingModel, hourlyFloorHours = HOURLY_FLOOR_HOURS } = params;
   const km = Math.round(Math.max(0, params.distanceKm) * 10) / 10;
@@ -73,6 +107,7 @@ export function routeFromValhalla(params: {
     mock: false,
     encodedPolyline: params.encodedPolyline || null,
     routeSource: 'valhalla',
+    hasToll: params.hasToll ?? null,
   };
 }
 

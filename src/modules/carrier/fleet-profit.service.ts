@@ -33,10 +33,17 @@ export type VehicleProfitRow = {
   tollsAud: number;
   maintenanceAud: number;
   depreciationAud: number;
+  otherCostsAud: number;
+  totalCostsAud: number;
   distanceKm: number;
+  fuelLiters: number;
+  costPerKmAud: number | null;
+  fuelLitersPer100Km: number | null;
   profitAud: number;
+  lossAud: number;
   marginPct: number | null;
   idlePct: number;
+  flaggedLoss: boolean;
   flaggedLowMargin: boolean;
   flaggedHighIdle: boolean;
   maintenanceCause: string | null;
@@ -81,8 +88,12 @@ export class FleetProfitService {
     summary: {
       vehicleCount: number;
       flaggedCount: number;
+      profitableVehicleCount: number;
+      lossVehicleCount: number;
       totalRevenueNetAud: number;
+      totalCostsAud: number;
       totalProfitAud: number;
+      totalLossAud: number;
       avgUtilisationPct: number;
     };
     vehicles: VehicleProfitRow[];
@@ -155,19 +166,22 @@ export class FleetProfitService {
       });
       const fuelLogs = await this.prisma.vehicleFuelLog.aggregate({
         where: { vehicleId: v.id, loggedAt: { gte: from, lte: to } },
-        _sum: { amountAud: true },
+        _sum: { amountAud: true, liters: true },
       });
 
       let fuelAud = dec(fuelLogs._sum.amountAud);
+      const fuelLiters = dec(fuelLogs._sum.liters);
       let wagesAud = 0;
       let tollsAud = 0;
       let maintenanceAud = 0;
+      let otherCostsAud = 0;
       for (const c of costs) {
         const amt = dec(c._sum.amountAud);
         if (c.kind === VehicleCostKind.FUEL) fuelAud += amt;
         else if (c.kind === VehicleCostKind.WAGE) wagesAud += amt;
         else if (c.kind === VehicleCostKind.TOLL) tollsAud += amt;
         else if (c.kind === VehicleCostKind.MAINTENANCE) maintenanceAud += amt;
+        else if (c.kind === VehicleCostKind.OTHER) otherCostsAud += amt;
       }
 
       const maintRate = dec(v.maintenanceRatePerKm);
@@ -189,13 +203,20 @@ export class FleetProfitService {
         distanceKm,
         depreciationAud,
       });
-      // Include explicit maintenance cost entries in profit (on top of rate×distance)
-      const profitAud = calc.profitAud - maintenanceAud;
+      // Include explicit maintenance and other cost entries in profit (on top of rate×distance)
+      const totalCostsAud = calc.costsAud + maintenanceAud + otherCostsAud;
+      const profitAud = calc.profitAud - maintenanceAud - otherCostsAud;
+      const lossAud = profitAud < 0 ? Math.abs(profitAud) : 0;
       const marginPct =
         calc.netAud > 0 ? (profitAud / calc.netAud) * 100 : null;
       const idlePct = Math.max(0, Math.min(100, (1 - busyMs / windowMs) * 100));
+      const flaggedLoss = profitAud < 0;
       const flaggedLowMargin = marginPct != null && marginPct < MARGIN_FLAG_PCT;
       const flaggedHighIdle = idlePct > IDLE_FLAG_PCT;
+
+      const costPerKmAud = distanceKm > 0 ? round2(totalCostsAud / distanceKm) : null;
+      const fuelLitersPer100Km =
+        distanceKm > 0 && fuelLiters > 0 ? round2((fuelLiters / distanceKm) * 100) : null;
 
       rows.push({
         vehicleId: v.id,
@@ -208,19 +229,32 @@ export class FleetProfitService {
         tollsAud: round2(tollsAud),
         maintenanceAud: round2(maintenanceAud + maintRate * distanceKm),
         depreciationAud: round2(depreciationAud),
+        otherCostsAud: round2(otherCostsAud),
+        totalCostsAud: round2(totalCostsAud),
         distanceKm: round2(distanceKm),
+        fuelLiters: round2(fuelLiters),
+        costPerKmAud,
+        fuelLitersPer100Km,
         profitAud: round2(profitAud),
+        lossAud: round2(lossAud),
         marginPct: marginPct == null ? null : round2(marginPct),
         idlePct: round2(idlePct),
+        flaggedLoss,
         flaggedLowMargin,
         flaggedHighIdle,
         maintenanceCause: v.maintenanceCause,
       });
     }
 
-    const flaggedCount = rows.filter((r) => r.flaggedLowMargin || r.flaggedHighIdle).length;
+    const flaggedCount = rows.filter(
+      (r) => r.flaggedLoss || r.flaggedLowMargin || r.flaggedHighIdle,
+    ).length;
+    const profitableVehicleCount = rows.filter((r) => r.profitAud > 0).length;
+    const lossVehicleCount = rows.filter((r) => r.profitAud < 0).length;
     const totalRevenueNetAud = round2(rows.reduce((s, r) => s + r.revenueNetAud, 0));
+    const totalCostsAud = round2(rows.reduce((s, r) => s + r.totalCostsAud, 0));
     const totalProfitAud = round2(rows.reduce((s, r) => s + r.profitAud, 0));
+    const totalLossAud = round2(rows.reduce((s, r) => s + r.lossAud, 0));
     const avgUtilisationPct =
       rows.length === 0
         ? 0
@@ -233,8 +267,12 @@ export class FleetProfitService {
       summary: {
         vehicleCount: rows.length,
         flaggedCount,
+        profitableVehicleCount,
+        lossVehicleCount,
         totalRevenueNetAud,
+        totalCostsAud,
         totalProfitAud,
+        totalLossAud,
         avgUtilisationPct,
       },
       vehicles: rows,
